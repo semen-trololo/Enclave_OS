@@ -1,6 +1,4 @@
 # Компиляторы
-# Если ты успешно собрал i686-elf-gcc (Путь Б), оставь как есть.
-# Если используешь системный (Путь А), замени на: i686-linux-gnu-gcc
 CC = i686-linux-gnu-gcc
 AS = nasm
 
@@ -8,27 +6,26 @@ AS = nasm
 BUILD_DIR = build
 
 # Флаги компиляции (Обезвреживание Kali/Debian)
-# -fno-pie -fno-pic: Запрещаем генерацию позиционно-независимого кода (критично для ядра!)
-# -fno-stack-protector: Отключаем stack canaries, чтобы не требовать __stack_chk_fail из glibc
-# -std=gnu99: Включаем GNU-расширения для атрибутов и inline assembly
 CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Iinclude -fno-pie -fno-pic -fno-stack-protector
 
 # Флаги ассемблера
 ASFLAGS = -f elf32
 
 # Флаги линковки
-# -no-pie: Запрещаем линкеру создавать PIE-исполняемый файл
-# -lgcc: Линкуем libgcc для встроенных функций (деление 64-битных чисел и т.д.)
 LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
 
-# Автоматический поиск всех исходников в корне
+## Автоматический поиск всех исходников
 C_SOURCES = $(wildcard *.c)
 ASM_SOURCES = $(wildcard *.asm)
 
-# Генерация путей к объектным файлам внутри папки build/
+# Генерация путей к объектным файлам
 C_OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 ASM_OBJS = $(patsubst %.asm,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
-OBJ = $(C_OBJS) $(ASM_OBJS)
+
+# КРИТИЧЕСКИ ВАЖНО: boot.o должен быть ПЕРВЫМ!
+# GRUB ищет Multiboot header в первых 8 КБ файла. Если boot.o будет в конце,
+# header окажется за пределами 8 КБ, и GRUB не загрузит ядро.
+OBJ = $(BUILD_DIR)/boot.o $(filter-out $(BUILD_DIR)/boot.o,$(C_OBJS) $(ASM_OBJS))
 
 # Финальный бинарник
 TARGET = $(BUILD_DIR)/metal_os.bin
@@ -56,8 +53,16 @@ $(BUILD_DIR):
 clean:
 	rm -rf $(BUILD_DIR)
 
-# Запуск в QEMU
-run: $(TARGET)
-	qemu-system-i386 -kernel $(TARGET) -m 512M -vga std -serial stdio
+# Создание ISO образа (сначала собирает TARGET, потом запускает скрипт)
+iso: $(TARGET)
+	@./build_iso.sh
 
-.PHONY: all clean run
+# Запуск через ISO (GRUB)
+run: iso
+	qemu-system-i386 -cdrom build/metal_os.iso -m 512M 
+
+# Запуск через -kernel (быстрая отладка, может не работать с Higher Half)
+run_kernel: $(TARGET)
+	qemu-system-i386 -kernel $(TARGET) -m 512M -d int,cpu_reset -no-reboot
+	
+.PHONY: all clean run iso run_kernel

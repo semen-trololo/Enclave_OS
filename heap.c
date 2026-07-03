@@ -3,6 +3,7 @@
 #include "paging.h"
 #include "klib.h"
 #include "vga.h"
+#include "serial.h"
 
 #define HEAP_START 0xD0000000
 #define HEAP_SIZE  (32 * 1024 * 1024) // 32 MB
@@ -54,12 +55,13 @@ static int find_free(int node, int current_level, int target_level) {
 
 void heap_init(void) {
     k_printf("[HEAP] Allocating %d pages for Kernel Heap...\n", HEAP_PAGES);
-    
+    serial_print("[SERIAL] Allocating  pages for Kernel Heap...\n");
     // 1. Pre-allocation: запрашиваем физические страницы и мапим их в виртуальный пул
     for (uint32_t i = 0; i < HEAP_PAGES; i++) {
         uint32_t phys = pmm_alloc_page();
         if (phys == 0) {
             k_printf("[HEAP] FATAL: Out of physical memory during heap init!\n");
+            serial_print("[SERIAL] FATAL: Out of physical memory during heap init!...\n");
             return;
         }
         vmm_map_page(HEAP_START + i * 4096, phys, PAGE_PRESENT | PAGE_WRITE);
@@ -70,6 +72,7 @@ void heap_init(void) {
     tree[1] = NODE_FREE; // Корень (весь пул 4 МБ) изначально свободен
     
     k_printf("[HEAP] Initialized 4 MB Virtual Pool at 0x%x\n", HEAP_START);
+    serial_print("[SERIAL] Initialized 4 MB Virtual Pool ...\n");
 }
 
 void* kmalloc(size_t size) {

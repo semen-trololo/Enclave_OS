@@ -36,4 +36,7 @@ typedef struct {
 // Возвращает указатель на массив E820 и его размер
 const e820_entry_t* pmm_get_memory_map(uint32_t* count);
 
+// [НОВОЕ] Вывод карты E820 в консоль для диагностики
+void pmm_dump_e820(void);
+
 #endif // PMM_H
