@@ -17,20 +17,30 @@ static syscall_func_t syscall_table[MAX_SYSCALLS];
 // Реализации системных вызовов
 // ========================================================================
 
-// sys_exit: завершение процесса
-// Аргумент: EBX = код выхода
+// sys_exit: завершение процесса и возврат управления ядру
 static int sys_exit(struct regs* r) {
     uint32_t exit_code = r->ebx;
-    k_printf("\n [SYSCALL] sys_exit called with code %u. Halting.\n", exit_code);
+    k_printf("\n [SYSCALL] sys_exit called with code %u. Returning to kernel.\n", exit_code);
 
-    // В реальной ОС здесь был бы вызов планировщика для уничтожения процесса
-    cli();
+    // КРИТИЧЕСКИ ВАЖНО: Включаем прерывания (sti)!
+    // При входе в прерывание CPU автоматически сбрасывает IF (делает cli).
+    // Если мы не включим их обратно, hlt в k_getchar() зависнет навсегда.
+    __asm__ volatile("sti");
+
+    // Запускаем Shell прямо здесь, в контексте sys_exit.
+    // Мы уже в Ring 0, на безопасном стеке ядра (переключенном через TSS при int 0x80).
+    // Это временное, но абсолютно рабочее решение до Дня 7 (Планировщик), 
+    // где мы будем делать правильный context switch и fork/exec.
+    extern void shell_run(void);
+    shell_run();
+
+    // Fallback (никогда не выполнится, так как shell_run - бесконечный цикл)
     while(1) {
         __asm__ volatile("hlt");
     }
     return 0;
 }
-
+    
 // sys_write: вывод строки
 // Аргументы: EBX = fd, ECX = const char* buf, EDX = size_t count
 static int sys_write(struct regs* r) {

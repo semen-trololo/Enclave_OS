@@ -7,7 +7,7 @@ BUILD_DIR = build
 
 # Флаги компиляции (Обезвреживание Kali/Debian)
 CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Iinclude -fno-pie -fno-pic -fno-stack-protector
-
+CFLAGS += -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mincoming-stack-boundary=2
 # Флаги ассемблера
 ASFLAGS = -f elf32
 
@@ -59,7 +59,7 @@ iso: $(TARGET)
 
 # Запуск через ISO (GRUB)
 run: iso
-	qemu-system-i386 -cdrom build/metal_os.iso -m 512M 
+	qemu-system-i386 -cdrom build/metal_os.iso -m 512M -d int,cpu_reset
 
 # Запуск через -kernel (быстрая отладка, может не работать с Higher Half)
 run_kernel: $(TARGET)
