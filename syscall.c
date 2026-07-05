@@ -68,7 +68,8 @@ static int sys_write(struct regs* r) {
 // sys_yield: добровольная отдача кванта времени
 static int sys_yield(struct regs* r) {
     (void)r;
-    // Пока нет планировщика, просто возвращаем управление
+    extern void schedule(void);
+    schedule(); // Добровольно отдаём CPU следующей задаче
     return 0;
 }
 

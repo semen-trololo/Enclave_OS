@@ -77,14 +77,19 @@ void isr_handler(struct regs* r) {
 }
 
 // Вызывается из ASM для IRQ (с EOI контроллеру)
+// Вызывается из ASM для IRQ (с EOI контроллеру)
 void irq_handler(struct regs* r) {
-    // IRQ 0-15 маппятся на INT 32-47
     int irq_num = r->int_no - 32;
     
-    // Если обработчик зарегистрирован - вызываем
+    // ✅ СРАЗУ шлём EOI в контроллер! Чтобы PIC мог принимать новые прерывания
+    extern void outb(uint16_t, uint8_t);
+    if (irq_num >= 8) { outb(0xA0, 0x20); }
+    outb(0x20, 0x20);
+
     if (irq_handlers[irq_num]) {
         irq_handlers[irq_num](r);
     }
+
 
     // Отправляем End-Of-Interrupt (EOI) контроллеру PIC
     // Это сигнал PIC'у, что мы закончили обработку и можно принимать новые IRQ

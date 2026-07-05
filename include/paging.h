@@ -2,6 +2,7 @@
 #define PAGING_H
 
 #include <stdint.h>
+#include "idt.h"
 
 // Флаги страниц x86
 #define PAGE_PRESENT  0x1
