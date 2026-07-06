@@ -31,7 +31,8 @@ void thread_a(void) {
         k_print("A"); // Чтобы было видно на экране!
         
         // Небольшая загрузка CPU
-        for(volatile int i = 0; i < 10000000; i++); 
+        for(volatile int i = 0; i < 10000000; i++);
+        //task_yield();
     }
 }
 
@@ -42,6 +43,7 @@ void thread_b(void) {
         
         // Небольшая загрузка CPU
         for(volatile int i = 0; i < 10000000; i++);
+        //task_yield();
     }
 }
 
@@ -171,8 +173,8 @@ void kernel_main(void) {
     k_print("\n System ready. Spawning parallel tasks...\n");
 
     // Создаем два потока! Они встанут в очередь Ready.
-    //task_create("Task_A", thread_a);
-    //task_create("Task_B", thread_b);
+    task_create("Task_A", thread_a);
+    task_create("Task_B", thread_b);
 
     shell_run();
 }

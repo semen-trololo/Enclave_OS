@@ -76,28 +76,20 @@ void isr_handler(struct regs* r) {
     }
 }
 
-// Вызывается из ASM для IRQ (с EOI контроллеру)
-// Вызывается из ASM для IRQ (с EOI контроллеру)
 void irq_handler(struct regs* r) {
     int irq_num = r->int_no - 32;
     
-    // ✅ СРАЗУ шлём EOI в контроллер! Чтобы PIC мог принимать новые прерывания
-    extern void outb(uint16_t, uint8_t);
-    if (irq_num >= 8) { outb(0xA0, 0x20); }
-    outb(0x20, 0x20);
-
-    if (irq_handlers[irq_num]) {
-        irq_handlers[irq_num](r);
-    }
-
-
-    // Отправляем End-Of-Interrupt (EOI) контроллеру PIC
-    // Это сигнал PIC'у, что мы закончили обработку и можно принимать новые IRQ
-    extern void outb(uint16_t, uint8_t);
-    
-    // Если IRQ пришёл от Slave PIC (IRQ 8-15), шлём EOI и ему, и Master'у
-    if (irq_num >= 8) {
+    // ✅ ИСПРАВЛЕНИЕ: Отправляем EOI ТОЛЬКО ОДИН РАЗ и ДО вызова обработчика.
+    // Это гарантирует, что PIC не заблокируется, если schedule() переключит задачу.
+    if (irq_num >= 8) { 
         outb(0xA0, 0x20);  // Slave PIC EOI
     }
     outb(0x20, 0x20);      // Master PIC EOI
+
+    // Вызов C-обработчика (здесь может сработать Preemptive Scheduling!)
+    if (irq_handlers[irq_num]) {
+        irq_handlers[irq_num](r);
+    }
+    
+    // ❌ ВТОРОЙ БЛОК EOI УДАЛЕН, ОН БОЛЬШЕ НЕ НУЖЕН
 }
