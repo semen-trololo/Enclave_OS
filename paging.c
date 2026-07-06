@@ -162,39 +162,74 @@ void paging_init(void) {
     serial_print("[VMM] paging_init: CR3 reloaded. Paging active.\n");
 }
 
-void vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
+// ============================================================================
+// МАППИНГ СТРАНИЦЫ В ПРОИЗВОЛЬНЫЙ PAGE DIRECTORY
+// ============================================================================
+void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t dir_index = virt >> 22;
     uint32_t table_index = (virt >> 12) & 0x3FF;
 
-    uint32_t pde = boot_page_directory[dir_index];
+    uint32_t pde = pd_virt[dir_index];
 
-    // 🛡️ КРИТИЧЕСКАЯ ЗАЩИТА: Детектим 4MB страницы от boot.asm
-    if (pde & PAGE_SIZE_4MB) {
+    // 🛡️ КРИТИЧЕСКАЯ ЗАЩИТА: Детектим 4MB страницы
+    if (pde & 0x80) { // PAGE_SIZE_4MB
         serial_print("[VMM] FATAL: 4MB Page detected in PDE!\n");
-        k_printf("PDE index: %d, PDE: 0x%x\n", dir_index, pde);
         while(1) __asm__("hlt"); 
     }
 
     if (!(pde & PAGE_PRESENT)) {
         uint32_t new_pt_phys = pmm_alloc_page();
         if (new_pt_phys == 0) {
-            serial_print("[VMM] OOM in vmm_map_page!\n");
+            serial_print("[VMM] OOM in vmm_map_page_in_pd!\n");
             return; 
         }
         
         k_memset((void*)PHYS_TO_VIRT(new_pt_phys), 0, 4096); 
         
-        boot_page_directory[dir_index] = new_pt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        // Записываем физический адрес новой PT в указанный PD
+        pd_virt[dir_index] = new_pt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
         
-        uint32_t cr3;
-        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-        __asm__ volatile("mov %0, %%cr3" : : "r"(cr3));
+        // Сбрасываем TLB для этой записи (инвалидация)
+        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     }
 
-    uint32_t pt_phys = boot_page_directory[dir_index] & 0xFFFFF000; 
+    uint32_t pt_phys = pd_virt[dir_index] & 0xFFFFF000; 
     uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys); 
     
     pt[table_index] = phys | flags;
 
+    // Инвалидация TLB для конкретного адреса
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+}
+
+// ============================================================================
+// СОЗДАНИЕ НОВОГО АДРЕСНОГО ПРОСТРАНСТВА (ДЕНЬ 7.5)
+// ============================================================================
+uint32_t* vmm_create_address_space(void) {
+    // 1. Выделяем физическую страницу под новый Page Directory
+    uint32_t phys_pd = pmm_alloc_page();
+    if (phys_pd == 0) return 0;
+    
+    // 2. Получаем виртуальный адрес для манипуляций из C-кода
+    uint32_t* virt_pd = (uint32_t*)PHYS_TO_VIRT(phys_pd);
+    
+    // 3. Очищаем новый PD (все User Space страницы unmapped)
+    k_memset(virt_pd, 0, 4096);
+    
+    // 4. КЛОНИРОВАНИЕ KERNEL SPACE (Индексы 768-1023)
+    // Это обеспечивает "общую крышу": код ядра, Direct Map и фреймбуфер 
+    // будут доступны новой задаче по тем же виртуальным адресам.
+    for (int i = 768; i < 1024; i++) {
+        virt_pd[i] = boot_page_directory[i];
+    }
+    
+    serial_print("[VMM] Created new Address Space (PD cloned).\n");
+    return virt_pd;
+}
+
+// ============================================================================
+// ЯВНАЯ СМЕНА CR3
+// ============================================================================
+void vmm_switch_pdir(uint32_t phys_pd) {
+    __asm__ volatile("mov %0, %%cr3" : : "r"(phys_pd) : "memory");
 }

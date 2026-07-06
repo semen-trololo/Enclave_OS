@@ -10,15 +10,17 @@ typedef enum {
     TASK_DEAD
 } task_state_t;
 
-// Process Control Block (PCB)
 typedef struct task {
     uint32_t pid;
     task_state_t state;
-    uint32_t esp;             // Сохраненный указатель стека (для switch_context)
-    uint32_t kernel_stack;    // Физический адрес базы выделенной страницы стека
-    char name[32];
+    uint32_t esp;             // Сохраненный указатель стека
+    uint32_t kernel_stack;    // Физический адрес базы стека ядра
+    
+    // ✅ НОВЫЕ ПОЛЯ ДЛЯ ДНЯ 7.5
+    uint32_t* pdir_virt;      // Виртуальный адрес Page Directory (для C-кода)
+    uint32_t cr3;             // Физический адрес Page Directory (для CR3)
 
-    // Указатели для кольцевого двусвязного списка
+    char name[32];
     struct task* next;
     struct task* prev;
 } task_t;
