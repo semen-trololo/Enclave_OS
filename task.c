@@ -166,8 +166,14 @@ task_t* task_create(const char* name, void (*entry_point)(void)) {
     *(--stack_top) = 0; 
     *(--stack_top) = 0; 
     new_task->esp = (uint32_t)stack_top;
+// Обнуляем таблицу FD (защита от мусора в памяти)
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        new_task->fd_table[i] = 0;
+    }
 
-    task_queue_add(new_task);
+// Инициализируем стандартные потоки (stdin, stdout, stderr)
+// Эта функция будет жить в vfs.c, но вызываться из task.c
+    task_init_fds(new_task); 
     serial_print("[TASK] Created new task with isolated memory: ");
     serial_print(name); serial_print("\n");
 
@@ -197,6 +203,17 @@ void task_yield(void) { schedule(); }
 
 void task_exit(void) {
     fpu_release_ownership(current_task);
+    // 🆕 ОЧИСТКА VFS РЕСУРСОВ (ДЕНЬ 8.1)
+    // Проходим по всем FD процесса и принудительно закрываем их.
+    // sys_close сам позаботится о хуках драйверов, ref_count и kfree().
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        if (current_task->fd_table[i] != 0) {
+            sys_close(i); 
+            // sys_close обнулит указатель в fd_table, но для надежности:
+            current_task->fd_table[i] = 0; 
+        }
+    }
+
     current_task->state = TASK_DEAD;
     
     if (current_task->next != current_task) {

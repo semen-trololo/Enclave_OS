@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 
+// Forward declaration для избежания циклических зависимостей с vfs.h
+// Мы не инклюдим vfs.h сюда, чтобы ядро VFS и ядро процессов были слабосвязанными.
+struct open_file;
+
+// Ограничение на количество открытых файлов на процесс.
+// Должно жестко синхронизироваться с VFS_MAX_OPEN_FILES в vfs.h
+#define TASK_MAX_OPEN_FILES 16
+
 typedef enum {
     TASK_READY,
     TASK_RUNNING,
@@ -25,6 +33,12 @@ typedef struct task {
     
     uint8_t fpu_initialized;
 
+    // 🆕 VFS ИНТЕГРАЦИЯ (ДЕНЬ 8.1):
+    // Таблица файловых дескрипторов процесса.
+    // Индекс массива = FD (0=stdin, 1=stdout, 2=stderr...).
+    // Хранит указатели на open_file_t, которые содержат курсор (offset) и vfs_node_t.
+    struct open_file* fd_table[TASK_MAX_OPEN_FILES];
+
     char name[32];
     struct task* next;
     struct task* prev;
@@ -36,7 +50,10 @@ void task_yield(void);
 void task_exit(void);
 void schedule(void);
 void fpu_release_ownership(task_t* task);
-// Вывод списка всех задач в консоль (для команды 'ps' в Shell)
 void task_print_list(void);
+
+// 🆕 VFS API для менеджера процессов
+// Инициализирует fd_table[0,1,2] стандартными потоками (tty/serial)
+void task_init_fds(task_t* task);
 
 #endif
