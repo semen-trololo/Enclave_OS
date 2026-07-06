@@ -1,11 +1,13 @@
 #include "framebuffer.h"
 #include "klib.h"
+#include "heap.h"
+#include "serial.h"
 #include <stdarg.h>
 
 // ============================================================================
-// ВСТРОЕННЫЙ ШРИФТ 8x16 (ASCII 32-126, 95 глифов)
+// FALLBACK ШРИФТ 8x16 (ASCII 32-126, 95 глифов)
 // ============================================================================
-static const uint8_t font_8x16[95][16] = {
+static const uint8_t fallback_font[95][16] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // Space
     {0x00,0x00,0x18,0x3C,0x3C,0x3C,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00}, // !
     {0x00,0x00,0x66,0x66,0x66,0x24,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // "
@@ -109,17 +111,68 @@ static const uint8_t font_8x16[95][16] = {
 static uint32_t* fb_addr = 0;
 static uint32_t fb_width = 0;
 static uint32_t fb_height = 0;
-static uint32_t fb_pitch = 0;
+static uint32_t fb_pitch = 0; // В словах (uint32_t)
 static int fb_ready = 0;
 
 static uint32_t cursor_x = 0;
 static uint32_t cursor_y = 0;
 
-#define FONT_WIDTH  8
-#define FONT_HEIGHT 16
+static uint32_t* back_buffer = 0;
+static int double_buffering_enabled = 0;
+
+typedef struct {
+    uint32_t min_x, min_y;
+    uint32_t max_x, max_y;
+} dirty_rect_t;
+static dirty_rect_t dirty_rect;
+
+static uint32_t current_fg = COLOR_LIGHT_GREY;
+static uint32_t current_bg = COLOR_BLACK;
 
 // ============================================================================
-// ИНИЦИАЛИЗАЦИЯ И ГЕТТЕРЫ
+// PSF1 FONT STRUCTURES
+// ============================================================================
+typedef struct {
+    uint16_t magic;
+    uint8_t  mode;
+    uint8_t  charsize;
+} __attribute__((packed)) psf1_header_t;
+
+#define PSF1_MAGIC 0x0436
+#define PSF1_MODE_512 0x01
+#define PSF1_MODE_UNICODE 0x02
+
+static const uint8_t* font_glyphs = 0;
+static const uint8_t* font_unicode_table = 0;
+static uint32_t font_glyph_count = 0;
+static uint32_t font_width = 8;
+static uint32_t font_height = 16;
+static int font_initialized = 0;
+
+// ============================================================================
+// DIRTY RECT MATH
+// ============================================================================
+static inline void reset_dirty(void) {
+    dirty_rect.min_x = fb_width;
+    dirty_rect.min_y = fb_height;
+    dirty_rect.max_x = 0;
+    dirty_rect.max_y = 0;
+}
+
+static inline int is_dirty(void) {
+    return (dirty_rect.min_x < dirty_rect.max_x) && (dirty_rect.min_y < dirty_rect.max_y);
+}
+
+static inline void mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!double_buffering_enabled || w == 0 || h == 0) return;
+    if (x < dirty_rect.min_x) dirty_rect.min_x = x;
+    if (y < dirty_rect.min_y) dirty_rect.min_y = y;
+    if (x + w > dirty_rect.max_x) dirty_rect.max_x = x + w;
+    if (y + h > dirty_rect.max_y) dirty_rect.max_y = y + h;
+}
+
+// ============================================================================
+// INIT & GETTERS
 // ============================================================================
 void fb_init(framebuffer_info_t* info) {
     if (!info || info->address == 0) {
@@ -130,40 +183,227 @@ void fb_init(framebuffer_info_t* info) {
     fb_addr   = (uint32_t*)info->address;
     fb_width  = info->width;
     fb_height = info->height;
-    fb_pitch  = info->pitch / 4;
+    fb_pitch  = info->pitch / 4; 
     fb_ready  = 1;
 
     cursor_x = 0;
     cursor_y = 0;
+    reset_dirty();
 }
 
 int fb_is_available(void) { return fb_ready; }
 uint32_t fb_get_width(void) { return fb_width; }
 uint32_t fb_get_height(void) { return fb_height; }
 uint32_t fb_get_pitch(void) { return fb_pitch * 4; }
-uint32_t fb_get_cols(void) { return fb_width / FONT_WIDTH; }
-uint32_t fb_get_rows(void) { return fb_height / FONT_HEIGHT; }
+uint32_t fb_get_cols(void) { return fb_width / font_width; }
+uint32_t fb_get_rows(void) { return fb_height / font_height; }
+uint32_t fb_get_font_width(void) { return font_width; }
+uint32_t fb_get_font_height(void) { return font_height; }
 
 void fb_set_cursor(uint32_t x, uint32_t y) {
     if (x < fb_get_cols()) cursor_x = x;
     if (y < fb_get_rows()) cursor_y = y;
 }
 
+void fb_set_color(uint32_t fg, uint32_t bg) {
+    current_fg = fg;
+    current_bg = bg;
+}
+
 // ============================================================================
-// ПРИМИТИВЫ РИСОВАНИЯ (С ИСПОЛЬЗОВАНИЕМ VOLATILE!)
+// DOUBLE BUFFERING
+// ============================================================================
+void fb_enable_double_buffering(void) {
+    if (!fb_ready || double_buffering_enabled) return;
+    
+    uint32_t buffer_size = fb_height * fb_pitch * sizeof(uint32_t);
+    back_buffer = (uint32_t*)kmalloc(buffer_size);
+    
+    if (back_buffer) {
+        double_buffering_enabled = 1;
+        reset_dirty();
+        
+        volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
+        for (uint32_t i = 0; i < fb_height * fb_pitch; i++) {
+            back_buffer[i] = fb[i];
+        }
+        serial_print("[FB] Double buffering enabled.\n");
+    } else {
+        serial_print("[FB] ERROR: Failed to allocate back buffer!\n");
+    }
+}
+
+void fb_flush(void) {
+    if (!fb_ready || !double_buffering_enabled) return;
+    if (!is_dirty()) return;
+
+    if (dirty_rect.max_x > fb_width) dirty_rect.max_x = fb_width;
+    if (dirty_rect.max_y > fb_height) dirty_rect.max_y = fb_height;
+
+    volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
+    uint32_t width = dirty_rect.max_x - dirty_rect.min_x;
+    
+    for (uint32_t y = dirty_rect.min_y; y < dirty_rect.max_y; y++) {
+        uint32_t* src = back_buffer + y * fb_pitch + dirty_rect.min_x;
+        volatile uint32_t* dst = fb + y * fb_pitch + dirty_rect.min_x;
+        
+        for (uint32_t x = 0; x < width; x++) {
+            dst[x] = src[x];
+        }
+    }
+
+    reset_dirty();
+}
+
+// ============================================================================
+// PSF1 FONT LOGIC
+// ============================================================================
+void fb_init_font(const void* font_data, uint32_t font_size) {
+    // ✅ ИСПРАВЛЕНИЕ БАГА 2:
+    // Устанавливаем fallback_font как дефолтный ДО проверки PSF1
+    // Это гарантирует, что вывод работает даже до загрузки PSF1 шрифта
+    font_glyphs = fallback_font[0]; // Указатель на первый глиф fallback
+    font_glyph_count = 95; // ASCII 32-126
+    font_height = 16;
+    font_width = 8;
+    font_initialized = 1; // Включаем режим fallback
+    font_unicode_table = 0; // Нет Unicode таблицы в fallback
+    
+    if (!font_data || font_size < sizeof(psf1_header_t)) {
+        serial_print("[FB] Font init failed, using fallback.\n");
+        return;
+    }
+
+    const psf1_header_t* header = (const psf1_header_t*)font_data;
+    
+    if (header->magic != PSF1_MAGIC) {
+        serial_print("[FB] Invalid PSF1 magic, using fallback.\n");
+        return;
+    }
+
+    // Если PSF1 валиден, перезаписываем fallback на реальный шрифт
+    font_glyph_count = (header->mode & PSF1_MODE_512) ? 512 : 256;
+    font_height = header->charsize;
+    font_width = 8; 
+
+    font_glyphs = (const uint8_t*)font_data + sizeof(psf1_header_t);
+    
+    if (header->mode & PSF1_MODE_UNICODE) {
+        font_unicode_table = font_glyphs + (font_glyph_count * font_height);
+        serial_print("[FB] PSF1 font loaded with Unicode table.\n");
+        // === ДИАГНОСТИКА: Читаем первые 40 байт Unicode таблицы ===
+        serial_print("[FB] Unicode Table Dump (first 40 bytes): ");
+        for (int i = 0; i < 40; i++) {
+            char buf[8];
+            k_uitoa(font_unicode_table[i], buf, 16);
+            serial_print(buf);
+            serial_print(" ");
+        }
+        serial_print("\n");
+    }
+    else {
+        font_unicode_table = 0;
+        serial_print("[FB] PSF1 font loaded (no Unicode).\n");
+    }
+}
+
+// ============================================================================
+// UNICODE LOOKUP (UCS-2 / UTF-16LE Aware)
+// ============================================================================
+static int find_glyph_index(uint32_t unicode_char) {
+    if (!font_initialized || !font_unicode_table) return -1;
+    
+    // ✅ ИСПРАВЛЕНО: Таблица в этом шрифте закодирована в UCS-2 (UTF-16LE).
+    // Каждый символ занимает 2 байта, а маркером конца глифа служит 0xFFFF.
+    // Благодаря Little-Endian архитектуре x86, мы можем читать uint16_t напрямую!
+    const uint16_t* ptr = (const uint16_t*)font_unicode_table;
+    
+    for (uint32_t glyph_index = 0; glyph_index < font_glyph_count; glyph_index++) {
+        // Читаем 16-битные codepoints до маркера конца глифа (0xFFFF)
+        while (*ptr != 0xFFFF) {
+            uint16_t char_code = *ptr++;
+            
+            // Пропускаем BOM (0xFFFE) или нулевые символы, если они попали в таблицу
+            if (char_code == 0xFFFE || char_code == 0x0000) continue; 
+            
+            if ((uint32_t)char_code == unicode_char) {
+                return glyph_index; // Совпадение найдено!
+            }
+        }
+        
+        // Пропускаем маркер 0xFFFF и переходим к следующему глифу
+        ptr++; 
+    }
+    
+    return -1; // Не найдено
+}
+
+// ============================================================================
+// GLYPH RENDERING
+// ============================================================================
+static void render_glyph(uint32_t glyph_index, uint32_t px, uint32_t py, uint32_t fg, uint32_t bg) {
+    if (!fb_ready) return;
+    
+    const uint8_t* glyph;
+    if (font_initialized && font_unicode_table && glyph_index < font_glyph_count) {
+        // Используем PSF1 шрифт с Unicode таблицей
+        glyph = font_glyphs + (glyph_index * font_height);
+    } else {
+        // ✅ ИСПРАВЛЕНИЕ: Используем fallback_font напрямую с ASCII кодом
+        // fallback_font содержит 95 глифов для ASCII 32-126
+        if (glyph_index >= 32 && glyph_index <= 126) {
+            glyph = fallback_font[glyph_index - 32];
+        } else {
+            glyph = fallback_font['?' - 32];
+        }
+    }
+
+    if (px + font_width > fb_width || py + font_height > fb_height) return;
+
+    if (double_buffering_enabled) {
+        for (uint32_t row = 0; row < font_height; row++) {
+            uint8_t bits = glyph[row];
+            uint32_t* dst = back_buffer + (py + row) * fb_pitch + px;
+            for (uint32_t col = 0; col < font_width; col++) {
+                dst[col] = (bits & (1 << (7 - col))) ? fg : bg;
+            }
+        }
+        mark_dirty(px, py, font_width, font_height);
+    } else {
+        volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
+        for (uint32_t row = 0; row < font_height; row++) {
+            uint8_t bits = glyph[row];
+            for (uint32_t col = 0; col < font_width; col++) {
+                uint32_t color = (bits & (1 << (7 - col))) ? fg : bg;
+                fb[(py + row) * fb_pitch + (px + col)] = color;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// DRAWING PRIMITIVES
 // ============================================================================
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     if (!fb_ready || x >= fb_width || y >= fb_height) return;
-    // volatile запрещает компилятору оптимизировать запись в MMIO
-    ((volatile uint32_t*)fb_addr)[y * fb_pitch + x] = color;
+    if (double_buffering_enabled) {
+        back_buffer[y * fb_pitch + x] = color;
+        mark_dirty(x, y, 1, 1);
+    } else {
+        ((volatile uint32_t*)fb_addr)[y * fb_pitch + x] = color;
+    }
 }
 
 void fb_clear(uint32_t color) {
     if (!fb_ready) return;
-    volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
     uint32_t total_pixels = fb_height * fb_pitch;
-    for (uint32_t i = 0; i < total_pixels; i++) {
-        fb[i] = color;
+    
+    if (double_buffering_enabled) {
+        for (uint32_t i = 0; i < total_pixels; i++) back_buffer[i] = color;
+        mark_dirty(0, 0, fb_width, fb_height);
+    } else {
+        volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
+        for (uint32_t i = 0; i < total_pixels; i++) fb[i] = color;
     }
     cursor_x = 0;
     cursor_y = 0;
@@ -171,130 +411,269 @@ void fb_clear(uint32_t color) {
 
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
     if (!fb_ready) return;
-    volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
-    for (uint32_t row = y; row < y + h && row < fb_height; row++) {
-        for (uint32_t col = x; col < x + w && col < fb_width; col++) {
-            fb[row * fb_pitch + col] = color;
+    if (x >= fb_width || y >= fb_height) return;
+    if (x + w > fb_width) w = fb_width - x;
+    if (y + h > fb_height) h = fb_height - y;
+
+    if (double_buffering_enabled) {
+        for (uint32_t row = y; row < y + h; row++) {
+            uint32_t* dst = back_buffer + row * fb_pitch + x;
+            for (uint32_t col = 0; col < w; col++) dst[col] = color;
+        }
+        mark_dirty(x, y, w, h);
+    } else {
+        volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
+        for (uint32_t row = y; row < y + h; row++) {
+            for (uint32_t col = x; col < x + w; col++) {
+                fb[row * fb_pitch + col] = color;
+            }
         }
     }
 }
 
 void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
     if (!fb_ready) return;
-    for (uint32_t col = x; col < x + w; col++) {
-        fb_put_pixel(col, y, color);
-        fb_put_pixel(col, y + h - 1, color);
-    }
-    for (uint32_t row = y; row < y + h; row++) {
-        fb_put_pixel(x, row, color);
-        fb_put_pixel(x + w - 1, row, color);
-    }
+    fb_fill_rect(x, y, w, 1, color);
+    fb_fill_rect(x, y + h - 1, w, 1, color);
+    fb_fill_rect(x, y + 1, 1, h - 2, color);
+    fb_fill_rect(x + w - 1, y + 1, 1, h - 2, color);
 }
 
+// ============================================================================
+// PUBLIC API (С UTF-8 State Machine)
+// ============================================================================
 void fb_put_char(char c, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg) {
-    if (!fb_ready) return;
-    if (c < 32 || c > 126) c = '?';
+    uint32_t unicode = (uint8_t)c;
+    int glyph_index = find_glyph_index(unicode);
+    if (glyph_index < 0) glyph_index = find_glyph_index('?');
+    if (glyph_index < 0) glyph_index = 0;
+    
+    render_glyph(glyph_index, x * font_width, y * font_height, fg, bg);
+}
 
-    const uint8_t* glyph = font_8x16[c - 32];
-    uint32_t px = x * FONT_WIDTH;
-    uint32_t py = y * FONT_HEIGHT;
-    volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
-
-    for (int row = 0; row < FONT_HEIGHT; row++) {
-        uint8_t bits = glyph[row];
-        for (int col = 0; col < FONT_WIDTH; col++) {
-            uint32_t color = (bits & (1 << (7 - col))) ? fg : bg;
-            if (px + col < fb_width && py + row < fb_height) {
-                fb[(py + row) * fb_pitch + (px + col)] = color;
-            }
-        }
-    }
+void fb_put_unicode_char(uint32_t unicode, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg) {
+    int glyph_index = find_glyph_index(unicode);
+    if (glyph_index < 0) glyph_index = find_glyph_index('?');
+    if (glyph_index < 0) glyph_index = 0;
+    
+    render_glyph(glyph_index, x * font_width, y * font_height, fg, bg);
 }
 
 void fb_draw_string(const char* str, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg) {
     if (!fb_ready || !str) return;
     uint32_t cx = x, cy = y;
+    
     while (*str) {
-        if (*str == '\n') { cx = x; cy++; } 
-        else if (*str == '\r') { cx = x; } 
-        else {
-            fb_put_char(*str, cx, cy, fg, bg);
+        if (*str == '\n') { 
+            cx = x; 
+            cy++; 
+            str++;
+        } else if (*str == '\r') { 
+            cx = x; 
+            str++;
+        } else {
+            uint32_t unicode = 0;
+            uint8_t byte = *str++;
+            if (byte < 0x80) {
+                unicode = byte;
+            } else if ((byte & 0xE0) == 0xC0) {
+                unicode = (byte & 0x1F) << 6;
+                unicode |= (*str++ & 0x3F);
+            } else if ((byte & 0xF0) == 0xE0) {
+                unicode = (byte & 0x0F) << 12;
+                unicode |= (*str++ & 0x3F) << 6;
+                unicode |= (*str++ & 0x3F);
+            } else {
+                unicode = '?';
+            }
+            
+            int glyph_index = find_glyph_index(unicode);
+            if (glyph_index < 0) glyph_index = find_glyph_index('?');
+            if (glyph_index < 0) glyph_index = 0;
+            
+            render_glyph(glyph_index, cx * font_width, cy * font_height, fg, bg);
             cx++;
-            if (cx * FONT_WIDTH >= fb_width) { cx = x; cy++; }
+            if (cx * font_width >= fb_width) { 
+                cx = x; 
+                cy++; 
+            }
         }
-        str++;
     }
-}
-
-// ============================================================================
-// ПОТОКОВЫЙ ВЫВОД И СКРОЛЛИНГ
-// ============================================================================
-static uint32_t current_fg = COLOR_LIGHT_GREY;
-static uint32_t current_bg = COLOR_BLACK;
-
-void fb_set_color(uint32_t fg, uint32_t bg) {
-    current_fg = fg;
-    current_bg = bg;
 }
 
 void fb_scroll_up(void) {
     if (!fb_ready) return;
-    volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
-    uint32_t font_px = FONT_HEIGHT;
+    uint32_t font_px = font_height;
     uint32_t total_lines = fb_get_rows();
     
-    for (uint32_t line = 0; line < total_lines - 1; line++) {
-        uint32_t src_y = (line + 1) * font_px;
-        uint32_t dst_y = line * font_px;
-        for (uint32_t row = 0; row < font_px; row++) {
-            volatile uint32_t* dst = &fb[(dst_y + row) * fb_pitch];
-            volatile uint32_t* src = &fb[(src_y + row) * fb_pitch];
-            for (uint32_t col = 0; col < fb_width; col++) {
-                dst[col] = src[col];
+    if (double_buffering_enabled) {
+        uint32_t src_offset = font_px * fb_pitch;
+        uint32_t words_to_copy = (total_lines - 1) * font_px * fb_pitch;
+        
+        uint32_t* src = back_buffer + src_offset;
+        uint32_t* dst = back_buffer;
+        for (uint32_t i = 0; i < words_to_copy; i++) dst[i] = src[i];
+        
+        uint32_t last_y_offset = (total_lines - 1) * font_px * fb_pitch;
+        uint32_t line_words = font_px * fb_pitch;
+        for (uint32_t i = 0; i < line_words; i++) {
+            back_buffer[last_y_offset + i] = current_bg;
+        }
+        
+        mark_dirty(0, 0, fb_width, fb_height);
+    } else {
+        volatile uint32_t* fb = (volatile uint32_t*)fb_addr;
+        for (uint32_t line = 0; line < total_lines - 1; line++) {
+            uint32_t src_y = (line + 1) * font_px;
+            uint32_t dst_y = line * font_px;
+            for (uint32_t row = 0; row < font_px; row++) {
+                volatile uint32_t* dst_row = &fb[(dst_y + row) * fb_pitch];
+                volatile uint32_t* src_row = &fb[(src_y + row) * fb_pitch];
+                for (uint32_t col = 0; col < fb_width; col++) dst_row[col] = src_row[col];
             }
         }
-    }
-    
-    uint32_t last_y = (total_lines - 1) * font_px;
-    for (uint32_t row = 0; row < font_px; row++) {
-        for (uint32_t col = 0; col < fb_width; col++) {
-            fb[(last_y + row) * fb_pitch + col] = current_bg;
+        uint32_t last_y = (total_lines - 1) * font_px;
+        for (uint32_t row = 0; row < font_px; row++) {
+            for (uint32_t col = 0; col < fb_width; col++) {
+                fb[(last_y + row) * fb_pitch + col] = current_bg;
+            }
         }
     }
 }
 
 void fb_putc(char c) {
     if (!fb_ready) return;
-    uint32_t max_cols = fb_get_cols();
-    uint32_t max_rows = fb_get_rows();
-    
-    switch (c) {
-        case '\n': cursor_x = 0; cursor_y++; break;
-        case '\r': cursor_x = 0; break;
-        case '\t':
-            cursor_x = (cursor_x + 4) & ~3;
-            if (cursor_x >= max_cols) { cursor_x = 0; cursor_y++; }
-            break;
-        case '\b':
-            if (cursor_x > 0) {
-                cursor_x--;
-                fb_put_char(' ', cursor_x, cursor_y, current_fg, current_bg);
+    uint32_t max_cols = fb_width / font_width;
+    uint32_t max_rows = fb_height / font_height;
+    uint8_t byte = (uint8_t)c;
+
+    // ========================================================================
+    // UTF-8 STATE MACHINE
+    // ========================================================================
+    static uint32_t utf8_state = 0;
+    static uint32_t utf8_codepoint = 0;
+
+    // Если мы в середине парсинга многобайтового UTF-8 символа
+    if (utf8_state > 0) {
+        if ((byte & 0xC0) == 0x80) {
+            utf8_codepoint = (utf8_codepoint << 6) | (byte & 0x3F);
+            utf8_state--;
+            
+            if (utf8_state == 0) {
+                int glyph_index;
+                if (font_initialized && font_unicode_table) {
+                    glyph_index = find_glyph_index(utf8_codepoint);
+                    if (glyph_index < 0) glyph_index = find_glyph_index('?');
+                    if (glyph_index < 0) glyph_index = '?';
+                } else {
+                    // Fallback: если шрифт не загружен, поддерживаем только базовую латиницу
+                    glyph_index = (utf8_codepoint < 128) ? (int)utf8_codepoint : '?';
+                }
+                render_glyph(glyph_index, cursor_x * font_width, cursor_y * font_height, current_fg, current_bg);
+                cursor_x++;
+                if (cursor_x >= max_cols) { cursor_x = 0; cursor_y++; }
             }
-            break;
-        default:
-            fb_put_char(c, cursor_x, cursor_y, current_fg, current_bg);
-            cursor_x++;
-            if (cursor_x >= max_cols) { cursor_x = 0; cursor_y++; }
-            break;
+            goto check_scroll;
+        } else {
+            // Ошибка последовательности, сбрасываем стейт
+            utf8_state = 0;
+        }
+    }
+
+    // ========================================================================
+    // ОБРАБОТКА ОДИНОЧНЫХ СИМВОЛОВ (ASCII И КОНТРОЛЬНЫЕ)
+    // ========================================================================
+    if (byte < 0x80) {
+        switch (byte) {
+            case '\n': 
+                cursor_x = 0; 
+                cursor_y++; 
+                break;
+            case '\r': 
+                cursor_x = 0; 
+                break;
+            case '\t':
+                cursor_x = (cursor_x + 4) & ~3; // Табуляция каждые 4 символа
+                if (cursor_x >= max_cols) { cursor_x = 0; cursor_y++; }
+                break;
+            case '\b':
+                if (cursor_x > 0) {
+                    cursor_x--;
+                    // Стираем символ пробелом
+                    render_glyph(' ', cursor_x * font_width, cursor_y * font_height, current_fg, current_bg);
+                }
+                break;
+            default:
+                {
+                    int glyph_index;
+                    if (font_initialized && font_unicode_table) {
+                        // Ищем глиф в PSF1 шрифте через Unicode таблицу
+                        glyph_index = find_glyph_index(byte);
+                        if (glyph_index < 0) glyph_index = find_glyph_index('?');
+                        if (glyph_index < 0) glyph_index = '?';
+                    } else {
+                        // ✅ ИСПРАВЛЕНИЕ БАГА 2: 
+                        // Шрифт еще не загружен. Передаем ASCII-код напрямую.
+                        // render_glyph сам возьмет нужный глиф из fallback_font.
+                        glyph_index = byte; 
+                    }
+                    render_glyph(glyph_index, cursor_x * font_width, cursor_y * font_height, current_fg, current_bg);
+                    cursor_x++;
+                    if (cursor_x >= max_cols) { cursor_x = 0; cursor_y++; }
+                }
+                break;
+        }
+    } 
+    // ========================================================================
+    // СТАРТ НОВОЙ UTF-8 ПОСЛЕДОВАТЕЛЬНОСТИ
+    // ========================================================================
+    else if ((byte & 0xE0) == 0xC0) {
+        utf8_codepoint = byte & 0x1F;
+        utf8_state = 1;
+    } else if ((byte & 0xF0) == 0xE0) {
+        utf8_codepoint = byte & 0x0F;
+        utf8_state = 2;
+    } else if ((byte & 0xF8) == 0xF0) {
+        utf8_codepoint = byte & 0x07;
+        utf8_state = 3;
+    } else {
+        // Невалидный байт
+        render_glyph('?', cursor_x * font_width, cursor_y * font_height, current_fg, current_bg);
+        cursor_x++;
+        if (cursor_x >= max_cols) { cursor_x = 0; cursor_y++; }
     }
     
+    // ========================================================================
+    // СКРОЛЛИНГ И СБРОС БУФЕРА НА ЭКРАН
+    // ========================================================================
+check_scroll:
     while (cursor_y >= max_rows) {
         fb_scroll_up();
         cursor_y--;
+    }
+
+    // ✅ ИСПРАВЛЕНИЕ БАГА 1:
+    // Принудительно сбрасываем теневой буфер на экран после КАЖДОГО символа.
+    // Это делает Shell интерактивным (символы появляются сразу при нажатии).
+    if (double_buffering_enabled) {
+        fb_flush();
     }
 }
 
 void fb_print(const char* str) {
     if (!fb_ready || !str) return;
     while (*str) fb_putc(*str++);
+}
+
+void fb_printf(uint32_t x, uint32_t y, uint32_t fg, uint32_t bg, const char* fmt, ...) {
+    char buffer[1024];
+    va_list args;
+    va_start(args, fmt);
+    
+    // Используем k_vsprintf из klib.h (предполагается, что он там есть)
+    extern int k_vsprintf(char* buf, const char* fmt, va_list args);
+    k_vsprintf(buffer, fmt, args);
+    
+    va_end(args);
+    fb_draw_string(buffer, x, y, fg, bg);
 }

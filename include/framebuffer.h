@@ -30,28 +30,39 @@ typedef struct {
 void fb_init(framebuffer_info_t* info);
 int  fb_is_available(void);
 
+// Двойная буферизация
+void fb_enable_double_buffering(void);
+void fb_flush(void);
+
+// Шрифты
+void fb_init_font(const void* font_data, uint32_t font_size);
+uint32_t fb_get_font_width(void);
+uint32_t fb_get_font_height(void);
+
 // Примитивы рисования
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void fb_clear(uint32_t color);
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
 void fb_draw_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
 
-// === НОВОЕ: Потоковый вывод (для klib) ===
+// Потоковый вывод
 void fb_set_color(uint32_t fg, uint32_t bg);
-void fb_putc(char c);               // Аналог vga_putc с курсором и скроллингом
-void fb_print(const char* str);     // Аналог k_print
+void fb_putc(char c);               
+void fb_print(const char* str);     
 void fb_set_cursor(uint32_t x, uint32_t y);
 void fb_scroll_up(void);
 
-// Позиционный вывод (для ручного позиционирования)
+// Позиционный вывод
 void fb_put_char(char c, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg);
+void fb_put_unicode_char(uint32_t unicode, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg);
 void fb_draw_string(const char* str, uint32_t x, uint32_t y, uint32_t fg, uint32_t bg);
 void fb_printf(uint32_t x, uint32_t y, uint32_t fg, uint32_t bg, const char* fmt, ...);
 
 // Информация
 uint32_t fb_get_width(void);
 uint32_t fb_get_height(void);
-uint32_t fb_get_cols(void);   // Сколько символов в ширину
-uint32_t fb_get_rows(void);   // Сколько символов в высоту
+uint32_t fb_get_pitch(void);
+uint32_t fb_get_cols(void);   
+uint32_t fb_get_rows(void);   
 
 #endif

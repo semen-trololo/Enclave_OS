@@ -326,7 +326,7 @@ void shell_run(void) {
         while (1) {
             char c = k_getchar();
             
-            if (c == 0) {
+                        if (c == 0) {
                 __asm__ volatile("hlt");
                 continue;
             }
@@ -340,14 +340,18 @@ void shell_run(void) {
                 if (pos > 0) {
                     pos--;
                     buffer[pos] = '\0';
-                    k_putchar('\b');
+                    k_putchar('\b'); // Отрисовка пробела и сдвиг курсора назад
                 }
             }
-            else if (c >= 32 && c < 127) {
-                if (pos < CMD_BUFFER_SIZE - 1) {
-                    buffer[pos++] = c;
-                    buffer[pos] = '\0';
-                    k_putchar(c);
+            else {
+                uint8_t uc = (uint8_t)c;
+                // Пропускаем управляющие символы (< 32), но пропускаем UTF-8 байты (>= 128)
+                if (uc >= 32) { 
+                    if (pos < CMD_BUFFER_SIZE - 1) {
+                        buffer[pos++] = c;
+                        buffer[pos] = '\0';
+                        k_putchar(c); // Для UTF-8 символ появится на экране только после 2-го байта
+                    }
                 }
             }
         }

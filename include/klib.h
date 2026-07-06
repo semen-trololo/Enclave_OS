@@ -3,8 +3,10 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdarg.h>
 
 // --- Строковые функции ---
+int k_vsprintf(char* buf, const char* fmt, va_list args);
 size_t k_strlen(const char* str);
 int k_strcmp(const char* s1, const char* s2);
 int k_strncmp(const char* s1, const char* s2, size_t n);

@@ -77,7 +77,77 @@ int k_memcmp(const void* s1, const void* s2, size_t n) {
     }
     return 0;
 }
+// ==========================================
+// VSPRINTF (Для fb_printf и будущих нужд)
+// ==========================================
 
+int k_vsprintf(char* buf, const char* fmt, va_list args) {
+    char* start = buf;
+    
+    while (*fmt) {
+        if (*fmt == '%') {
+            fmt++;
+            switch (*fmt) {
+                case 'd': {
+                    int val = va_arg(args, int);
+                    char tmp[16];
+                    k_itoa(val, tmp, 10);
+                    char* p = tmp;
+                    while (*p) *buf++ = *p++;
+                    break;
+                }
+                case 'u': {
+                    unsigned int val = va_arg(args, unsigned int);
+                    char tmp[16];
+                    k_uitoa(val, tmp, 10);
+                    char* p = tmp;
+                    while (*p) *buf++ = *p++;
+                    break;
+                }
+                case 'x': {
+                    unsigned int val = va_arg(args, unsigned int);
+                    *buf++ = '0';
+                    *buf++ = 'x';
+                    char tmp[16];
+                    k_uitoa(val, tmp, 16);
+                    char* p = tmp;
+                    while (*p) *buf++ = *p++;
+                    break;
+                }
+                case 'p': {
+                    void* ptr = va_arg(args, void*);
+                    *buf++ = '0';
+                    *buf++ = 'x';
+                    char tmp[16];
+                    k_uitoa((unsigned int)(uintptr_t)ptr, tmp, 16);
+                    char* p = tmp;
+                    while (*p) *buf++ = *p++;
+                    break;
+                }
+                case 's': {
+                    const char* str = va_arg(args, const char*);
+                    if (!str) str = "(null)";
+                    while (*str) *buf++ = *str++;
+                    break;
+                }
+                case 'c': {
+                    char c = (char)va_arg(args, int);
+                    *buf++ = c;
+                    break;
+                }
+                case '%': *buf++ = '%'; break;
+                case '\0': goto end;
+                default: *buf++ = '%'; *buf++ = *fmt; break;
+            }
+        } else {
+            *buf++ = *fmt;
+        }
+        fmt++;
+    }
+end:
+    *buf = '\0';
+    return buf - start;
+}
 // ==========================================
 // СТРОКИ И ВЫВОД
 // ==========================================

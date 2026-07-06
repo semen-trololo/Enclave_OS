@@ -5,10 +5,16 @@
 #include "serial.h"
 
 // ============================================================================
-// МАКРОСЫ ДЛЯ РАБОТЫ С HIGHER HALF
+// МАКРОСЫ ДЛЯ РАБОТЫ С HIGHER HALF (ИСПРАВЛЕНО ОТ UNDERFLOW)
 // ============================================================================
 #define KERNEL_VIRT_BASE 0xC0000000
-#define VIRT_TO_PHYS(addr) ((uint32_t)(addr) - KERNEL_VIRT_BASE)
+
+// Если адрес >= 0xC0000000, это Higher Half (вычитаем базу).
+// Если адрес < 0xC0000000, это уже физический адрес (секции .boot), возвращаем как есть.
+#define VIRT_TO_PHYS(addr) (((uint32_t)(addr) >= KERNEL_VIRT_BASE) ? ((uint32_t)(addr) - KERNEL_VIRT_BASE) : (uint32_t)(addr))
+
+// Физический адрес всегда превращаем в виртуальный Higher Half
+#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_VIRT_BASE)
 
 // ============================================================================
 // ГЛОБАЛЬНЫЕ ДАННЫЕ PMM
@@ -72,7 +78,7 @@ static void pmm_free_region(uint64_t base, uint64_t length) {
 // ============================================================================
 // РЕЗЕРВИРОВАНИЕ РЕГИОНА (Punching Holes - шаг 2)
 // ============================================================================
-static void pmm_reserve_region(uint64_t base, uint64_t end) {
+void pmm_reserve_region(uint64_t base, uint64_t end) {
     if (end <= base) return; 
     
     uint32_t start_page = (uint32_t)(base / PMM_PAGE_SIZE);
@@ -168,32 +174,40 @@ void pmm_init(multiboot_info_t* info) {
 }
 
 // ============================================================================
-// АЛЛОКАЦИЯ СТРАНИЦЫ (First Fit + Word-Optimized Search)
+// АЛЛОКАЦИЯ СТРАНИЦЫ (Hardware-Accelerated BSF / TZCNT)
 // ============================================================================
 uint32_t pmm_alloc_page(void) {
-    // Оптимизация: поиск по 32-битным словам вместо побайтового
     uint32_t* bitmap_words = (uint32_t*)pmm_bitmap;
     uint32_t word_count = sizeof(pmm_bitmap) / sizeof(uint32_t);
     
     for (uint32_t w = 0; w < word_count; w++) {
-        // Пропускаем полностью занятые слова (0xFFFFFFFF)
-        if (bitmap_words[w] == 0xFFFFFFFF) continue;
-        
         uint32_t word = bitmap_words[w];
-        for (uint32_t b = 0; b < 32; b++) {
-            uint32_t bit_index = w * 32 + b;
-            if (bit_index >= PMM_PAGES_COUNT) return 0;
-            
-            // Ищем первый свободный бит (0 = free, 1 = used)
-            if (!(word & (1 << b))) {
-                bitmap_set(bit_index);
-                used_pages++;
-                return bit_index * PMM_PAGE_SIZE;
-            }
-        }
+        
+        // Fast-Forwarding: пропускаем полностью занятые блоки (32 страницы)
+        if (word == 0xFFFFFFFF) continue;
+        
+        // Инвертируем слово: теперь 1 означает "свободно", 0 - "занято"
+        uint32_t free_bits = ~word;
+        
+        // Аппаратное ускорение: __builtin_ctz (Count Trailing Zeros)
+        // Компилятор i686-elf-gcc превратит это в одну инструкцию BSF/TZCNT.
+        // Возвращает индекс первого свободного бита (от 0 до 31).
+        uint32_t b = __builtin_ctz(free_bits);
+        
+        // w << 5 эквивалентно w * 32, но работает быстрее
+        uint32_t bit_index = (w << 5) + b; 
+        
+        // Защита от выхода за пределы, если PMM_PAGES_COUNT не кратно 32
+        if (bit_index >= PMM_PAGES_COUNT) return 0;
+        
+        // Помечаем страницу как занятую напрямую в слове (O(1), без деления по модулю)
+        bitmap_words[w] |= (1U << b);
+        
+        used_pages++;
+        return bit_index * PMM_PAGE_SIZE;
     }
     
-    // OOM: защита от спама в лог
+    // OOM fallback: защита от спама в лог
     static uint32_t oom_count = 0;
     if (oom_count < 3) {
         serial_print("[PMM] OOM! Bitmap is full.\n");

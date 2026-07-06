@@ -17,7 +17,8 @@ void pmm_init(multiboot_info_t* info);
 
 // Выделение физической страницы (возвращает физ. адрес или 0 при OOM)
 uint32_t pmm_alloc_page(void);
-
+// Резервирование региона памяти (запрет выделения страниц в диапазоне [base, end))
+void pmm_reserve_region(uint64_t base, uint64_t end);
 // Освобождение физической страницы
 void pmm_free_page(uint32_t phys_addr);
 

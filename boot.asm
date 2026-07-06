@@ -20,8 +20,15 @@ align 4
 section .boot.bss nobits
 align 4096
 global boot_page_directory
+global boot_page_tables
+global boot_page_tables_hh     ; ✅ НОВЫЕ таблицы для Higher Half
+global fb_page_table
+global boot_stack
+global boot_stack_top
+
 boot_page_directory: resb 4096
 boot_page_tables:    resb 128 * 4096
+boot_page_tables_hh: resb 128 * 4096  ; ✅ ОТДЕЛЬНЫЕ таблицы для Higher Half
 fb_page_table:       resb 4096
 boot_stack:          resb 16384
 boot_stack_top:
@@ -128,10 +135,20 @@ _start:
     add edi, 4
     loop .fill_pd
 
-    ; 4. Higher Half Map (ВСЕ 512 МБ в 0xC0000000 - 0xDFFFFFFF)
-    ; Копируем те же таблицы, чтобы ядро могло расти.
+      ; 4. Higher Half Map (ВСЕ 512 МБ в 0xC0000000 - 0xDFFFFFFF)
+    ; ✅ ИСПРАВЛЕНО: Используем ОТДЕЛЬНЫЕ Page Tables для Higher Half
+    mov edi, boot_page_tables_hh
+    mov eax, 0x00000003
+    mov ecx, 128 * 1024
+.fill_hh_pt:
+    mov [edi], eax
+    add eax, 4096
+    add edi, 4
+    loop .fill_hh_pt
+    
+    ; Заполняем Page Directory для Higher Half (индексы 768-895)
     mov edi, boot_page_directory + 768*4
-    mov eax, boot_page_tables
+    mov eax, boot_page_tables_hh
     or eax, 0x00000003
     mov ecx, 128
 .fill_hh_pd:
@@ -140,9 +157,16 @@ _start:
     add edi, 4
     loop .fill_hh_pd
 
-    ; 5. Маппинг Framebuffer (0xFD000000 -> Индекс 1012)
+      ; 5. Маппинг Framebuffer (0xFD000000 -> Индекс 1012)
+    ; ✅ ИСПРАВЛЕНО: Явная очистка всей Page Table перед заполнением
     mov edi, fb_page_table
-    mov eax, 0xFD00013
+    xor eax, eax
+    mov ecx, 1024          ; Очищаем ВСЕ 1024 записи (4096 байт)
+    rep stosd
+    
+    ; Теперь заполняем первые 768 записей (3 МБ для 1024x768x32bpp)
+    mov edi, fb_page_table
+    mov eax, 0xFD000003    ; phys=0xFD000000, flags=PRESENT|WRITE
     mov ecx, 768
 .fill_fb_pt:
     mov [edi], eax
@@ -151,7 +175,7 @@ _start:
     loop .fill_fb_pt
 
     mov eax, fb_page_table
-    or eax, 0x00000003
+    or eax, 0x00000003     ; PDE flags: PRESENT|WRITE
     mov [boot_page_directory + 1012*4], eax
 
     ; 6. Включаем MMU

@@ -14,6 +14,7 @@
 #include "multiboot.h"
 #include "serial.h"
 #include "task.h"
+#include "univga_font.h"
 
 // Внешние переменные из boot.asm
 extern framebuffer_info_t fb_params;
@@ -91,6 +92,15 @@ void kernel_main(void) {
 
     heap_init();
     serial_print("[DEBUG] Heap OK\n");
+    // === ВКЛЮЧАЕМ ТУРБО-РЕЖИМ ===
+    fb_enable_double_buffering(); 
+    // ... после fb_enable_double_buffering() ...
+    fb_init_font(Uni2_VGA16_psf, Uni2_VGA16_psf_len);
+
+    // Тест: вывод кириллицы
+    fb_set_color(COLOR_GREEN, COLOR_BLACK);
+    fb_print("Привет, мир! Hello, World!\n");
+    fb_flush();
     tasking_init();
     keyboard_install();
     timer_init(1000);
@@ -123,14 +133,11 @@ void kernel_main(void) {
         uint32_t user_esp = user_stack_virt + 4096; // 0xBFFFF000
         
         k_printf("[RING 3 TEST] User stack mapped: Virt 0x%x -> Phys 0x%x\n", user_stack_virt, user_stack_phys);
-        k_print("[RING 3 TEST] Executing IRET to Ring 3...\n");
-        serial_print("[DEBUG] Jumping to Ring 3!\n");
-        
+      
         // 4. Прыжок в Ring 3! (Функция не возвращает управление, если user_task не вызовет sys_exit)
         //enter_usermode(user_esp);
         
         // Если мы оказались здесь, значит user_task завершился через sys_exit
-        k_print("\n[RING 3 TEST] Returned to Ring 0 successfully!\n");
     }
     // ==========================================
     // ==========================================
@@ -164,8 +171,8 @@ void kernel_main(void) {
     k_print("\n System ready. Spawning parallel tasks...\n");
 
     // Создаем два потока! Они встанут в очередь Ready.
-    task_create("Task_A", thread_a);
-    task_create("Task_B", thread_b);
+    //task_create("Task_A", thread_a);
+    //task_create("Task_B", thread_b);
 
     shell_run();
 }
