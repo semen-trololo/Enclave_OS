@@ -37,5 +37,12 @@ switch_context:
     pop esi
     pop ebx
 
-    ; 7. Возврат (прыжок в EIP новой задачи)
+    ; 7. ✅ ДЕНЬ 7.4: УСТАНОВКА CR0.TS (TASK SWITCHED)
+    ; "Взводим курок": следующая FPU/SSE инструкция новой задачи 
+    ; гарантированно вызовет исключение #NM (INT 7).
+    mov eax, cr0
+    or eax, 0x8       ; Бит 3 = TS (Task Switched)
+    mov cr0, eax
+
+    ; 8. Возврат (прыжок в EIP новой задачи)
     ret

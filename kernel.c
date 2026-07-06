@@ -28,7 +28,7 @@ extern void enter_usermode(uint32_t user_esp);
 void thread_a(void) {
     while(1) {
         serial_print("[THREAD A] Tick!\n");
-        k_print("A"); // Чтобы было видно на экране!
+        //k_print("A"); // Чтобы было видно на экране!
         
         // Небольшая загрузка CPU
         for(volatile int i = 0; i < 10000000; i++);
@@ -39,11 +39,35 @@ void thread_a(void) {
 void thread_b(void) {
     while(1) {
         serial_print("[THREAD B] Tock!\n");
-        k_print("B");
+        //k_print("B");
         
         // Небольшая загрузка CPU
         for(volatile int i = 0; i < 10000000; i++);
         //task_yield();
+    }
+}
+
+void thread_math(void) {
+    while(1) {
+        double a = 3.14159;
+        double b = 2.71828;
+        double result;
+        
+        // Принудительно используем x87 FPU (fld, faddp, fstp)
+        // Если Lazy Switching не работает, мы получим Kernel Panic (Unhandled INT 7).
+        __asm__ volatile (
+            "fldl %1\n\t"   // Загрузить a в st0
+            "fldl %2\n\t"   // Загрузить b в st0 (a уйдет в st1)
+            "faddp\n\t"     // Сложить st0 и st1, результат в st0
+            "fstpl %0\n\t"  // Выгрузить результат в память
+            : "=m"(result)
+            : "m"(a), "m"(b)
+        );
+        
+        serial_print("[MATH] FPU computed successfully!\n");
+        
+        for(volatile int i = 0; i < 10000000; i++);
+        task_yield();
     }
 }
 
@@ -131,9 +155,6 @@ void kernel_main(void) {
         // Мапим с флагами USER, WRITE, PRESENT
         vmm_map_page(user_stack_virt, user_stack_phys, PAGE_PRESENT | PAGE_WRITE | PAGE_USER);
         
-        // 3. Стек растёт вниз. Вершина стека (ESP) = конец выделенной страницы.
-        uint32_t user_esp = user_stack_virt + 4096; // 0xBFFFF000
-        
         k_printf("[RING 3 TEST] User stack mapped: Virt 0x%x -> Phys 0x%x\n", user_stack_virt, user_stack_phys);
       
         // 4. Прыжок в Ring 3! (Функция не возвращает управление, если user_task не вызовет sys_exit)
@@ -175,6 +196,7 @@ void kernel_main(void) {
     // Создаем два потока! Они встанут в очередь Ready.
     task_create("Task_A", thread_a);
     task_create("Task_B", thread_b);
+    task_create("Math_Task", thread_math);
 
     shell_run();
 }

@@ -56,6 +56,6 @@ clean:
 # ==============================================================================
 run:
 	@echo "[QEMU] Стартуем $(ISO_NAME)..."
-	@qemu-system-i386 -cdrom $(ISO_NAME) -m 512M -serial stdio -no-reboot 
+	@qemu-system-i386 -cdrom $(ISO_NAME) -m 1024M -serial stdio -no-reboot 
 
 .PHONY: all clean run iso

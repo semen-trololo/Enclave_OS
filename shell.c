@@ -6,6 +6,8 @@
 #include "heap.h"
 #include "vga.h"
 #include "syscall.h"
+#include "task.h"
+#include "framebuffer.h"
 
 #define CMD_BUFFER_SIZE 256
 #define MAX_ARGS 4
@@ -14,7 +16,9 @@
 // Статический массив для стресс-теста PMM (занимает 128 КБ в секции .bss)
 static uint32_t test_allocations[PMM_PAGES_COUNT];
 
-// Токенайзер: разбивает строку на аргументы
+// ============================================================================
+// ПАРСИНГ АРГУМЕНТОВ
+// ============================================================================
 static int parse_args(char* buffer, char args[MAX_ARGS][MAX_ARG_LEN]) {
     int argc = 0;
     char* ptr = buffer;
@@ -22,7 +26,7 @@ static int parse_args(char* buffer, char args[MAX_ARGS][MAX_ARG_LEN]) {
     for (int i = 0; i < MAX_ARGS; i++) args[i][0] = '\0';
 
     while (*ptr && argc < MAX_ARGS) {
-        while (*ptr == ' ') ptr++; // Пропускаем пробелы
+        while (*ptr == ' ') ptr++; 
         if (*ptr == '\0') break;
         
         int i = 0;
@@ -35,27 +39,118 @@ static int parse_args(char* buffer, char args[MAX_ARGS][MAX_ARG_LEN]) {
     return argc;
 }
 
+// ============================================================================
+// СПРАВКА (HELP)
+// ============================================================================
 static void print_help(void) {
     k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
-    k_print("Available commands:\n");
+    k_print("\n=== Available Commands ===\n\n");
     
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("  [ General ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  help             - Show this help message\n");
     k_print("  clear            - Clear the screen\n");
     k_print("  uptime           - Show system uptime\n");
-    k_print("  memmap           - Show E820 physical memory map\n");
+    k_print("  ps               - List running processes\n");
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    k_print("  --- Memory Management (PMM) ---\n");
+    k_print("\n  [ Memory Management ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_print("  memmap           - Show E820 physical memory map\n");
     k_print("  pmm status       - Show physical memory usage\n");
     k_print("  pmm alloc [num]  - Allocate physical pages\n");
     k_print("  pmm free <addr>  - Free a physical page (hex)\n");
     k_print("  pmm test         - Run PMM stress tests\n");
-    k_print("  heap <status|alloc|free|test> - Test heap\n");
+    k_print("  heap <cmd>       - Heap operations (status|alloc|free|test)\n");
+    
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("\n  [ Graphics & Fonts ]\n");
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_print("  font test        - Render ASCII and Cyrillic test table\n");
+    
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("\n  [ System ]\n");
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_print("  syscall          - Test INT 0x80 (sys_write)\n");
+    k_print("\n");
 }
 
-// Обработчик команд PMM
+// ============================================================================
+// ОБРАБОТЧИКИ КОМАНД
+// ============================================================================
+
+static void handle_uptime(void) {
+    uint32_t ticks = timer_get_ticks();
+    uint32_t freq = timer_get_frequency(); 
+    
+    uint32_t total_seconds = ticks / freq;
+    uint32_t hours   = total_seconds / 3600;
+    uint32_t minutes = (total_seconds % 3600) / 60;
+    uint32_t seconds = total_seconds % 60;
+    
+    k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+    k_print("System Uptime: ");
+    
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_printf("%d hours, %d minutes, %d seconds\n", hours, minutes, seconds);
+    
+    k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); 
+    k_printf("  (Raw ticks: %d @ %d Hz)\n", ticks, freq);
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+}
+
+static void handle_syscall(void) {
+    const char* msg = "Hello from Syscall!\n";
+    uint32_t len = k_strlen(msg);
+    
+    uint32_t result;
+    __asm__ volatile (
+        "int $0x80"
+        : "=a" (result)
+        : "a" (SYS_WRITE), "b" (1), "c" (msg), "d" (len)
+    );
+    
+    k_printf("\n[Shell] Syscall returned: %d\n", result);
+}
+
+static void handle_font_test(void) {
+    k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+    k_print("\n=== Font Rendering Test ===\n\n");
+    
+    // 1. ASCII Table (32-126)
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("[ ASCII 32-126 ]\n");
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    
+    for (int i = 32; i < 127; i++) {
+        char c = (char)i;
+        k_putchar(c);
+        if ((i - 31) % 32 == 0) k_putchar('\n');
+    }
+    k_putchar('\n');
+    
+    // 2. Cyrillic Test (UTF-8)
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("\n[ Cyrillic (UTF-8) ]\n");
+    k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    k_print("Привет, мир! Проверка кириллицы.\n");
+    k_print("АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ\n");
+    k_print("абвгдеёжзийклмнопрстуфхцчшщъыьэюя\n");
+    
+    // 3. Box Drawing (если поддерживается шрифтом)
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("\n[ Box Drawing & Symbols ]\n");
+    k_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    k_print("┌───────────────────┐\n");
+    k_print("│  Bare Metal OS    │\n");
+    k_print("│  ▓▓▓▓▓▓▓▓▓▓ 100%  │\n");
+    k_print("└───────────────────┘\n");
+    
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_print("\n");
+}
+
 static void handle_pmm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     if (argc < 2) {
         k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
@@ -90,7 +185,7 @@ static void handle_pmm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
                 break;
             }
             k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            k_printf("[PMM] Allocated: %x\n", addr);
+            k_printf("[PMM] Allocated: 0x%x\n", addr);
             k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         }
     } 
@@ -102,7 +197,7 @@ static void handle_pmm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
             return;
         }
         uint32_t addr = k_atoh(args[2]);
-        pmm_free_page(addr); // Ошибки (unaligned/out of range) напечатает сама pmm_free_page
+        pmm_free_page(addr); 
     } 
     else if (k_strcmp(args[1], "test") == 0) {
         k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
@@ -151,7 +246,39 @@ static void handle_pmm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
         k_printf("Unknown pmm command: %s\n", args[1]);
         k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     }
-}static const char* get_e820_type_string(uint32_t type) {
+}
+
+static void handle_heap(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
+    if (argc < 2) {
+        k_print("Usage: heap <status|alloc|free|test>\n");
+        return;
+    }
+    
+    if (k_strcmp(args[1], "status") == 0) {
+        heap_print_status();
+    } 
+    else if (k_strcmp(args[1], "alloc") == 0) {
+        if (argc < 3) { k_print("Usage: heap alloc <size>\n"); return; }
+        uint32_t size = k_atoi(args[2]);
+        void* ptr = kmalloc(size);
+        if (ptr) k_printf("[HEAP] Allocated %u bytes at %p\n", size, ptr);
+        else k_print("[HEAP] Allocation failed!\n");
+    } 
+    else if (k_strcmp(args[1], "free") == 0) {
+        if (argc < 3) { k_print("Usage: heap free <addr>\n"); return; }
+        uint32_t addr = k_atoh(args[2]);
+        kfree((void*)addr);
+        k_print("[HEAP] Freed.\n");
+    } 
+    else if (k_strcmp(args[1], "test") == 0) {
+        heap_run_tests();
+    } 
+    else {
+        k_print("Unknown heap command.\n");
+    }
+}
+
+static const char* get_e820_type_string(uint32_t type) {
     switch (type) {
         case 1: return "Available";
         case 2: return "Reserved";
@@ -183,12 +310,10 @@ static void handle_memmap(void) {
     uint64_t total_reserved = 0;
     
     for (uint32_t i = 0; i < count; i++) {
-        // Приводим к 32-битному виду
         uint32_t base_lo = (uint32_t)map[i].addr;
         uint32_t end_lo = (uint32_t)(map[i].addr + map[i].len - 1);
         uint32_t len_kb = (map[i].len >= 1024) ? (uint32_t)(map[i].len / 1024) : 1;
         
-        // Цветовая дифференциация
         if (map[i].type == 1) {
             k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
             total_available += map[i].len;
@@ -200,10 +325,8 @@ static void handle_memmap(void) {
             total_reserved += map[i].len;
         }
         
-        // БЕЗОПАСНЫЙ ВЫВОД: Только %x, %u, %s без модификаторов ширины!
         k_printf("  Region %u: 0x%x - 0x%x | %u KB | ", i, base_lo, end_lo, len_kb);
         
-        // Тип выводим отдельным вызовом k_print, чтобы не зависеть от %s в k_printf
         switch (map[i].type) {
             case 1: k_print("Available\n"); break;
             case 2: k_print("Reserved\n"); break;
@@ -224,13 +347,16 @@ static void handle_memmap(void) {
     k_print("\n");
 }
 
-
+// ============================================================================
+// ДИСПЕТЧЕР КОМАНД
+// ============================================================================
 static void execute_command(char* buffer) {
     char args[MAX_ARGS][MAX_ARG_LEN];
     int argc = parse_args(buffer, args);
     
     if (argc == 0) return;
 
+    // [ General ]
     if (k_strcmp(args[0], "help") == 0) {
         print_help();
     }
@@ -238,72 +364,39 @@ static void execute_command(char* buffer) {
         k_clear();
     }
     else if (k_strcmp(args[0], "uptime") == 0) {
-        uint32_t ticks = timer_get_ticks();
-        uint32_t freq = timer_get_frequency(); 
-        
-        uint32_t total_seconds = ticks / freq;
-        uint32_t hours   = total_seconds / 3600;
-        uint32_t minutes = (total_seconds % 3600) / 60;
-        uint32_t seconds = total_seconds % 60;
-        
-        k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
-        k_print("System Uptime: ");
-        
-        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        k_printf("%d hours, %d minutes, %d seconds\n", hours, minutes, seconds);
-        
-        k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); 
-        k_printf("  (Raw ticks: %d @ %d Hz)\n", ticks, freq);
-        
-        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        handle_uptime();
     }
-    else if (k_strcmp(args[0], "syscall") == 0) {
-            const char* msg = "Hello from Syscall!\n";
-            uint32_t len = k_strlen(msg);
-            
-            uint32_t result;
-            // Вызываем INT 0x80 прямо из Ring 0!
-            // EAX = SYS_WRITE (4)
-            // EBX = fd (1 = stdout)
-            // ECX = buf (msg)
-            // EDX = count (len)
-            __asm__ volatile (
-                "int $0x80"
-                : "=a" (result)
-                : "a" (SYS_WRITE), "b" (1), "c" (msg), "d" (len)
-            );
-            
-            k_printf("\n[Shell] Syscall returned: %d\n", result);
-        }
-    else if (k_strcmp(args[0], "heap") == 0) {
-        if (argc < 2) {
-            k_print("Usage: heap <status|alloc|free|test>\n");
-        } else if (k_strcmp(args[1], "status") == 0) {
-            heap_print_status();
-        } else if (k_strcmp(args[1], "alloc") == 0) {
-            if (argc < 3) { k_print("Usage: heap alloc <size>\n"); return; }
-            uint32_t size = k_atoi(args[2]);
-            void* ptr = kmalloc(size);
-            if (ptr) k_printf("[HEAP] Allocated %u bytes at %p\n", size, ptr);
-            else k_print("[HEAP] Allocation failed!\n");
-        } else if (k_strcmp(args[1], "free") == 0) {
-            if (argc < 3) { k_print("Usage: heap free <addr>\n"); return; }
-            uint32_t addr = k_atoh(args[2]);
-            kfree((void*)addr);
-            k_print("[HEAP] Freed.\n");
-        } else if (k_strcmp(args[1], "test") == 0) {
-            heap_run_tests();
-        } else {
-            k_print("Unknown heap command.\n");
-        }
+    else if (k_strcmp(args[0], "ps") == 0) {
+        task_print_list(); // Требует добавления в task.c (см. ниже)
     }
+    
+    // [ Memory ]
     else if (k_strcmp(args[0], "memmap") == 0) {
         handle_memmap();
     }
     else if (k_strcmp(args[0], "pmm") == 0) {
         handle_pmm(argc, args);
     }
-    else if (k_strlen(args[0]) > 0) {
+    else if (k_strcmp(args[0], "heap") == 0) {
+        handle_heap(argc, args);
+    }
+    
+    // [ Graphics ]
+    else if (k_strcmp(args[0], "font") == 0) {
+        if (argc > 1 && k_strcmp(args[1], "test") == 0) {
+            handle_font_test();
+        } else {
+            k_print("Usage: font test\n");
+        }
+    }
+    
+    // [ System ]
+    else if (k_strcmp(args[0], "syscall") == 0) {
+        handle_syscall();
+    }
+    
+    // [ Unknown ]
+    else {
         k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
         k_print("Unknown command: ");
         k_print(args[0]);
@@ -312,12 +405,16 @@ static void execute_command(char* buffer) {
     }
 }
 
+// ============================================================================
+// ГЛАВНЫЙ ЦИКЛ SHELL
+// ============================================================================
 void shell_run(void) {
     char buffer[CMD_BUFFER_SIZE];
     int pos = 0;
     
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    k_print("  Help             - Show this help message\n");
+    k_print("Type 'help' for available commands.\n");
+    
     while (1) {
         k_print("> ");
         pos = 0;
@@ -326,7 +423,7 @@ void shell_run(void) {
         while (1) {
             char c = k_getchar();
             
-                        if (c == 0) {
+            if (c == 0) {
                 __asm__ volatile("hlt");
                 continue;
             }
@@ -340,17 +437,16 @@ void shell_run(void) {
                 if (pos > 0) {
                     pos--;
                     buffer[pos] = '\0';
-                    k_putchar('\b'); // Отрисовка пробела и сдвиг курсора назад
+                    k_putchar('\b'); 
                 }
             }
             else {
                 uint8_t uc = (uint8_t)c;
-                // Пропускаем управляющие символы (< 32), но пропускаем UTF-8 байты (>= 128)
                 if (uc >= 32) { 
                     if (pos < CMD_BUFFER_SIZE - 1) {
                         buffer[pos++] = c;
                         buffer[pos] = '\0';
-                        k_putchar(c); // Для UTF-8 символ появится на экране только после 2-го байта
+                        k_putchar(c); 
                     }
                 }
             }
