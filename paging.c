@@ -49,8 +49,6 @@ void page_fault_handler(struct regs* r) {
     int us        = r->err_code & 0x4; // 1 = User Mode, 0 = Kernel Mode
     int reserved  = r->err_code & 0x8; // 1 = Затронуты reserved биты (фатально)
     int id        = r->err_code & 0x10;// 1 = Instruction fetch
-
-    serial_print("\n[PF] === PAGE FAULT TRIGGERED ===\n");
     
     // 3. Логика Lazy Allocation (Ленивая аллокация)
     // Мы выделяем память "по требованию" для виртуального диапазона 0xD0000000 - 0xE0000000
@@ -81,15 +79,14 @@ void page_fault_handler(struct regs* r) {
                 return; 
             }
         }
-    }
-    // 4. Если дошли сюда — это фатальная ошибка (кривой указатель, segfault)
+    }  
+    serial_print("\n[PF] === PAGE FAULT TRIGGERED ===\n");
+    serial_printf("[PF] Address: 0x%x\n", faulting_address);
+    serial_printf("[PF] EIP: 0x%x\n", r->eip); // Точный адрес инструкции, где упало
+    serial_printf("[PF] Code: P:%d W:%d U:%d R:%d I:%d\n", present, rw, us, reserved, id);
+    // Диагностика PMM (закончилась ли физическая память?)
+    serial_printf("[PF] PMM Free Pages: %d\n", pmm_get_free_pages());
     serial_print("[PF] FATAL: Unhandled Page Fault! Halting.\n");
-    
-    k_printf("\n KERNEL PANIC: PAGE FAULT \n");
-    k_printf(" Address: 0x%x \n", faulting_address);
-    k_printf(" EIP:     0x%x \n", r->eip);
-    k_printf(" Code:    [P:%d W:%d U:%d R:%d I:%d] \n", present, rw, us, reserved, id);
-    k_print(" System Halted. \n");
     
     while(1) { __asm__ volatile("hlt"); }
 }
@@ -232,4 +229,22 @@ uint32_t* vmm_create_address_space(void) {
 // ============================================================================
 void vmm_switch_pdir(uint32_t phys_pd) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(phys_pd) : "memory");
+}
+
+void vmm_destroy_address_space(uint32_t* pdir_virt) {
+    // 🛑 Защита от уничтожения глобального ядра (Shared Kernel Space)
+    if (!pdir_virt || pdir_virt == boot_page_directory) return;
+    
+    // 1. Освобождаем Page Tables пользовательского пространства (индексы 0-767)
+    // Индексы 768-1023 мы НЕ трогаем, так как они указывают на общие таблицы ядра.
+    for (uint32_t i = 0; i < 768; i++) {
+        if (pdir_virt[i] & PAGE_PRESENT) {
+            uint32_t pt_phys = pdir_virt[i] & 0xFFFFF000; // Маска для получения физ. адреса
+            pmm_free_page(pt_phys);
+        }
+    }
+    
+    // 2. Освобождаем сам Page Directory
+    uint32_t pdir_phys = VIRT_TO_PHYS((uint32_t)pdir_virt);
+    pmm_free_page(pdir_phys);
 }

@@ -1,5 +1,7 @@
 #include "serial.h"
 #include <stdint.h>
+#include <stdarg.h>
+
 
 #define PORT 0x3f8   /* COM1 */
 
@@ -33,4 +35,62 @@ void serial_print(const char* str) {
         if (*str == '\n') serial_putc('\r');
         serial_putc(*str++);
     }
+}
+
+
+// Вспомогательная функция для вывода HEX (без префикса 0x)
+static void serial_print_hex(uint32_t val) {
+    for (int i = 28; i >= 0; i -= 4) {
+        uint8_t nibble = (val >> i) & 0xF;
+        char c = (nibble < 10) ? ('0' + nibble) : ('a' + nibble - 10);
+        serial_putc(c);
+    }
+}
+
+// Вспомогательная функция для вывода DEC
+static void serial_print_dec(uint32_t val) {
+    if (val == 0) {
+        serial_putc('0');
+        return;
+    }
+    char buf[12];
+    int i = 0;
+    while (val > 0) {
+        buf[i++] = '0' + (val % 10);
+        val /= 10;
+    }
+    while (i > 0) {
+        serial_putc(buf[--i]);
+    }
+}
+
+void serial_printf(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    
+    while (*fmt) {
+        if (*fmt == '%' && *(fmt + 1)) {
+            fmt++; // Пропускаем '%'
+            if (*fmt == 'x') {
+                serial_print_hex(va_arg(args, uint32_t));
+            } else if (*fmt == 'p') {
+                serial_print("0x");
+                serial_print_hex(va_arg(args, uint32_t));
+            } else if (*fmt == 'd' || *fmt == 'u') {
+                serial_print_dec(va_arg(args, uint32_t));
+            } else if (*fmt == 's') {
+                serial_print(va_arg(args, const char*));
+            } else if (*fmt == 'c') {
+                serial_putc((char)va_arg(args, int));
+            } else if (*fmt == '%') {
+                serial_putc('%');
+            }
+        } else {
+            // Твой оригинальный逻辑 для \n -> \r\n
+            if (*fmt == '\n') serial_putc('\r');
+            serial_putc(*fmt);
+        }
+        fmt++;
+    }
+    va_end(args);
 }

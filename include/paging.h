@@ -45,6 +45,8 @@ void vmm_switch_pdir(uint32_t phys_pd);
 
 // Unmap страницы
 void vmm_unmap_page(uint32_t virt);
+// Уничтожение адресного пространства задачи (вызывается из Reaper в schedule)
+void vmm_destroy_address_space(uint32_t* pdir_virt);
 
 // Макрос для обратной совместимости (маппинг в глобальный PD ядра)
 #define vmm_map_page(virt, phys, flags) vmm_map_page_in_pd(boot_page_directory, virt, phys, flags)

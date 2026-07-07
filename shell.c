@@ -8,6 +8,8 @@
 #include "syscall.h"
 #include "task.h"
 #include "framebuffer.h"
+#include "vfs.h"
+#include "serial.h"
 
 #define CMD_BUFFER_SIZE 256
 #define MAX_ARGS 4
@@ -54,6 +56,12 @@ static void print_help(void) {
     k_print("  uptime           - Show system uptime\n");
     k_print("  ps               - List running processes\n");
     
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("\n  [ File System (VFS) ]\n");
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_print("  ls [path]        - List directory contents\n");
+    k_print("  cat <path>       - Print file contents\n");
+
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     k_print("\n  [ Memory Management ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
@@ -278,17 +286,6 @@ static void handle_heap(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     }
 }
 
-static const char* get_e820_type_string(uint32_t type) {
-    switch (type) {
-        case 1: return "Available";
-        case 2: return "Reserved";
-        case 3: return "ACPI Reclaim";
-        case 4: return "ACPI NVS";
-        case 5: return "Bad RAM";
-        default: return "Unknown";
-    }
-}
-
 static void handle_memmap(void) {
     uint32_t count = 0;
     const e820_entry_t* map = pmm_get_memory_map(&count);
@@ -348,6 +345,85 @@ static void handle_memmap(void) {
 }
 
 // ============================================================================
+// VFS КОМАНДЫ (DAY 8.1)
+// ============================================================================
+static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
+    const char* path = "/";
+    if (argc > 1) path = args[1];
+
+    serial_printf("\n[LS] =====================================\n");
+    serial_printf("[LS] Attempting to open path: '%s'\n", path);
+    
+    int fd = sys_open(path, O_RDONLY);
+    serial_printf("[LS] sys_open returned fd = %d\n", fd);
+    
+    if (fd < 0) {
+        k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+        k_printf("ls: cannot access '%s': Error %d\n", path, fd);
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        serial_printf("[LS] FAILED: sys_open returned error %d\n", fd);
+        return;
+    }
+
+    dirent_t entry;
+    uint32_t index = 0;
+    
+    k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+    k_printf("Directory: %s\n", path);
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+
+    serial_print("[LS] Entering readdir loop...\n");
+    
+    // Делаем первый вызов и детально логируем результат
+    int32_t res = sys_readdir(fd, index, &entry);
+    serial_printf("[LS] First sys_readdir(index=0) returned %d\n", res);
+    if (res == 0) {
+        serial_printf("[LS] First entry name: '%s'\n", entry.name);
+    }
+
+    while (res == 0) {
+        k_printf("  %s\n", entry.name);
+        index++;
+        res = sys_readdir(fd, index, &entry);
+        serial_printf("[LS] sys_readdir(index=%d) returned %d\n", index, res);
+    }
+    
+    serial_printf("[LS] Loop finished. Total entries: %d\n", index);
+    serial_printf("[LS] =====================================\n\n");
+    
+    sys_close(fd);
+}
+
+static void handle_cat(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
+    if (argc < 2) {
+        k_print("Usage: cat <filepath>\n");
+        return;
+    }
+
+    const char* path = args[1];
+    int fd = sys_open(path, O_RDONLY);
+    if (fd < 0) {
+        k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+        k_printf("cat: %s: Error %d\n", path, fd);
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        return;
+    }
+
+    uint8_t buffer[512];
+    int32_t bytes_read;
+    
+    // Читаем файл чанками по 512 байта
+    while ((bytes_read = sys_read(fd, buffer, sizeof(buffer))) > 0) {
+        for (int32_t i = 0; i < bytes_read; i++) {
+            k_putchar(buffer[i]);
+        }
+    }
+    
+    k_putchar('\n'); 
+    sys_close(fd);
+}
+
+// ============================================================================
 // ДИСПЕТЧЕР КОМАНД
 // ============================================================================
 static void execute_command(char* buffer) {
@@ -367,7 +443,7 @@ static void execute_command(char* buffer) {
         handle_uptime();
     }
     else if (k_strcmp(args[0], "ps") == 0) {
-        task_print_list(); // Требует добавления в task.c (см. ниже)
+        task_print_list(); 
     }
     
     // [ Memory ]
@@ -393,6 +469,14 @@ static void execute_command(char* buffer) {
     // [ System ]
     else if (k_strcmp(args[0], "syscall") == 0) {
         handle_syscall();
+    }
+    
+    // [ VFS ]
+    else if (k_strcmp(args[0], "ls") == 0) {
+        handle_ls(argc, args);
+    }
+    else if (k_strcmp(args[0], "cat") == 0) {
+        handle_cat(argc, args);
     }
     
     // [ Unknown ]

@@ -7,6 +7,7 @@
 #include "isr.h"
 #include "framebuffer.h"
 #include "vga.h"
+#include "vfs.h" // 🆕 Необходим для sys_close() в task_exit()
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
 
@@ -14,12 +15,21 @@ task_t* current_task = 0;
 uint32_t next_pid = 1;
 static task_t* fpu_owner = 0;
 
+// ============================================================================
+// ТРАМПЛИН (Task Wrapper)
+// ============================================================================
+// 🔥 ПУНКТ 17 БАЗЫ ЗНАНИЙ:
+// Новые задачи стартуют здесь, чтобы гарантированно включить прерывания (sti),
+// даже если task_create() был вызван из контекста IRQ (где IF=0).
 void task_entry_trampoline(void (*entry_point)(void)) {
     __asm__ volatile("sti");
     entry_point();
     task_exit();
 }
 
+// ============================================================================
+// LAZY FPU SWITCHING (INT 7 - #NM HANDLER)
+// ============================================================================
 static volatile int in_nm_handler = 0;
 
 static void device_not_available_handler(struct regs* r) {
@@ -31,15 +41,15 @@ static void device_not_available_handler(struct regs* r) {
     }
     in_nm_handler = 1;
 
-    // ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ (THE FXSAVE TRAP):
+    // 🔥 ПУНКТ 30 БАЗЫ ЗНАНИЙ (THE FXSAVE TRAP):
     // Инструкции fxsave и fxrstor сами по себе являются FPU-инструкциями.
     // Если бит CR0.TS (Task Switched) установлен, процессор аппаратно 
     // сгенерирует НОВОЕ исключение #NM при попытке выполнить fxsave/fxrstor!
-    // Это и была причина бесконечной рекурсии и Triple Fault.
     // Мы ОБЯЗАНЫ снять бит TS (инструкцией clts) ДО любых операций с FPU.
     __asm__ volatile("clts");
 
-    // Self-Healing: Гарантируем, что CR4.OSFXSR установлен
+    // 🔥 ПУНКТ 32 БАЗЫ ЗНАНИЙ (Self-Healing): 
+    // Гарантируем, что CR4.OSFXSR установлен (иначе #UD на fxsave)
     uint32_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     if (!(cr4 & (1 << 9))) {
@@ -56,6 +66,9 @@ static void device_not_available_handler(struct regs* r) {
     if (current_task->fpu_initialized) {
         __asm__ volatile("fxrstor (%0)" : : "r"(current_task->fpu_state) : "memory");
     } else {
+        // 🔥 ПУНКТ 31 БАЗЫ ЗНАНИЙ (ALL-ZERO FXRSTOR TRAP):
+        // Инициализируем FPU и сохраняем валидный "слепок" в fpu_state.
+        // Иначе следующий fxrstor из нулевого буфера вызовет #GP.
         __asm__ volatile("fninit");
         __asm__ volatile("fxsave (%0)" : : "r"(current_task->fpu_state) : "memory");
         current_task->fpu_initialized = 1;
@@ -71,6 +84,9 @@ void fpu_release_ownership(task_t* task) {
     if (fpu_owner == task) fpu_owner = 0;
 }
 
+// ============================================================================
+// УПРАВЛЕНИЕ ОЧЕРЕДЬЮ (RING BUFFER / DOUBLY LINKED LIST)
+// ============================================================================
 static void task_queue_add(task_t* task) {
     if (!current_task) {
         current_task = task;
@@ -84,10 +100,15 @@ static void task_queue_add(task_t* task) {
     }
 }
 
+// ============================================================================
+// ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА
+// ============================================================================
 void tasking_init(void) {
     serial_print("[TASK] Initializing Task Manager...\n");
     
-    // Динамическая аллокация main_task для идеального выравнивания (кратно 4096 -> кратно 16)
+    // 🔥 ПУНКТ 34 БАЗЫ ЗНАНИЙ (ДИНАМИЧЕСКАЯ АЛЛОКАЦИЯ MAIN_TASK):
+    // pmm_alloc_page возвращает адреса, кратные 4096 (что кратно 16).
+    // Это гарантирует идеальное выравнивание fpu_state для fxsave/fxrstor.
     uint32_t main_pcb_phys = pmm_alloc_page();
     if (main_pcb_phys == 0) {
         serial_print("[TASK] FATAL: OOM allocating main_task PCB!\n");
@@ -112,12 +133,17 @@ void tasking_init(void) {
     main_task_ptr->next = main_task_ptr;
     main_task_ptr->prev = main_task_ptr;
     
+    // 🆕 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: 
+    // Инициализируем стандартные потоки (stdin/stdout) для main_task!
+    // Без этого sys_open("/") займет fd=0 и перезапишет stdin.
+    task_init_fds(main_task_ptr);
+    
     // Настройка CR0 и CR4 для FPU
     uint32_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~(1 << 2); // Clear EM
-    cr0 |= (1 << 1);  // Set MP
-    cr0 |= (1 << 5);  // Set NE
+    cr0 &= ~(1 << 2); // Clear EM (Emulation)
+    cr0 |= (1 << 1);  // Set MP (Monitor Coprocessor)
+    cr0 |= (1 << 5);  // Set NE (Native Exception)
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
 
     uint32_t cr4;
@@ -132,11 +158,17 @@ void tasking_init(void) {
     serial_print("[TASK] FPU Lazy Switching enabled (INT 7 handler).\n");
 }
 
+// ============================================================================
+// СОЗДАНИЕ НОВОЙ ЗАДАЧИ
+// ============================================================================
 task_t* task_create(const char* name, void (*entry_point)(void)) {
     uint32_t stack_phys = pmm_alloc_page();
     if (stack_phys == 0) return 0;
     uint32_t pcb_phys = pmm_alloc_page(); 
-    if (pcb_phys == 0) return 0;
+    if (pcb_phys == 0) {
+        pmm_free_page(stack_phys);
+        return 0;
+    }
 
     task_t* new_task = (task_t*)PHYS_TO_VIRT(pcb_phys);
     k_memset(new_task, 0, sizeof(task_t));
@@ -157,29 +189,40 @@ task_t* task_create(const char* name, void (*entry_point)(void)) {
     int i = 0; while(name[i] && i < 31) { new_task->name[i] = name[i]; i++; }
     new_task->name[i] = '\0';
 
+    // 🔥 ПУНКТ 18 и 39 БАЗЫ ЗНАНИЙ (STACK FORGING & ABI ALIGNMENT):
     uint32_t* stack_top = (uint32_t*)PHYS_TO_VIRT(stack_phys + 4096);
-    *(--stack_top) = (uint32_t)entry_point; 
-    *(--stack_top) = (uint32_t)task_exit; 
-    *(--stack_top) = (uint32_t)task_entry_trampoline; 
-    *(--stack_top) = 0; 
-    *(--stack_top) = 0; 
-    *(--stack_top) = 0; 
-    *(--stack_top) = 0; 
+    *(--stack_top) = (uint32_t)entry_point;       // [ESP+24] Аргумент для трамплина
+    *(--stack_top) = (uint32_t)task_exit;         // [ESP+20] Куда вернется trampoline
+    *(--stack_top) = (uint32_t)task_entry_trampoline; // [ESP+16] Точка входа для ret
+    *(--stack_top) = 0; // EBX                    // [ESP+12]
+    *(--stack_top) = 0; // ESI                    // [ESP+8]
+    *(--stack_top) = 0; // EDI                    // [ESP+4]
+    *(--stack_top) = 0; // EBP                    // [ESP+0] <-- new_task->esp
     new_task->esp = (uint32_t)stack_top;
-// Обнуляем таблицу FD (защита от мусора в памяти)
-    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
-        new_task->fd_table[i] = 0;
+
+    // Обнуляем таблицу FD (защита от мусора в памяти)
+    for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) {
+        new_task->fd_table[j] = 0;
     }
 
-// Инициализируем стандартные потоки (stdin, stdout, stderr)
-// Эта функция будет жить в vfs.c, но вызываться из task.c
+    // Инициализируем стандартные потоки (stdin, stdout, stderr)
     task_init_fds(new_task); 
+    
+    // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
+    // Вшиваем новую задачу в кольцевой двусвязный список планировщика.
+    // Без этого schedule() никогда не увидит новый поток!
+    task_queue_add(new_task);
+
     serial_print("[TASK] Created new task with isolated memory: ");
-    serial_print(name); serial_print("\n");
+    serial_print(name); 
+    serial_print("\n");
 
     return new_task;
 }
 
+// ============================================================================
+// ПЛАНИРОВЩИК (ROUND-ROBIN)
+// ============================================================================
 void schedule(void) {
     if (!current_task || !current_task->next) return;
     
@@ -192,40 +235,63 @@ void schedule(void) {
     new_task->state = TASK_RUNNING;
     current_task = new_task;
 
+    // 🔥 ПУНКТ 36 БАЗЫ ЗНАНИЙ (TSS ESP0 И ВИРТУАЛЬНЫЕ АДРЕСА):
+    // Передаем ВИРТУАЛЬНЫЙ адрес стека ядра, иначе при прерывании из Ring 3
+    // MMU не найдет стек и произойдет Page Fault -> Triple Fault.
     if (new_task->kernel_stack != 0) {
-        tss_set_kernel_stack(0x10, new_task->kernel_stack + 4096);
+        tss_set_kernel_stack(0x10, PHYS_TO_VIRT(new_task->kernel_stack + 4096));
     }
 
     switch_context(&old_task->esp, new_task->esp, new_task->cr3);
+    
+    // 🔥 ПУНКТ 37 БАЗЫ ЗНАНИЙ (REAPER MECHANISM):
+    // Если мы вернулись сюда, а old_task был DEAD, теперь безопасно освободить её память.
+    if (old_task->state == TASK_DEAD) {
+        if (old_task->pdir_virt && old_task->pdir_virt != boot_page_directory) {
+            vmm_destroy_address_space(old_task->pdir_virt);
+        }
+        if (old_task->kernel_stack != 0) {
+            pmm_free_page(old_task->kernel_stack);
+        }
+        pmm_free_page(VIRT_TO_PHYS((uint32_t)old_task));
+    }
 }
 
 void task_yield(void) { schedule(); }
 
+// ============================================================================
+// ЗАВЕРШЕНИЕ ЗАДАЧИ
+// ============================================================================
 void task_exit(void) {
     fpu_release_ownership(current_task);
+    
     // 🆕 ОЧИСТКА VFS РЕСУРСОВ (ДЕНЬ 8.1)
     // Проходим по всем FD процесса и принудительно закрываем их.
     // sys_close сам позаботится о хуках драйверов, ref_count и kfree().
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
             sys_close(i); 
-            // sys_close обнулит указатель в fd_table, но для надежности:
             current_task->fd_table[i] = 0; 
         }
     }
 
     current_task->state = TASK_DEAD;
     
+    // Исключаем задачу из кольцевого списка
     if (current_task->next != current_task) {
         current_task->prev->next = current_task->next;
         current_task->next->prev = current_task->prev;
     } else {
-        current_task = 0; 
+        current_task = 0; // Это была последняя задача (фатально для ОС)
     }
 
     schedule();
-    while(1) __asm__ volatile("hlt");
+    while(1) __asm__ volatile("hlt"); // На всякий случай, если schedule() вернет управление
 }
+
+// ============================================================================
+// ОТЛАДКА (ps)
+// ============================================================================
 void task_print_list(void) {
     if (!current_task) {
         k_print("[PS] No tasks running.\n");

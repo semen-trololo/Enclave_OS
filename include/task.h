@@ -56,4 +56,9 @@ void task_print_list(void);
 // Инициализирует fd_table[0,1,2] стандартными потоками (tty/serial)
 void task_init_fds(task_t* task);
 
+// 🆕 ЭКСПОРТ ГЛОБАЛЬНОЙ ПЕРЕМЕННОЙ ДЛЯ VFS
+// Позволяет системным вызовам (sys_open, sys_read) получать доступ 
+// к таблице файловых дескрипторов ТЕКУЩЕГО выполняемого процесса.
+extern task_t* current_task;
+
 #endif

@@ -15,6 +15,8 @@
 #include "serial.h"
 #include "task.h"
 #include "univga_font.h"
+#include "vfs.h"
+#include "initrd.h"
 
 // Внешние переменные из boot.asm
 extern framebuffer_info_t fb_params;
@@ -27,7 +29,7 @@ extern void enter_usermode(uint32_t user_esp);
 
 void thread_a(void) {
     while(1) {
-        serial_print("[THREAD A] Tick!\n");
+        //serial_print("[THREAD A] Tick!\n");
         //k_print("A"); // Чтобы было видно на экране!
         
         // Небольшая загрузка CPU
@@ -38,7 +40,7 @@ void thread_a(void) {
 
 void thread_b(void) {
     while(1) {
-        serial_print("[THREAD B] Tock!\n");
+        //serial_print("[THREAD B] Tock!\n");
         //k_print("B");
         
         // Небольшая загрузка CPU
@@ -64,7 +66,7 @@ void thread_math(void) {
             : "m"(a), "m"(b)
         );
         
-        serial_print("[MATH] FPU computed successfully!\n");
+        //serial_print("[MATH] FPU computed successfully!\n");
         
         for(volatile int i = 0; i < 10000000; i++);
         task_yield();
@@ -127,6 +129,9 @@ void kernel_main(void) {
     fb_set_color(COLOR_GREEN, COLOR_BLACK);
     fb_print("Привет, мир! Hello, World!\n");
     fb_flush();
+    // 🆕 ДЕНЬ 8: Файловая система
+    vfs_init();
+    initrd_init();
     tasking_init();
     keyboard_install();
     timer_init(1000);
