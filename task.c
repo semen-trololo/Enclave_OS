@@ -5,9 +5,7 @@
 #include "tss.h"
 #include "paging.h"
 #include "isr.h"
-#include "framebuffer.h"
-#include "vga.h"
-#include "vfs.h" // 🆕 Необходим для sys_close() в task_exit()
+#include "vfs.h" 
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
 
@@ -15,14 +13,14 @@ task_t* current_task = 0;
 uint32_t next_pid = 1;
 static task_t* fpu_owner = 0;
 
+// 🆕 ГЛОБАЛЬНЫЙ REAPER: Задача, которую нужно "похоронить" после переключения контекста
+static task_t* task_to_reap = NULL;
+
 // ============================================================================
 // ТРАМПЛИН (Task Wrapper)
 // ============================================================================
-// 🔥 ПУНКТ 17 БАЗЫ ЗНАНИЙ:
-// Новые задачи стартуют здесь, чтобы гарантированно включить прерывания (sti),
-// даже если task_create() был вызван из контекста IRQ (где IF=0).
 void task_entry_trampoline(void (*entry_point)(void)) {
-    __asm__ volatile("sti");
+    __asm__ volatile("sti"); // Гарантированно включаем прерывания для новой задачи
     entry_point();
     task_exit();
 }
@@ -34,22 +32,14 @@ static volatile int in_nm_handler = 0;
 
 static void device_not_available_handler(struct regs* r) {
     (void)r;
-    
     if (in_nm_handler) {
         serial_print("\n[FPU] FATAL: Recursive #NM detected!\n");
-        while(1) __asm__("hlt");
+        while(1) __asm__("cli; hlt");
     }
     in_nm_handler = 1;
 
-    // 🔥 ПУНКТ 30 БАЗЫ ЗНАНИЙ (THE FXSAVE TRAP):
-    // Инструкции fxsave и fxrstor сами по себе являются FPU-инструкциями.
-    // Если бит CR0.TS (Task Switched) установлен, процессор аппаратно 
-    // сгенерирует НОВОЕ исключение #NM при попытке выполнить fxsave/fxrstor!
-    // Мы ОБЯЗАНЫ снять бит TS (инструкцией clts) ДО любых операций с FPU.
-    __asm__ volatile("clts");
+    __asm__ volatile("clts"); // Сбрасываем CR0.TS ДО fxsave
 
-    // 🔥 ПУНКТ 32 БАЗЫ ЗНАНИЙ (Self-Healing): 
-    // Гарантируем, что CR4.OSFXSR установлен (иначе #UD на fxsave)
     uint32_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     if (!(cr4 & (1 << 9))) {
@@ -57,26 +47,19 @@ static void device_not_available_handler(struct regs* r) {
         __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
     }
 
-    // 1. Сохраняем состояние FPU предыдущего владельца
     if (fpu_owner && fpu_owner != current_task) {
         __asm__ volatile("fxsave (%0)" : : "r"(fpu_owner->fpu_state) : "memory");
     }
     
-    // 2. Восстанавливаем состояние FPU для ТЕКУЩЕЙ задачи
     if (current_task->fpu_initialized) {
         __asm__ volatile("fxrstor (%0)" : : "r"(current_task->fpu_state) : "memory");
     } else {
-        // 🔥 ПУНКТ 31 БАЗЫ ЗНАНИЙ (ALL-ZERO FXRSTOR TRAP):
-        // Инициализируем FPU и сохраняем валидный "слепок" в fpu_state.
-        // Иначе следующий fxrstor из нулевого буфера вызовет #GP.
         __asm__ volatile("fninit");
         __asm__ volatile("fxsave (%0)" : : "r"(current_task->fpu_state) : "memory");
         current_task->fpu_initialized = 1;
     }
     
-    // 3. Обновляем владельца (TS уже сброшен, задача может продолжать работу)
     fpu_owner = current_task;
-    
     in_nm_handler = 0; 
 }
 
@@ -85,7 +68,7 @@ void fpu_release_ownership(task_t* task) {
 }
 
 // ============================================================================
-// УПРАВЛЕНИЕ ОЧЕРЕДЬЮ (RING BUFFER / DOUBLY LINKED LIST)
+// УПРАВЛЕНИЕ ОЧЕРЕДЬЮ
 // ============================================================================
 static void task_queue_add(task_t* task) {
     if (!current_task) {
@@ -106,13 +89,10 @@ static void task_queue_add(task_t* task) {
 void tasking_init(void) {
     serial_print("[TASK] Initializing Task Manager...\n");
     
-    // 🔥 ПУНКТ 34 БАЗЫ ЗНАНИЙ (ДИНАМИЧЕСКАЯ АЛЛОКАЦИЯ MAIN_TASK):
-    // pmm_alloc_page возвращает адреса, кратные 4096 (что кратно 16).
-    // Это гарантирует идеальное выравнивание fpu_state для fxsave/fxrstor.
     uint32_t main_pcb_phys = pmm_alloc_page();
     if (main_pcb_phys == 0) {
         serial_print("[TASK] FATAL: OOM allocating main_task PCB!\n");
-        while(1) __asm__("hlt");
+        while(1) __asm__("cli; hlt");
     }
     
     task_t* main_task_ptr = (task_t*)PHYS_TO_VIRT(main_pcb_phys);
@@ -120,7 +100,7 @@ void tasking_init(void) {
     
     main_task_ptr->pid = next_pid++;
     main_task_ptr->state = TASK_RUNNING;
-    main_task_ptr->kernel_stack = 0; 
+    main_task_ptr->kernel_stack = 0; // Использует boot_stack
     
     main_task_ptr->pdir_virt = boot_page_directory;
     main_task_ptr->cr3 = VIRT_TO_PHYS((uint32_t)boot_page_directory);
@@ -133,17 +113,13 @@ void tasking_init(void) {
     main_task_ptr->next = main_task_ptr;
     main_task_ptr->prev = main_task_ptr;
     
-    // 🆕 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: 
-    // Инициализируем стандартные потоки (stdin/stdout) для main_task!
-    // Без этого sys_open("/") займет fd=0 и перезапишет stdin.
     task_init_fds(main_task_ptr);
     
-    // Настройка CR0 и CR4 для FPU
     uint32_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~(1 << 2); // Clear EM (Emulation)
-    cr0 |= (1 << 1);  // Set MP (Monitor Coprocessor)
-    cr0 |= (1 << 5);  // Set NE (Native Exception)
+    cr0 &= ~(1 << 2); // Clear EM
+    cr0 |= (1 << 1);  // Set MP
+    cr0 |= (1 << 5);  // Set NE
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
 
     uint32_t cr4;
@@ -154,8 +130,8 @@ void tasking_init(void) {
     
     isr_register_handler(7, device_not_available_handler);
     
-    serial_print("[TASK] Main task registered (Dynamically Aligned).\n");
-    serial_print("[TASK] FPU Lazy Switching enabled (INT 7 handler).\n");
+    serial_print("[TASK] Main task registered.\n");
+    serial_print("[TASK] FPU Lazy Switching enabled.\n");
 }
 
 // ============================================================================
@@ -189,72 +165,83 @@ task_t* task_create(const char* name, void (*entry_point)(void)) {
     int i = 0; while(name[i] && i < 31) { new_task->name[i] = name[i]; i++; }
     new_task->name[i] = '\0';
 
-    // 🔥 ПУНКТ 18 и 39 БАЗЫ ЗНАНИЙ (STACK FORGING & ABI ALIGNMENT):
+    // 🔥 STACK FORGING (Идеальное соответствие CDECL ABI)
     uint32_t* stack_top = (uint32_t*)PHYS_TO_VIRT(stack_phys + 4096);
-    *(--stack_top) = (uint32_t)entry_point;       // [ESP+24] Аргумент для трамплина
-    *(--stack_top) = (uint32_t)task_exit;         // [ESP+20] Куда вернется trampoline
-    *(--stack_top) = (uint32_t)task_entry_trampoline; // [ESP+16] Точка входа для ret
-    *(--stack_top) = 0; // EBX                    // [ESP+12]
-    *(--stack_top) = 0; // ESI                    // [ESP+8]
-    *(--stack_top) = 0; // EDI                    // [ESP+4]
-    *(--stack_top) = 0; // EBP                    // [ESP+0] <-- new_task->esp
+    *(--stack_top) = (uint32_t)entry_point;             // [ESP+8] Arg 1 для trampoline
+    *(--stack_top) = (uint32_t)task_exit;               // [ESP+4] Fake Return Address
+    *(--stack_top) = (uint32_t)task_entry_trampoline;   // [ESP+0] EIP для первого ret
+    *(--stack_top) = 0; // EBX
+    *(--stack_top) = 0; // ESI
+    *(--stack_top) = 0; // EDI
+    *(--stack_top) = 0; // EBP
     new_task->esp = (uint32_t)stack_top;
 
-    // Обнуляем таблицу FD (защита от мусора в памяти)
-    for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) {
-        new_task->fd_table[j] = 0;
-    }
-
-    // Инициализируем стандартные потоки (stdin, stdout, stderr)
+    for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) new_task->fd_table[j] = 0;
     task_init_fds(new_task); 
     
-    // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
-    // Вшиваем новую задачу в кольцевой двусвязный список планировщика.
-    // Без этого schedule() никогда не увидит новый поток!
     task_queue_add(new_task);
 
-    serial_print("[TASK] Created new task with isolated memory: ");
-    serial_print(name); 
-    serial_print("\n");
-
+    serial_printf("[TASK] Created PID %d: %s\n", new_task->pid, name);
     return new_task;
 }
 
 // ============================================================================
-// ПЛАНИРОВЩИК (ROUND-ROBIN)
+// ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IRQ SAFE)
 // ============================================================================
 void schedule(void) {
-    if (!current_task || !current_task->next) return;
+    // 🛡️ ЗАЩИТА ОТ RACE CONDITION: Сохраняем EFLAGS и отключаем прерывания
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    if (!current_task || !current_task->next) {
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        return;
+    }
     
     task_t* old_task = current_task;
     task_t* new_task = current_task->next;
     
-    if (old_task == new_task) return; 
+    if (old_task == new_task) {
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        return; 
+    }
 
     if (old_task->state == TASK_RUNNING) old_task->state = TASK_READY;
     new_task->state = TASK_RUNNING;
     current_task = new_task;
 
-    // 🔥 ПУНКТ 36 БАЗЫ ЗНАНИЙ (TSS ESP0 И ВИРТУАЛЬНЫЕ АДРЕСА):
-    // Передаем ВИРТУАЛЬНЫЙ адрес стека ядра, иначе при прерывании из Ring 3
-    // MMU не найдет стек и произойдет Page Fault -> Triple Fault.
+    // Обновление TSS ESP0 (для прерываний из Ring 3)
     if (new_task->kernel_stack != 0) {
         tss_set_kernel_stack(0x10, PHYS_TO_VIRT(new_task->kernel_stack + 4096));
     }
 
+    // Если предыдущая задача умерла, передаем её "следующему" для зачистки
+    if (old_task->state == TASK_DEAD) {
+        task_to_reap = old_task;
+    }
+
+    // ТЕЛЕПОРТАЦИЯ
     switch_context(&old_task->esp, new_task->esp, new_task->cr3);
     
-    // 🔥 ПУНКТ 37 БАЗЫ ЗНАНИЙ (REAPER MECHANISM):
-    // Если мы вернулись сюда, а old_task был DEAD, теперь безопасно освободить её память.
-    if (old_task->state == TASK_DEAD) {
-        if (old_task->pdir_virt && old_task->pdir_virt != boot_page_directory) {
-            vmm_destroy_address_space(old_task->pdir_virt);
+    // --- ЗДЕСЬ ПРОДОЛЖАЕТ ВЫПОЛНЕНИЕ УЖЕ НОВАЯ ЗАДАЧА ---
+
+    // 🆕 REAPER MECHANISM: Зачистка памяти DEAD задачи
+    if (task_to_reap) {
+        task_t* dead = task_to_reap;
+        task_to_reap = NULL; // Сбрасываем глобальный флаг
+        
+        serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
+        if (dead->pdir_virt && dead->pdir_virt != boot_page_directory) {
+            vmm_destroy_address_space(dead->pdir_virt);
         }
-        if (old_task->kernel_stack != 0) {
-            pmm_free_page(old_task->kernel_stack);
+        if (dead->kernel_stack != 0) {
+            pmm_free_page(dead->kernel_stack);
         }
-        pmm_free_page(VIRT_TO_PHYS((uint32_t)old_task));
+        pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
     }
+
+    // Восстанавливаем EFLAGS (включаем прерывания, если они были включены)
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
 
 void task_yield(void) { schedule(); }
@@ -265,9 +252,6 @@ void task_yield(void) { schedule(); }
 void task_exit(void) {
     fpu_release_ownership(current_task);
     
-    // 🆕 ОЧИСТКА VFS РЕСУРСОВ (ДЕНЬ 8.1)
-    // Проходим по всем FD процесса и принудительно закрываем их.
-    // sys_close сам позаботится о хуках драйверов, ref_count и kfree().
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
             sys_close(i); 
@@ -277,16 +261,15 @@ void task_exit(void) {
 
     current_task->state = TASK_DEAD;
     
-    // Исключаем задачу из кольцевого списка
     if (current_task->next != current_task) {
         current_task->prev->next = current_task->next;
         current_task->next->prev = current_task->prev;
     } else {
-        current_task = 0; // Это была последняя задача (фатально для ОС)
+        current_task = 0; 
     }
 
     schedule();
-    while(1) __asm__ volatile("hlt"); // На всякий случай, если schedule() вернет управление
+    while(1) __asm__ volatile("cli; hlt"); 
 }
 
 // ============================================================================
