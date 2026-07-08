@@ -29,13 +29,6 @@ extern uint8_t _kernel_end[];
 #define FB_PHYS_BASE     0xFD000000
 #define FB_SIZE_MB       16
 
-// Флаги PTE
-#define PAGE_PRESENT  0x1
-#define PAGE_WRITE    0x2
-#define PAGE_USER     0x4
-#define PAGE_PCD      0x10   // Cache Disable (для MMIO/Framebuffer)
-#define PAGE_SIZE_4MB 0x80   // PSE (Page Size Extension)
-
 // ============================================================================
 // API: БАЗОВЫЙ МАППИНГ (Обертка над vmm_map_page_in_pd)
 // ============================================================================
@@ -156,6 +149,38 @@ void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_
     pt[table_index] = phys | flags;
 
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+}
+
+// ============================================================================
+// UNMAP СТРАНИЦЫ (Очистка PTE и инвалидация TLB)
+// ============================================================================
+void vmm_unmap_page_in_pd(uint32_t* pd_virt, uint32_t virt) {
+    uint32_t dir_index = virt >> 22;
+    uint32_t table_index = (virt >> 12) & 0x3FF;
+
+    uint32_t pde = pd_virt[dir_index];
+    
+    // Если Page Table отсутствует, делать нечего
+    if (!(pde & PAGE_PRESENT)) return; 
+
+    // Получаем виртуальный адрес самой Page Table
+    uint32_t pt_phys = pde & 0xFFFFF000;
+    uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
+
+    // Если страница замаплена, очищаем PTE
+    if (pt[table_index] & PAGE_PRESENT) {
+        pt[table_index] = 0; 
+        
+        // Аппаратная инвалидация TLB для этого виртуального адреса
+        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    }
+    
+    // 💡 Менторский инсайт (TODO на Day 9):
+    // В идеале здесь нужно проверить, стала ли вся Page Table пустой (все 1024 PTE == 0).
+    // Если да, то саму страницу, занимаемую Page Table, нужно освободить через pmm_free_page(pt_phys),
+    // а в PDE записать 0. Иначе при массовом создании/убийстве процессов мы будем терять 
+    // по 4KB памяти на каждую "опустевшую" Page Table (PT Leak). 
+    // Для текущего этапа (Kernel Heap) это не критично.
 }
 
 // ============================================================================
