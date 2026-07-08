@@ -87,19 +87,22 @@ kernel.c:
 
 🧠 Управление Памятью (Memory Management)
 pmm.c (Physical Memory Manager):
-pmm_max_page: Динамически вычисляется из E820 карты при загрузке. Ограничивает сканирование битмапа только существующей физической памятью, предотвращая доступ за пределы RAM. Лимит массива битмапа статический (4GB / 128KB).
-Safe by Default: Изначально вся память помечена как занятая.
-E820 Parsing: Читает карту памяти от GRUB, освобождает регионы type=1.
-Punching Holes: Резервирует нижний 1MB, образ ядра, Multiboot info, PCI MMIO Hole.
-O(1) Allocation: Использует битмап и аппаратную инструкцию __builtin_ctz (BSF/TZCNT) для поиска первого свободного бита в 32-битном слове.
+* Safe by Default: Изначально вся память помечена как занятая.
+* E820 Parsing & Dynamic Sizing: Читает карту памяти от GRUB. Статический битмап рассчитан на 4GB (128KB в .bss), но динамическая переменная `pmm_max_page` ограничивает сканирование только реальным объемом RAM, найденным в E820. Это предотвращает выход за пределы физически существующей памяти.
+* Punching Holes: Резервирует нижний 1MB, образ ядра, Multiboot info, PCI MMIO Hole.
+* O(1) Allocation: Использует битмап и аппаратную инструкцию __builtin_ctz (BSF/TZCNT).
+
 paging.c (Virtual Memory Manager):
-Direct Map: Первые 512MB RAM замаплены в 0xC0000000+.
-On-Demand Paging (Lazy Allocation): Обработчик Page Fault (INT 14) перехватывает обращения к 0xD0000000 - 0xE0000000, выделяет Zero-filled page и делает return. Процессор аппаратно повторяет инструкцию.
-Shared Kernel Space: vmm_create_address_space() клонирует индексы 768-1023 из глобального PD, обеспечивая "общую крышу" для прерываний.
+* Direct Map: Первые 512MB RAM замаплены в 0xC0000000+ (Kernel Space).
+* On-Demand Paging (Lazy Allocation): Обработчик Page Fault (INT 14) перехватывает обращения к 0xD0000000 - 0xE0000000, выделяет Zero-filled page и делает return. Процессор аппаратно повторяет инструкцию.
+* Security Fix: Диапазон Kernel Heap (0xD0000000) мапится без флага PAGE_USER, чтобы защитить память ядра от доступа из Ring 3.
+* Deep Destroy: `vmm_destroy_address_space()` корректно освобождает не только Page Tables, но и сами физические страницы данных (PTE), предотвращая утечки памяти при завершении процессов.
+* Shared Kernel Space: vmm_create_address_space() клонирует индексы 768-1023 из глобального PD.
+
 heap.c (Kernel Heap):
-Buddy System: Неявное бинарное дерево (tree[TREE_SIZE]).
-O(1) Merge: Адрес близнеца вычисляется через buddy = curr ^ 1.
-Защита: BlockHeader с magic = 0xDEADBEEF для детекта double-free.
+* Buddy System: Неявное бинарное дерево (tree[TREE_SIZE]). O(1) Merge через XOR (buddy = curr ^ 1).
+* Zero-Cost Lazy Heap: Heap больше не "съедает" 32 МБ физической RAM на старте. Он только резервирует виртуальный диапазон. Физические страницы выделяются аппаратно через Page Fault (INT 14) только в момент первой записи (например, при сохранении BlockHeader).
+* Защита: BlockHeader с magic = 0xDEADBEEF для детекта double-free и повреждения границ.
 
 ⚙️ Многозадачность (Day 7)
 task.c (Scheduler):
@@ -200,11 +203,14 @@ shell_run() (Бесконечный цикл CLI)
 0x00000000 - 0x00100000 : Lower Memory (IVT, BDA, VGA RAM) -> Зарезервировано PMM.
 0x00100000 - 0x01000000 : Kernel Image & Boot Structures (1MB - 16MB) -> Зарезервировано PMM.
 0xC0000000 - 0xDFFFFFFF : Higher Half Kernel (Direct Map 512MB RAM).
-0xD0000000 - 0xD2000000 : Kernel Heap (32MB, Buddy System, Lazy Alloc).
+0xD0000000 - 0xD2000000 : Kernel Heap (32MB Virtual Pool, Buddy System). Физически не выделен на старте, бэкапится страницами по требованию (On-Demand Paging)..
 0xE0000000 - 0xFFFFFFFF : PCI MMIO Hole -> Зарезервировано PMM.
 0xFD000000 - 0xFE000000 : Framebuffer LFB (16MB, PAGE_PCD).
 
 ⚠️ Критические архитектурные нюансы (Выжимка из Базы Знаний)
+* Heap-VMM Synergy (Lazy Write): `kmalloc()` возвращает виртуальный адрес, у которого нет физической страницы (PTE пуст). Физическая страница аллоцируется из PMM только когда ядро попытается записать туда данные (например, `header->magic = 0xDEADBEEF`), что триггерит INT 14. Это экономит десятки мегабайт RAM.
+* VMM Deep Free Trap: При уничтожении адресного пространства (смерть процесса) недостаточно освободить только Page Directory и Page Tables. Необходимо пройтись по всем валидным PTE и вызвать `pmm_free_page()` для самих страниц данных, иначе система быстро упадет в OOM из-за утечки физической памяти.
+* Kernel Heap Isolation: Обработчик Page Fault для диапазона 0xD0000000 (Kernel Heap) ОБЯЗАН мапить страницы без флага `PAGE_USER`. Иначе пользовательский процесс сможет легально читать/писать в кучу ядра, просто обратившись по этому адресу.
 VIRT_TO_PHYS Underflow: Секции .boot имеют адреса < 0xC0000000. Макрос VIRT_TO_PHYS обязан содержать проверку addr >= 0xC0000000, иначе произойдет unsigned underflow и загрузка мусора в CR3.
 TSS ESP0 Virtual Address: В schedule() при обновлении TSS нужно передавать виртуальный адрес стека ядра (PHYS_TO_VIRT), иначе MMU не найдет стек при прерывании из Ring 3.
 EOI Lock: Отправка EOI в PIC должна быть ДО вызова C-обработчика IRQ, иначе schedule() переключит задачу, и линия IRQ заблокируется навсегда.
@@ -221,7 +227,8 @@ PSF1 UCS-2: Таблицы Unicode в PSF1 шрифтах закодирован
 Добавить поддержку NX (No-Execute) бита в Page Tables.
 Перенести sys_exit с Context Hijacking на полноценное уничтожение процесса через task_exit() и возврат в init (PID 1).
 Добавить User Pointer Validation в sys_write (проверка, что buf находится в User Space 0x00000000 - 0xBFFFFFFF).
-
+* [VMM] Реализовать PT Leak Protection: В `vmm_unmap_page()` добавить проверку на пустоту Page Table. Если все 1024 PTE в таблице стали нулевыми, нужно освободить саму физическую страницу, занимаемую Page Table, и обнулить PDE.
+* [PMM/VMM] Расширение Direct Map: Сейчас Direct Map покрывает 512MB. Когда PMM динамически найдет >512MB RAM, нужно будет либо расширить Direct Map в `paging_init`, либо реализовать Window Mapping (временный маппинг) для доступа к высокой физической памяти.
 🚀 Домашнее задание
 Сейчас константы вроде USER_STACK_VIRT_ADDR живут в kernel.c. чтобы к следующему коммиту ты перенес все архитектурные лимиты (границы Heap, границы User Space, адреса Lazy Alloc) в отдельный файл include/config.h или include/paging.h. Ядро не должно хардкодить само себя!
 
