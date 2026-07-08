@@ -343,6 +343,112 @@ E. ОПТИМИЗАЦИЯ (Performance)
 - Immutable Sections: В linker.ld добавляется секция .immutable, которую VMM 
   мапит с PAGE_PCD | PAGE_READ (без WRITE и EXECUTE для данных).
 
+F. ЖИЗНЕННЫЙ ЦИКЛ (Hybrid Process Model)
+
+Архитектура использует комбинированный подход к управлению жизненным циклом процессов, 
+сочетая лучшие практики Unix и Erlang/OTP для разных типов задач:
+
+1. Unix-style (Orphan Adoption) — для пользовательских приложений:
+   * Когда родитель умирает, все его живые дети автоматически усыновляются Init Task (PID 1)
+   * Дети продолжают работать без перебоев, сохраняя свое состояние
+   * Подходит для: пользовательских приложений, фоновых задач, демонов, тестовых процессов
+   * Флаг в task_t: orphan_on_exit = 1 (по умолчанию)
+   * Пример: Shell запускает web server в фоне -> Shell падает -> web server усыновляется init и продолжает работать
+
+2. Erlang-style (Linked Processes) — для критичных сервисов:
+   * Падение родителя = каскадное падение всех связанных детей (linked processes)
+   * Супервизор (PID 1) мгновенно перезапускает ВСЕ дерево процессов < 100мс
+   * Подходит для: Shell + Helper, VFS Servers (fat32, tmpfs), IPC Daemon, Network Stack
+   * Флаги в task_t: orphan_on_exit = 0, monitor_children = 1
+   * Гарантирует: Процессы всегда в синхронизированном состоянии (нет stale state)
+
+Критичные сервисы (Erlang-style):
+┌─────────────────────────────────────────┐
+│  Shell Supervisor (PID 2)               │
+│  Strategy: one_for_all                  │
+│  ├── shell (PID 10)                     │
+│  └── shell_helper (PID 11)              │
+│      При падении shell -> перезапуск    │
+│      ОБА процессов < 100мс              │
+└─────────────────────────────────────────┘
+
+┌─────────────────────────────────────────┐
+│  VFS Supervisor (PID 3)                 │
+│  Strategy: one_for_one                  │
+│  ├── fat32_server (PID 20)              │
+│  └── tmpfs_server (PID 21)              │
+│      При падении fat32 -> перезапуск    │
+│      ТОЛЬКО fat32_server                │
+└─────────────────────────────────────────┘
+
+Некритичные процессы (Unix-style):
+┌─────────────────────────────────────────┐
+│  User Sandbox (PID 100)                 │
+│  Strategy: orphan_on_exit               │
+│  ├── app1 (PID 101)                     │
+│  └── app2 (PID 102)                     │
+│      При падении Sandbox -> app1 и app2 │
+│      усыновляются init (PID 1)          │
+└─────────────────────────────────────────┘
+
+Orphan Adoption Algorithm:
+void sys_exit(int code) {
+    task_t* current = current_task;
+    
+    if (current->orphan_on_exit) {
+        // Unix-style: усыновить детей init
+        while (current->children != NULL) {
+            task_t* child = current->children;
+            current->children = child->next_sibling;
+            child->parent = init_task;
+            child->next_sibling = init_task->children;
+            init_task->children = child;
+        }
+    } else if (current->monitor_children) {
+        // Erlang-style: убить всех детей
+        kill_all_children(current);
+    }
+    
+    current->state = TASK_DEAD;
+    task_to_reap = current;
+    schedule();
+}
+
+Idle Task (PID 0):
+- Создается при tasking_init() с самым низким приоритетом
+- Бесконечный цикл: while(1) { __asm__ volatile("hlt"); }
+- Гарантирует, что schedule() всегда найдет задачу для переключения
+- Предотвращает Triple Fault при пустом списке задач
+
+Init Task (PID 1):
+- Корень дерева процессов (parent = NULL)
+- Главный цикл: sys_waitpid(-1, &status, 0) для сбора exit codes
+- Усыновляет всех сирот (orphan adoption)
+- Перезапускает упавших супервизоров (если restart=always)
+- Никогда не умирает (Kernel Panic при падении init)
+
+Supervisor Tree (Day 13):
+init (PID 1) — Root Supervisor
+├── shell_supervisor (PID 2) — one_for_all
+│   ├── shell (PID 10)
+│   └── shell_helper (PID 11)
+├── vfs_supervisor (PID 3) — one_for_one
+│   ├── fat32_server (PID 20)
+│   └── tmpfs_server (PID 21)
+└── ipc_supervisor (PID 4) — one_for_all
+    ├── mailbox_server (PID 30)
+    └── shared_memory_server (PID 31)
+
+User Sandboxes (Unix-style):
+└── user_app (PID 100) — orphan_on_exit=1
+
+Философия выбора:
+- Если процессы делят состояние или требуют координации → Erlang-style (linked)
+- Если процессы независимы → Unix-style (orphan)
+
+Это дает 99.999% uptime для критичных сервисов и гибкость для пользовательских приложений.
+
+
 📅 Дорожная карта внедрения (Post-Day 10)
 День 11: Process Lifecycle
 - sys_fork, sys_exec, sys_waitpid
