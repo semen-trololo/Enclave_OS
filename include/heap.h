@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "klib.h"
 
 // Инициализация кучи: маппинг физических страниц в виртуальное пространство 0xD0000000
 void heap_init(void);
