@@ -2,14 +2,34 @@
 #include "heap.h"
 #include "klib.h"
 #include "serial.h"
-#include "task.h" // 🆕 КРИТИЧНО: Нужно для current_task, task_t и TASK_MAX_OPEN_FILES
+#include "task.h" 
 
-// Глобальный корень файловой системы ("/")
 static vfs_node_t* vfs_root = 0;
 
 // ==========================================
+// ГЛОБАЛЬНЫЕ СИНГЛТОНЫ СТАНДАРТНЫХ ПОТОКОВ
+// ==========================================
+static vfs_node_t stdin_node_singleton;
+static vfs_node_t stdout_node_singleton;
+static bool std_nodes_initialized = false;
+
+static int32_t stdout_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
+    (void)node; (void)offset;
+    for (uint32_t i = 0; i < size; i++) {
+        k_putchar(buffer[i]);   // Вывод на экран (VGA/FB через Strategy Pattern)
+        serial_putc(buffer[i]); // Зеркалирование в COM1 для headless debug
+    }
+    return size;
+}
+
+static int32_t stdin_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
+    (void)node; (void)offset; (void)size; (void)buffer;
+    // TODO: День 10 - интеграция с Ring Buffer клавиатуры
+    return 0; // EOF
+}
+
+// ==========================================
 // 1. УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ОБХОДА ДЕРЕВА (LCRS)
-// (Должны быть объявлены ДО vfs_init и vfs_create_node)
 // ==========================================
 
 static int32_t vfs_generic_readdir(vfs_node_t* node, uint32_t index, dirent_t* entry) {
@@ -17,7 +37,7 @@ static int32_t vfs_generic_readdir(vfs_node_t* node, uint32_t index, dirent_t* e
     vfs_node_t* child = node->first_child;
     uint32_t i = 0;
     while (child && i < index) { child = child->next_sibling; i++; }
-    if (!child) return -1; // Конец директории
+    if (!child) return -1; 
     
     entry->ino = 0; 
     int j = 0; while(child->name[j] && j < VFS_MAX_FILENAME - 1) { entry->name[j] = child->name[j]; j++; }
@@ -29,9 +49,7 @@ static vfs_node_t* vfs_generic_finddir(vfs_node_t* node, const char* name) {
     if (!node || !name) return 0;
     vfs_node_t* child = node->first_child;
     while (child) {
-        int i = 0;
-        while (child->name[i] && name[i] && child->name[i] == name[i]) i++;
-        if (child->name[i] == '\0' && name[i] == '\0') return child;
+        if (k_strcmp(child->name, name) == 0) return child;
         child = child->next_sibling;
     }
     return 0;
@@ -53,7 +71,7 @@ void vfs_init(void) {
     k_memset(vfs_root, 0, sizeof(vfs_node_t));
     vfs_root->name[0] = '/';
     vfs_root->name[1] = '\0';
-    //vfs_root->flags = FS_DIRECTORY | FS_SYSTEM;
+    vfs_root->flags = FS_DIRECTORY;
     vfs_root->permissions = PERM_READ_ONLY;
     vfs_root->readdir = vfs_generic_readdir;
     vfs_root->finddir = vfs_generic_finddir;
@@ -66,12 +84,8 @@ vfs_node_t* vfs_create_node(const char* name, uint32_t flags, vfs_node_t* parent
     if (!node) return 0;
     
     k_memset(node, 0, sizeof(vfs_node_t));
-    
     int i = 0;
-    while (name[i] && i < VFS_MAX_FILENAME - 1) {
-        node->name[i] = name[i];
-        i++;
-    }
+    while (name[i] && i < VFS_MAX_FILENAME - 1) { node->name[i] = name[i]; i++; }
     node->name[i] = '\0';
     
     node->flags = flags;
@@ -82,26 +96,19 @@ vfs_node_t* vfs_create_node(const char* name, uint32_t flags, vfs_node_t* parent
         node->finddir = vfs_generic_finddir;
     }
     
-    if (parent) {
-        vfs_add_child(parent, node);
-    }
-    
+    if (parent) vfs_add_child(parent, node);
     return node;
 }
 
 void vfs_add_child(vfs_node_t* parent, vfs_node_t* child) {
     if (!parent || !child) return;
-    
     child->parent = parent;
     child->next_sibling = 0;
-    
     if (!parent->first_child) {
         parent->first_child = child;
     } else {
         vfs_node_t* current = parent->first_child;
-        while (current->next_sibling) {
-            current = current->next_sibling;
-        }
+        while (current->next_sibling) current = current->next_sibling;
         current->next_sibling = child;
     }
 }
@@ -113,16 +120,11 @@ void vfs_add_child(vfs_node_t* parent, vfs_node_t* child) {
 int vfs_mount(const char* mountpoint_path, vfs_node_t* target_node) {
     vfs_node_t* mountpoint = vfs_findnode(mountpoint_path);
     if (!mountpoint || !target_node) return -1;
-    
     if (!(mountpoint->flags & FS_DIRECTORY)) return -1;
     
     mountpoint->flags |= FS_MOUNTPOINT;
     mountpoint->mountpoint_node = target_node;
-    
-    serial_print("[VFS] Mounted filesystem at: ");
-    serial_print(mountpoint_path);
-    serial_print("\n");
-    
+    serial_printf("[VFS] Mounted filesystem at: %s\n", mountpoint_path);
     return 0;
 }
 
@@ -153,12 +155,11 @@ vfs_node_t* vfs_findnode(const char* path) {
         current = current->finddir(current, token);
         if (!current) return 0;
     }
-    
     return current;
 }
 
 // ==========================================
-// 4. ВНУТРЕННИЕ API ЯДРА (Обходят FS_SYSTEM)
+// 4. ВНУТРЕННИЕ API ЯДРА
 // ==========================================
 
 int32_t vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
@@ -177,19 +178,10 @@ int32_t vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_
 
 int sys_open(const char* pathname, uint32_t flags) {
     if (!pathname) return VFS_ENOENT;
-    
     vfs_node_t* node = vfs_findnode(pathname);
     if (!node) return VFS_ENOENT;
     
-    // 🛑 RING-BASED ACCESS CONTROL (ИСПРАВЛЕНИЕ ЛОГИКИ ПРАВ)
-    // Запрещаем открытие системных ФАЙЛОВ из Ring 3 (например, /boot/secret.txt).
-    // Но РАЗРЕШАЕМ открытие системных ДИРЕКТОРИЙ (например, / и /boot), 
-    // чтобы команда `ls` могла получить FD и прочитать структуру дерева через sys_readdir.
-    // Это безопасно: sys_read на директории не сработает, так как node->read == NULL.
-    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) {
-        return VFS_EACCES;
-    }
-    
+    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) return VFS_EACCES;
     if (node->open && node->open(node, flags) != 0) return VFS_EACCES;
     
     open_file_t* of = (open_file_t*)kmalloc(sizeof(open_file_t));
@@ -213,7 +205,6 @@ int sys_open(const char* pathname, uint32_t flags) {
 
 int sys_close(int fd) {
     if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) return -1;
-    
     open_file_t* of = current_task->fd_table[fd];
     if (!of) return -1;
     
@@ -248,72 +239,48 @@ int32_t sys_write(int fd, const void* buf, uint32_t count) {
 
 int32_t sys_readdir(int fd, uint32_t index, dirent_t* entry) {
     if (fd < 0 || fd >= TASK_MAX_OPEN_FILES || !entry) return -1;
-    
     open_file_t* of = current_task->fd_table[fd];
+    if (!of || !of->node) return -1;
+    if (!(of->node->flags & FS_DIRECTORY)) return -1;
+    if (!of->node->readdir) return -1;
     
-    if (!of) { 
-        serial_printf("[SYS_READDIR] FAIL: fd_table[%d] is NULL!\n", fd); 
-        return -1; 
-    }
-    if (!of->node) { 
-        serial_print("[SYS_READDIR] FAIL: of->node is NULL!\n"); 
-        return -1; 
-    }
-    if (!(of->node->flags & FS_DIRECTORY)) { 
-        serial_printf("[SYS_READDI…s' is not a directory (flags=0x%x)!\n", of->node->name, of->node->flags); 
-        return -1; 
-    }
-    if (!of->node->readdir) { 
-        serial_printf("[SYS_READDIR] FAIL: Node '%s' has no readdir function!\n", of->node->name); 
-        return -1; 
-    }
-    
-    serial_printf("[SYS_READDIR] OK: Calling readdir for '%s', index %d\n", of->node->name, index);
-    int32_t ret = of->node->readdir(of->node, index, entry);
-    serial_printf("[SYS_READDIR] Result: %d\n", ret);
-    
-    return ret;
+    return of->node->readdir(of->node, index, entry);
 }
 
 // ==========================================
 // 6. СТАНДАРТНЫЕ ПОТОКИ (FD 0, 1, 2)
 // ==========================================
-
-static int32_t stdout_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
-    (void)node; (void)offset;
-    for (uint32_t i = 0; i < size; i++) {
-        serial_putc(buffer[i]);
-    }
-    return size;
-}
-
 void task_init_fds(task_t* task) {
     if (!task) return;
-    
-    vfs_node_t* stdout_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-    if (stdout_node) {
-        k_memset(stdout_node, 0, sizeof(vfs_node_t));
-        stdout_node->flags = FS_CHARDEVICE;
-        stdout_node->write = stdout_write;
+
+    if (!std_nodes_initialized) {
+        k_memset(&stdin_node_singleton, 0, sizeof(vfs_node_t));
+        stdin_node_singleton.flags = FS_CHARDEVICE;
+        stdin_node_singleton.read = stdin_read;
+
+        k_memset(&stdout_node_singleton, 0, sizeof(vfs_node_t));
+        stdout_node_singleton.flags = FS_CHARDEVICE;
+        stdout_node_singleton.write = stdout_write;
         
-        open_file_t* of_stdin = (open_file_t*)kmalloc(sizeof(open_file_t));
-        open_file_t* of_stdout = (open_file_t*)kmalloc(sizeof(open_file_t));
-        
-        if (of_stdin && of_stdout) {
-            vfs_node_t* stdin_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
-            if(stdin_node) {
-                k_memset(stdin_node, 0, sizeof(vfs_node_t));
-                stdin_node->flags = FS_CHARDEVICE;
-                of_stdin->node = stdin_node;
-            }
-            
-            of_stdin->ref_count = 1;
-            of_stdout->node = stdout_node; 
-            of_stdout->ref_count = 1;
-            
-            task->fd_table[0] = of_stdin;
-            task->fd_table[1] = of_stdout;
-            task->fd_table[2] = of_stdout;
-        }
+        std_nodes_initialized = true;
+    }
+
+    open_file_t* of_stdin = (open_file_t*)kmalloc(sizeof(open_file_t));
+    open_file_t* of_stdout = (open_file_t*)kmalloc(sizeof(open_file_t));
+
+    if (of_stdin && of_stdout) {
+        of_stdin->node = &stdin_node_singleton;
+        of_stdin->offset = 0;
+        of_stdin->flags = O_RDONLY;
+        of_stdin->ref_count = 1;
+
+        of_stdout->node = &stdout_node_singleton;
+        of_stdout->offset = 0;
+        of_stdout->flags = O_WRONLY;
+        of_stdout->ref_count = 2; // stdout (1) и stderr (2) делят один open_file
+
+        task->fd_table[0] = of_stdin;
+        task->fd_table[1] = of_stdout;
+        task->fd_table[2] = of_stdout; 
     }
 }
