@@ -2,23 +2,27 @@
 #include "pmm.h"
 #include "paging.h"
 #include "klib.h"
-#include "vga.h"
 #include "serial.h"
 
+// ============================================================================
+// КОНСТАНТЫ И КОНФИГУРАЦИЯ
+// ============================================================================
 #define HEAP_START 0xD0000000
-#define HEAP_SIZE  (32 * 1024 * 1024) // 32 MB
+#define HEAP_SIZE  (32 * 1024 * 1024) // 32 MB Virtual Pool
 #define HEAP_PAGES (HEAP_SIZE / 4096)  // 8192 pages
 
-#define MAX_ORDER 13   // 2^13 * 4KB = 32MB
-#define TREE_SIZE  16384 // 2^(13 + 1)
+// MAX_ORDER: 2^13 * 4KB = 32MB. 
+// Уровень 0 = 4KB, Уровень 13 = 32MB.
+#define MAX_ORDER 13   
+#define TREE_SIZE  16384 // 2^(13 + 1) узлов в неявном бинарном дереве
 
 // Статусы узлов дерева
-#define NODE_UNUSED 0 // Внутренний узел, который полностью слит с родителем
-#define NODE_FREE   1 // Блок свободен и готов к выдаче
-#define NODE_ALLOC  2 // Блок выделен пользователю
-#define NODE_SPLIT  3 // Блок разбит на два меньших близнеца
+#define NODE_UNUSED 0 // Внутренний узел, слит с родителем
+#define NODE_FREE   1 // Блок свободен
+#define NODE_ALLOC  2 // Блок выделен
+#define NODE_SPLIT  3 // Блок разбит на близнецов
 
-// Заголовок блока (скрыт от пользователя, находится перед выданным указателем)
+// Заголовок блока (скрыт от пользователя)
 typedef struct {
     uint32_t size;
     uint32_t magic;
@@ -26,23 +30,24 @@ typedef struct {
 
 #define HEADER_MAGIC 0xDEADBEEF
 
-// Метаданные: неявное бинарное дерево
+// Метаданные: неявное бинарное дерево (в .bss секции)
 static uint8_t tree[TREE_SIZE];
 
-// Вспомогательная функция: вычисляет глубину узла в дереве (0 для корня, 10 для листьев)
-static int get_depth(int node) {
-    int d = 0;
-    while (node > 1) {
-        node >>= 1;
-        d++;
-    }
-    return d;
+// ============================================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (O(1) Hardware Accelerated)
+// ============================================================================
+
+// Вычисляет глубину узла (0 для корня, 13 для листьев) через Count Leading Zeros
+static inline int get_depth(int node) {
+    if (node <= 0) return 0;
+    return 31 - __builtin_clz(node);
 }
 
-// Рекурсивный поиск свободного блока нужного или большего размера
+// Рекурсивный поиск свободного блока (спуск по дереву)
 static int find_free(int node, int current_level, int target_level) {
     if (tree[node] == NODE_ALLOC) return -1;
-    if (tree[node] == NODE_FREE) return node; // Нашли!
+    if (tree[node] == NODE_FREE) return node; 
+    
     if (tree[node] == NODE_SPLIT) {
         if (current_level == target_level) return -1;
         // Ищем в левом, затем в правом поддереве
@@ -53,28 +58,27 @@ static int find_free(int node, int current_level, int target_level) {
     return -1;
 }
 
+// ============================================================================
+// ИНИЦИАЛИЗАЦИЯ (Zero-Cost Lazy Allocation)
+// ============================================================================
 void heap_init(void) {
-    k_printf("[HEAP] Allocating %d pages for Kernel Heap...\n", HEAP_PAGES);
-    serial_print("[SERIAL] Allocating  pages for Kernel Heap...\n");
-    // 1. Pre-allocation: запрашиваем физические страницы и мапим их в виртуальный пул
-    for (uint32_t i = 0; i < HEAP_PAGES; i++) {
-        uint32_t phys = pmm_alloc_page();
-        if (phys == 0) {
-            k_printf("[HEAP] FATAL: Out of physical memory during heap init!\n");
-            serial_print("[SERIAL] FATAL: Out of physical memory during heap init!...\n");
-            return;
-        }
-        vmm_map_page(HEAP_START + i * 4096, phys, PAGE_PRESENT | PAGE_WRITE);
-    }
+    serial_print("[HEAP] Initializing Buddy System (Lazy Allocation mode)...\n");
     
-    // 2. Инициализация дерева
+    // 🛡️ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Мы НЕ выделяем физические страницы здесь!
+    // Страницы будут выделяться аппаратно через Page Fault Handler (INT 14),
+    // когда ядро впервые попытается записать данные в выданный kmalloc адрес.
+    // Это экономит 32 МБ физической RAM на старте системы.
+    
     k_memset(tree, NODE_UNUSED, sizeof(tree));
-    tree[1] = NODE_FREE; // Корень (весь пул 4 МБ) изначально свободен
+    tree[1] = NODE_FREE; // Корень (весь виртуальный пул 32 МБ) свободен
     
-    k_printf("[HEAP] Initialized 4 MB Virtual Pool at 0x%x\n", HEAP_START);
-    serial_print("[SERIAL] Initialized 4 MB Virtual Pool ...\n");
+    serial_printf("[HEAP] Virtual pool ready: 0x%x - 0x%x (%u MB)\n", 
+                  HEAP_START, HEAP_START + HEAP_SIZE, HEAP_SIZE / (1024*1024));
 }
 
+// ============================================================================
+// АЛЛОКАЦИЯ (kmalloc)
+// ============================================================================
 void* kmalloc(size_t size) {
     if (size == 0 || size > HEAP_SIZE) return NULL;
     
@@ -92,7 +96,10 @@ void* kmalloc(size_t size) {
     
     // 2. Ищем свободный узел
     int node = find_free(1, MAX_ORDER, target_level);
-    if (node == -1) return NULL; // OOM
+    if (node == -1) {
+        serial_print("[HEAP] OOM: Buddy system full!\n");
+        return NULL; 
+    }
     
     // 3. Спускаемся вниз, разделяя (split) блоки по пути
     int depth = get_depth(node);
@@ -115,7 +122,7 @@ void* kmalloc(size_t size) {
     uint32_t offset = block_index * block_size;
     uint32_t virt_addr = HEAP_START + offset;
     
-    // 5. Пишем заголовок и возвращаем указатель со сдвигом
+    // 5. Пишем заголовок (Эта запись триггерит Page Fault -> Lazy Alloc физической страницы!)
     BlockHeader* header = (BlockHeader*)virt_addr;
     header->size = block_size;
     header->magic = HEADER_MAGIC;
@@ -123,13 +130,16 @@ void* kmalloc(size_t size) {
     return (void*)(virt_addr + sizeof(BlockHeader));
 }
 
+// ============================================================================
+// ОСВОБОЖДЕНИЕ (kfree)
+// ============================================================================
 void kfree(void* ptr) {
     if (!ptr) return;
     
     // 1. Читаем заголовок
     BlockHeader* header = (BlockHeader*)((uint32_t)ptr - sizeof(BlockHeader));
     if (header->magic != HEADER_MAGIC) {
-        k_printf("[HEAP] ERROR: Invalid magic in kfree! (Double free or corruption)\n");
+        serial_printf("[HEAP] FATAL: Invalid magic in kfree! (Double free or corruption at 0x%x)\n", (uint32_t)ptr);
         return;
     }
     
@@ -153,7 +163,7 @@ void kfree(void* ptr) {
     tree[curr] = NODE_FREE;
     header->magic = 0; // Затираем магическое число для защиты от double-free
     
-    // 4. Каскадное слияние (merge) с близнецами
+    // 4. Каскадное слияние (merge) с близнецами (XOR Trick)
     while (curr > 1) {
         int buddy = curr ^ 1;      // Адрес близнеца через XOR
         int parent = curr / 2;
@@ -164,11 +174,14 @@ void kfree(void* ptr) {
             tree[parent] = NODE_FREE; // Родитель становится свободным
             curr = parent;            // Поднимаемся выше
         } else {
-            break; // Близнец занят, слияние невозможно
+            break; // Близнец занят или разбит, слияние невозможно
         }
     }
 }
 
+// ============================================================================
+// ДИАГНОСТИКА (Для Shell)
+// ============================================================================
 void heap_print_status(void) {
     uint32_t free_bytes = 0;
     uint32_t alloc_bytes = 0;
@@ -183,28 +196,29 @@ void heap_print_status(void) {
         }
     }
     
-    // Динамический расчет размеров из макросов
-    uint32_t total_mb = HEAP_SIZE / (1024 * 1024);
-    uint32_t free_mb = free_bytes / (1024);
-    uint32_t alloc_mb = alloc_bytes / (1024);
+    uint32_t total_kb = HEAP_SIZE / 1024;
+    uint32_t free_kb = free_bytes / 1024;
+    uint32_t alloc_kb = alloc_bytes / 1024;
 
-    vga_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
-    k_printf("[HEAP] --- Kernel Heap Status ---\n");
-    vga_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    k_printf("[HEAP] Virtual Base: 0x%x\n", HEAP_START);
+    // Используем k_set_color (Strategy Pattern), а не vga_set_color!
+    k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+    k_printf("\n--- [ Kernel Heap Status ] ---\n");
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_printf(" Base:      0x%x\n", HEAP_START);
+    k_printf(" Total:     %u KB (%u MB)\n", total_kb, total_kb / 1024);
     
-    // НИКАКОГО ХАРДКОДА! Только математика.
-    k_printf("[HEAP] Total Size:   %u MB (%u bytes)\n", total_mb, HEAP_SIZE);
+    k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    k_printf(" Free:      %u KB\n", free_kb);
     
-    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    k_printf("[HEAP] Free:         %u KB (%u bytes)\n", free_mb, free_bytes);
-    
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    k_printf("[HEAP] Allocated:    %u KB (%u bytes)\n", alloc_mb, alloc_bytes);
-    vga_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_printf(" Allocated: %u KB\n", alloc_kb);
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_printf("----------------------------\n\n");
 }
 
 void heap_run_tests(void) {
+    serial_print("[HEAP TEST] Starting Buddy System stress test...\n");
+    
     k_print("[HEAP TEST] 1. Small allocations... ");
     void* p1 = kmalloc(100);
     void* p2 = kmalloc(200);
