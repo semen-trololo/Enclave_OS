@@ -221,6 +221,9 @@ PSF1 UCS-2: Таблицы Unicode в PSF1 шрифтах закодирован
 Перенести sys_exit с Context Hijacking на полноценное уничтожение процесса через task_exit() и возврат в init (PID 1).
 Добавить User Pointer Validation в sys_write (проверка, что buf находится в User Space 0x00000000 - 0xBFFFFFFF).
 
+🚀 Домашнее задание
+Сейчас константы вроде USER_STACK_VIRT_ADDR живут в kernel.c. чтобы к следующему коммиту ты перенес все архитектурные лимиты (границы Heap, границы User Space, адреса Lazy Alloc) в отдельный файл include/config.h или include/paging.h. Ядро не должно хардкодить само себя!
+
 6. ПЛАН РАЗВИТИЯ (Дорожная карта)
 
 ✅ ЧТО РАБОТАЕТ (Завершено на День 8.1)
