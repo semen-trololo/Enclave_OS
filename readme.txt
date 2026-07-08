@@ -208,6 +208,7 @@ shell_run() (Бесконечный цикл CLI)
 0xFD000000 - 0xFE000000 : Framebuffer LFB (16MB, PAGE_PCD).
 
 ⚠️ Критические архитектурные нюансы (Выжимка из Базы Знаний)
+Context Hijacking is Dead: sys_exit больше не запускает shell_run() напрямую. Он вызывает task_exit(), что гарантирует освобождение стека, Page Directory и FD таблицы через механизм Grim Reaper в schedule().
 Grim Reaper Pattern: Освобождение ресурсов TASK_DEAD задачи невозможно в её собственном контексте (так как switch_context использует её стек для выхода). Используется глобальный флаг task_to_reap, который перехватывается следующей запланированной задачей сразу после возврата из switch_context.
 Scheduler IRQ Safety: schedule() обязан сохранять EFLAGS и выполнять cli на входе, чтобы предотвратить повреждение связного списка задач, если schedule() вызван добровольно (sys_yield) при активных прерываниях.
 * Heap-VMM Synergy (Lazy Write): `kmalloc()` возвращает виртуальный адрес, у которого нет физической страницы (PTE пуст). Физическая страница аллоцируется из PMM только когда ядро попытается записать туда данные (например, `header->magic = 0xDEADBEEF`), что триггерит INT 14. Это экономит десятки мегабайт RAM.
@@ -227,8 +228,6 @@ PSF1 UCS-2: Таблицы Unicode в PSF1 шрифтах закодирован
 
 Реализовать sys_fork() и sys_exec() (День 9).
 Добавить поддержку NX (No-Execute) бита в Page Tables.
-Перенести sys_exit с Context Hijacking на полноценное уничтожение процесса через task_exit() и возврат в init (PID 1).
-Добавить User Pointer Validation в sys_write (проверка, что buf находится в User Space 0x00000000 - 0xBFFFFFFF).
 * [VMM] Реализовать PT Leak Protection: В `vmm_unmap_page()` добавить проверку на пустоту Page Table. Если все 1024 PTE в таблице стали нулевыми, нужно освободить саму физическую страницу, занимаемую Page Table, и обнулить PDE.
 * [PMM/VMM] Расширение Direct Map: Сейчас Direct Map покрывает 512MB. Когда PMM динамически найдет >512MB RAM, нужно будет либо расширить Direct Map в `paging_init`, либо реализовать Window Mapping (временный маппинг) для доступа к высокой физической памяти.
 🚀 Домашнее задание
@@ -243,6 +242,8 @@ PSF1 UCS-2: Таблицы Unicode в PSF1 шрифтах закодирован
 День 6: Higher Half Kernel, E820 Parsing, On-Demand Paging (Page Fault Handler).
 День 7: Preemptive Multitasking (Round-Robin), Hardware Memory Isolation (CR3 Switch), Lazy FPU Switching (#NM, fxsave).
 День 8.1: VFS (Полиморфизм, LCRS), Initrd (TAR UStar tmpfs), 3-звенная модель File Descriptors, Ring-Based Access Control (RBAC), POSIX Syscalls (ls, cat).
+User Pointer Validation: Все системные вызовы, принимающие указатели из Ring 3 (sys_read, sys_write), проходят строгую проверку is_user_pointer(). Любая попытка передать адрес >= 0xC0000000 (Kernel Space) пресекается с возвратом EFAULT.
+VFS Standard Streams: stdin и stdout реализованы как глобальные синглтоны vfs_node_t. Это предотвращает утечки памяти при массовом создании/уничтожении процессов.
 
 🚀 ЧТО ДЕЛАТЬ ДАЛЬШЕ (Приоритеты)
 📅 День 8.2: Storage & FAT32 (Отложено до стабилизации User Space)
