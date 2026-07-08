@@ -71,7 +71,7 @@ static void thread_math(void) {
             : "m"(a), "m"(b)
         );
         
-        serial_printf("[TASK: MATH] FPU computed: %d (approx)\n", (int)result);
+        //serial_printf("[TASK: MATH] FPU computed: %d (approx)\n", (int)result);
         for(volatile int i = 0; i < 10000000; i++);
         task_yield();
     }

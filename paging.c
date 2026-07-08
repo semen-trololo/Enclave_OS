@@ -6,7 +6,7 @@
 #include "isr.h" 
 
 // ============================================================================
-// ВНЕШНИЕ СИМВОЛЫ И МАКРОСЫ
+// ВНЕШНИЕ СИМБОЛЫ (Boot structures из boot.asm)
 // ============================================================================
 extern uint32_t boot_page_directory[];
 extern uint32_t boot_page_tables[];
@@ -18,11 +18,9 @@ extern uint8_t boot_stack_top[];
 extern uint8_t _kernel_start[];
 extern uint8_t _kernel_end[];
 
-#define KERNEL_VIRT_BASE 0xC0000000
-#define VIRT_TO_PHYS(addr) (((uint32_t)(addr) >= KERNEL_VIRT_BASE) ? ((uint32_t)(addr) - KERNEL_VIRT_BASE) : (uint32_t)(addr))
-#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_VIRT_BASE)
-
-// Диапазоны памяти
+// ============================================================================
+// ДИАПАЗОНЫ ПАМЯТИ (SSOT для Lazy Allocation и Framebuffer)
+// ============================================================================
 #define LAZY_ALLOC_START 0xD0000000
 #define LAZY_ALLOC_END   0xE0000000
 #define FB_VIRT_BASE     0xFD000000
@@ -30,15 +28,8 @@ extern uint8_t _kernel_end[];
 #define FB_SIZE_MB       16
 
 // ============================================================================
-// API: БАЗОВЫЙ МАППИНГ (Обертка над vmm_map_page_in_pd)
-// ============================================================================
-void vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
-    vmm_map_page_in_pd(boot_page_directory, virt, phys, flags);
-}
-
-// ==============================================================================
 // DAY 6.3: ON-DEMAND PAGING (PAGE FAULT HANDLER)
-// ==============================================================================
+// ============================================================================
 void page_fault_handler(struct regs* r) {
     uint32_t faulting_address;
     __asm__ volatile("mov %%cr2, %0" : "=r"(faulting_address));
@@ -57,7 +48,8 @@ void page_fault_handler(struct regs* r) {
                 k_memset((void*)PHYS_TO_VIRT(phys), 0, 4096); 
                 uint32_t virt_page = faulting_address & 0xFFFFF000;
                 
-                // 🛡️ ИСПРАВЛЕНО: Убран PAGE_USER для Kernel Heap!
+                // 🛡️ БЕЗОПАСНОСТЬ: Убран PAGE_USER для Kernel Heap!
+                // Это защищает память ядра от доступа из Ring 3.
                 vmm_map_page(virt_page, phys, PAGE_PRESENT | PAGE_WRITE);
                 
                 serial_printf("[PF] Lazy alloc: Virt 0x%x -> Phys 0x%x\n", virt_page, phys);
@@ -77,7 +69,7 @@ void page_fault_handler(struct regs* r) {
 }
 
 // ============================================================================
-// ИНИЦИАЛИЗАЦИЯ VMM
+// ИНИЦИАЛИЗАЦИЯ VMM (Bootstrap Sequence)
 // ============================================================================
 void paging_init(void) {
     serial_print("[VMM] Patching PDEs for Ring 3 access...\n");
@@ -90,11 +82,16 @@ void paging_init(void) {
     serial_print("[VMM] Reserving kernel structures in PMM...\n");
     pmm_reserve_region(0x00100000, 0x01000000); // Conservative 1MB-16MB block
     
-    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_page_directory), VIRT_TO_PHYS((uint32_t)boot_page_directory) + 4096);
-    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_page_tables), VIRT_TO_PHYS((uint32_t)boot_page_tables) + (128 * 4096));
-    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_page_tables_hh), VIRT_TO_PHYS((uint32_t)boot_page_tables_hh) + (128 * 4096));
-    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)fb_page_table), VIRT_TO_PHYS((uint32_t)fb_page_table) + 4096);
-    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_stack), VIRT_TO_PHYS((uint32_t)boot_stack_top));
+    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_page_directory), 
+                       VIRT_TO_PHYS((uint32_t)boot_page_directory) + 4096);
+    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_page_tables), 
+                       VIRT_TO_PHYS((uint32_t)boot_page_tables) + (128 * 4096));
+    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_page_tables_hh), 
+                       VIRT_TO_PHYS((uint32_t)boot_page_tables_hh) + (128 * 4096));
+    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)fb_page_table), 
+                       VIRT_TO_PHYS((uint32_t)fb_page_table) + 4096);
+    pmm_reserve_region(VIRT_TO_PHYS((uint32_t)boot_stack), 
+                       VIRT_TO_PHYS((uint32_t)boot_stack_top));
 
     serial_print("[VMM] Building Direct Map (512MB)...\n");
     uint32_t total_ram_pages = (512 * 1024 * 1024) / 4096; 
@@ -120,7 +117,7 @@ void paging_init(void) {
 }
 
 // ============================================================================
-// МАППИНГ В ПРОИЗВОЛЬНЫЙ PAGE DIRECTORY
+// МАППИНГ В ПРОИЗВОЛЬНЫЙ PAGE DIRECTORY (Для User Space процессов)
 // ============================================================================
 void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t dir_index = virt >> 22;
@@ -128,11 +125,14 @@ void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_
 
     uint32_t pde = pd_virt[dir_index];
 
-    if (pde & PAGE_SIZE_4MB) {
+    // 🛡️ БЕЗОПАСНОСТЬ: Проверка на 4MB страницы (PSE)
+    // Если PDE уже мапит 4MB блок, создание Page Table внутри него приведет к коррупции памяти.
+    if (pde & PAGE_PS) {
         serial_print("[VMM] FATAL: 4MB Page detected in PDE!\n");
         while(1) __asm__("cli; hlt"); 
     }
 
+    // Если Page Table отсутствует, выделяем новую
     if (!(pde & PAGE_PRESENT)) {
         uint32_t new_pt_phys = pmm_alloc_page();
         if (new_pt_phys == 0) {
@@ -144,10 +144,12 @@ void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_
         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     }
 
+    // Получаем виртуальный адрес Page Table и записываем PTE
     uint32_t pt_phys = pd_virt[dir_index] & 0xFFFFF000; 
     uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys); 
     pt[table_index] = phys | flags;
 
+    // Аппаратная инвалидация TLB для этого виртуального адреса
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
 }
 
@@ -175,16 +177,15 @@ void vmm_unmap_page_in_pd(uint32_t* pd_virt, uint32_t virt) {
         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     }
     
-    // 💡 Менторский инсайт (TODO на Day 9):
-    // В идеале здесь нужно проверить, стала ли вся Page Table пустой (все 1024 PTE == 0).
-    // Если да, то саму страницу, занимаемую Page Table, нужно освободить через pmm_free_page(pt_phys),
-    // а в PDE записать 0. Иначе при массовом создании/убийстве процессов мы будем терять 
-    // по 4KB памяти на каждую "опустевшую" Page Table (PT Leak). 
-    // Для текущего этапа (Kernel Heap) это не критично.
+    // 💡 TODO (Day 12 Hardening): PT Leak Protection
+    // Проверить, стала ли вся Page Table пустой (все 1024 PTE == 0).
+    // Если да, освободить саму страницу Page Table через pmm_free_page(pt_phys),
+    // и обнулить PDE. Иначе при массовом создании/убийстве процессов мы будем 
+    // терять по 4KB памяти на каждую "опустевшую" Page Table.
 }
 
 // ============================================================================
-// СОЗДАНИЕ НОВОГО АДРЕСНОГО ПРОСТРАНСТВА (ДЕНЬ 7.5)
+// СОЗДАНИЕ НОВОГО АДРЕСНОГО ПРОСТРАНСТВА (Shared Kernel Space)
 // ============================================================================
 uint32_t* vmm_create_address_space(void) {
     uint32_t phys_pd = pmm_alloc_page();
@@ -193,7 +194,8 @@ uint32_t* vmm_create_address_space(void) {
     uint32_t* virt_pd = (uint32_t*)PHYS_TO_VIRT(phys_pd);
     k_memset(virt_pd, 0, 4096);
     
-    // Клонирование Kernel Space (Shared Kernel Space)
+    // Клонирование Kernel Space (индексы 768-1023)
+    // Это обеспечивает Shared Kernel Space — все процессы видят одно ядро.
     for (int i = 768; i < 1024; i++) {
         virt_pd[i] = boot_page_directory[i];
     }
@@ -202,12 +204,15 @@ uint32_t* vmm_create_address_space(void) {
     return virt_pd;
 }
 
+// ============================================================================
+// ПЕРЕКЛЮЧЕНИЕ PAGE DIRECTORY (Context Switch)
+// ============================================================================
 void vmm_switch_pdir(uint32_t phys_pd) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(phys_pd) : "memory");
 }
 
 // ============================================================================
-// УНИЧТОЖЕНИЕ АДРЕСНОГО ПРОСТРАНСТВА (ИСПРАВЛЕНО: Memory Leak)
+// УНИЧТОЖЕНИЕ АДРЕСНОГО ПРОСТРАНСТВА (Deep Free - Memory Leak Prevention)
 // ============================================================================
 void vmm_destroy_address_space(uint32_t* pdir_virt) {
     if (!pdir_virt || pdir_virt == boot_page_directory) return;
@@ -218,7 +223,8 @@ void vmm_destroy_address_space(uint32_t* pdir_virt) {
             uint32_t pt_phys = pdir_virt[i] & 0xFFFFF000;
             uint32_t* pt_virt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
             
-            // 🛡️ ИСПРАВЛЕНО: Освобождаем сами страницы данных, на которые указывает PT
+            // 🛡️ CRITICAL: Освобождаем сами страницы данных (PTE)
+            // Без этого система быстро упадет в OOM из-за утечки физической памяти.
             for (uint32_t j = 0; j < 1024; j++) {
                 if (pt_virt[j] & PAGE_PRESENT) {
                     uint32_t page_phys = pt_virt[j] & 0xFFFFF000;

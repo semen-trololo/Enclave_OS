@@ -72,10 +72,15 @@ project_root/
 
 🚀 Загрузчик и Инициализация
 boot.asm:
-Содержит Multiboot Header (magiс 0x1BADB002).
-Инициализирует Bochs VBE (1024x768x32bpp) через порты 0x01CE/0x01CF.
-Higher Half Trampline: Создает Identity Map (0-512MB) и Higher Half Map (0xC0000000+). Использует раздельные Page Tables (boot_page_tables и boot_page_tables_hh) для предотвращения затирания PTE.
-Маппит Framebuffer (0xFD000000) с флагом PAGE_PCD (Cache Disable).
+boot.asm:
+* Содержит Multiboot Header (magiс 0x1BADB002).
+* Инициализирует Bochs VBE (1024x768x32bpp) через порты 0x01CE/0x01CF.
+* Higher Half Trampline: Создает Identity Map (0-512MB) и Higher Half Map (0xC0000000+). Использует раздельные Page Tables (boot_page_tables и boot_page_tables_hh) для предотвращения затирания PTE.
+* Маппит Framebuffer (0xFD000000) с флагом PAGE_PCD (Cache Disable).
+* Сохраняет eax (magic) и ebx (mmap) в глобальные переменные .boot.data, избегая уязвимостей стека.
+* **Defensive Handover:** Переход в `kernel_main` осуществляется через `call`, а не `jmp`. Это гарантирует, что при случайном `return` из ядра процессор корректно попадет в `.halt_loop`, а не получит Triple Fault.
+* **Multiboot Flags Trap:** В заголовке ядра биты 3-15 ЗАРЕЗЕРВИРОВАНЫ (обязаны быть 0). Установка бита 3 (`MBOOT_INFO_MODS`) здесь приведет к отказу GRUB грузить ядро. Флаг модулей выставляется GRUB'ом автоматически в структуре `multiboot_info_t`, если в `grub.cfg` есть директива `module`.
+* **NASM Local Labels:** Локальные метки (начинающиеся с точки, например `.halt_loop`) привязаны к последней глобальной метке. Дублирование локальных меток в одном скоупе вызывает ошибку ассемблера `inconsistently redefined`.
 Сохраняет eax (magic) и ebx (mmap) в глобальные переменные .boot.data, избегая уязвимостей стека.
 linker.ld:
 Разделяет секции на физические (.boot*) и виртуальные (.text, .data, .bss).
@@ -91,6 +96,8 @@ pmm.c (Physical Memory Manager):
 * E820 Parsing & Dynamic Sizing: Читает карту памяти от GRUB. Статический битмап рассчитан на 4GB (128KB в .bss), но динамическая переменная `pmm_max_page` ограничивает сканирование только реальным объемом RAM, найденным в E820. Это предотвращает выход за пределы физически существующей памяти.
 * Punching Holes: Резервирует нижний 1MB, образ ядра, Multiboot info, PCI MMIO Hole.
 * O(1) Allocation: Использует битмап и аппаратную инструкцию __builtin_ctz (BSF/TZCNT).
+**Two-Pass E820 Parsing:** Сканирование карты памяти выполняется в два прохода. Pass 1 находит `max_addr` и вычисляет `pmm_max_page`. Pass 2 освобождает доступные регионы. Объединение в один проход приводит к OOM, так как `pmm_free_region()` вызывается при `pmm_max_page == 0`.
+* **Initrd Memory Protection:** Физические страницы, занятые модулями GRUB (например, `initrd.tar`), ОБЯЗАТЕЛЬНО резервируются в PMM сразу после резервирования ядра. Иначе VMM при создании Page Tables затрет TAR-архив, что приведет к монтированию пустой ФС.
 
 paging.c (Virtual Memory Manager):
 * Direct Map: Первые 512MB RAM замаплены в 0xC0000000+ (Kernel Space).
@@ -98,6 +105,8 @@ paging.c (Virtual Memory Manager):
 * Security Fix: Диапазон Kernel Heap (0xD0000000) мапится без флага PAGE_USER, чтобы защитить память ядра от доступа из Ring 3.
 * Deep Destroy: `vmm_destroy_address_space()` корректно освобождает не только Page Tables, но и сами физические страницы данных (PTE), предотвращая утечки памяти при завершении процессов.
 * Shared Kernel Space: vmm_create_address_space() клонирует индексы 768-1023 из глобального PD.
+* **PAGE_PS Hardware Check:** 7-й бит в PDE аппаратно называется PS (Page Size Extension). VMM проверяет `pde & PAGE_PS` перед созданием Page Tables, чтобы предотвратить коррупцию памяти внутри 4MB регионов.
+* **SSOT Macros:** Макросы трансляции адресов (`KERNEL_VIRT_BASE`, `VIRT_TO_PHYS`, `PHYS_TO_VIRT`) определены СТРОГО ОДИН РАЗ в `paging.h`. Переопределение их в `.c` файлах нарушает Single Source of Truth.
 
 heap.c (Kernel Heap):
 * Buddy System: Неявное бинарное дерево (tree[TREE_SIZE]). O(1) Merge через XOR (buddy = curr ^ 1).
@@ -124,6 +133,9 @@ RBAC: Флаг FS_SYSTEM. Ядро игнорирует его, Ring 3 полу�
 initrd.c (RAM Disk):
 Парсит TAR UStar из GRUB Module.
 Разворачивает структуру в tmpfs (Heap). Автоматически создает промежуточные директории.
+* **Makefile POSIX Compliance:** Команда `tar` в Makefile использует только стандартные флаги (`--format=ustar -cf`). Очистка путей (снятие `./`) выполняется парсером, а не через `--transform`, что гарантирует кроссплатформенность.
+* **Binary Magic Comparison:** UStar magic (`"ustar"`) проверяется через `k_memcmp`, а не `strncmp`. Строковые функции дают ложные срабатывания на нулевых блоках (TAR EOF padding).
+* **TAR Padding Tolerance:** Парсер сканирует первые 8KB модуля в поисках валидного magic, что делает его устойчивым к padding'у от GRUB или специфичных версий `tar`.
 
 🖥 Графика и Вывод
 framebuffer.c:
@@ -190,7 +202,7 @@ gdt_install() (Flat Model + TSS)
 idt_install() (256 векторов)
 tss_install() (Load TR)
 syscall_init() (INT 0x80)
-pmm_init() (E820, Safe by Default)
+pmm_init() (Two-Pass E820 + Reserve Modules, Safe by Default)
 paging_init() (Включение CR0.PG, Direct Map, Reserving)
 fb_init() (Resurrect: перепривязка к виртуальному адресу 0xFD000000)
 heap_init() (Buddy System в 0xD0000000)
@@ -226,6 +238,12 @@ Stack Forging (ABI): При создании задачи стек "поддел
 Signed Char Trap: В Shell при фильтрации ввода всегда приводить char к uint8_t, иначе UTF-8 байты (кириллица) интерпретируются как отрицательные числа и отбрасываются.
 PSF1 UCS-2: Таблицы Unicode в PSF1 шрифтах закодированы в UTF-16LE. Читать их нужно через uint16_t*, а не посимвольно.
 
+🏗 Принципы проектирования API
+* **Dependency Inversion (DIP):** Высокоуровневые подсистемы (`heap.c`, `vfs.c`) не включают заголовки низкоуровневых драйверов (`vga.h`). Определения цветов перенесены в `klib.h`, делая API самодостаточным. Подсистемы памяти остаются в неведении о том, используется ли VGA или Framebuffer (Strategy Pattern).
+* **Header Self-Sufficiency:** Заголовочный файл, использующий `bool`/`true`/`false`, обязан включать `<stdbool.h>` напрямую, чтобы любой `.c` файл, сделавший `#include`, автоматически получил все необходимые типы.
+* **Implicit Function Declaration:** Компиляция с `-Wall -Wextra` требует явного подключения заголовков. Использование `serial_printf` в `isr.c` требует `#include "serial.h"`.
+* **Double Dump for Panic:** Фатальные исключения (ISR) выводят дамп регистров ОДНОВРЕМЕННО в VGA (для локального пользователя) и Serial COM1 (для headless-отладки), так как видеодрайвер может быть в невалидном состоянии.
+
 📝 TODO (Технический долг)
 
 Коллега, ты заметил одну важную деталь?
@@ -253,6 +271,8 @@ TODO на День 12 (Hardening):
 День 6: Higher Half Kernel, E820 Parsing, On-Demand Paging (Page Fault Handler).
 День 7: Preemptive Multitasking (Round-Robin), Hardware Memory Isolation (CR3 Switch), Lazy FPU Switching (#NM, fxsave).
 День 8.1: VFS (Полиморфизм, LCRS), Initrd (TAR UStar tmpfs), 3-звенная модель File Descriptors, Ring-Based Access Control (RBAC), POSIX Syscalls (ls, cat).
+* **Robust Initrd Parser:** Автоматический поиск UStar magic, защита от пустых блоков, корректная работа с GNU tar и bsdtar.
+* **PMM Module Protection:** Резервирование физических страниц GRUB-модулей предотвращает Memory Corruption при создании Page Tables.
 User Pointer Validation: Все системные вызовы, принимающие указатели из Ring 3 (sys_read, sys_write), проходят строгую проверку is_user_pointer(). Любая попытка передать адрес >= 0xC0000000 (Kernel Space) пресекается с возвратом EFAULT.
 VFS Standard Streams: stdin и stdout реализованы как глобальные синглтоны vfs_node_t. Это предотвращает утечки памяти при массовом создании/уничтожении процессов.
 

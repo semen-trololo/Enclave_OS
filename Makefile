@@ -63,13 +63,14 @@ $(BUILD_DIR):
 $(INITRD_TAR): $(wildcard $(INITRD_DIR)/* $(INITRD_DIR)/*/* $(INITRD_DIR)/*/*/*)
 	@echo "[TAR]  Packing initrd.tar (UStar format)..."
 	@mkdir -p $(ISO_DIR)/boot
+	@rm -f $(INITRD_TAR)
 	@if [ -d "$(INITRD_DIR)" ]; then \
-		(cd $(INITRD_DIR) && tar --format=ustar --exclude='.*' --transform='s|^\./||' -cf ../$(INITRD_TAR) .); \
+		(cd $(INITRD_DIR) && tar --format=ustar -cf ../$(INITRD_TAR) .) || { echo "[FATAL] tar command failed!"; exit 1; }; \
 	else \
 		echo "[WARN] $(INITRD_DIR) not found. Creating dummy initrd."; \
 		touch $(INITRD_TAR); \
 	fi
-
+	
 # ==============================================================================
 # СБОРКА ISO (GRUB-MKRESCUE)
 # ==============================================================================
@@ -94,6 +95,6 @@ clean:
 run: iso
 	@echo "[QEMU] Стартуем $(ISO_NAME)..."
 	@echo "[DEBUG] Логи прерываний пишутся в qemu.log (ищи Triple Fault по последним записям)"
-	@qemu-system-i386 -cdrom $(ISO_NAME) -m 1024M -serial stdio -no-reboot 
+	@qemu-system-i386 -cdrom $(ISO_NAME) -m 1024M -serial stdio -no-reboot -D qemu.log
 
 .PHONY: all clean run iso

@@ -1,5 +1,6 @@
 #include "isr.h"
 #include "klib.h"
+#include "serial.h"
 #include "vga.h"
 
 // Объявляем 32 ассемблерные заглушки для CPU-исключений (ISR 0-31)

@@ -50,14 +50,6 @@ static int initrd_strcmp(const char* s1, const char* s2) {
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
-static int initrd_strncmp(const char* s1, const char* s2, int n) {
-    for (int i = 0; i < n && s1[i] && s2[i]; i++) {
-        if (s1[i] != s2[i]) return (unsigned char)s1[i] - (unsigned char)s2[i];
-    }
-    return 0;
-}
-
-// Безопасное копирование с гарантированным \0
 static void initrd_strncpy(char* dest, const char* src, int n) {
     int i = 0;
     while (i < n - 1 && src[i]) { dest[i] = src[i]; i++; }
@@ -121,21 +113,49 @@ void initrd_init(void) {
     uint32_t tar_start = mods[0].mod_start;
     uint32_t tar_end = mods[0].mod_end;
     
-    if (tar_start == 0 || tar_end <= tar_start) return;
+    if (tar_start == 0 || tar_end <= tar_start) {
+        serial_print("[INITRD] ERROR: Invalid module boundaries.\n");
+        return;
+    }
     
+    // 🛡️ РОБАСТНЫЙ ПОИСК: Сканируем первые 8 КБ в поисках валидного UStar magic
+    // Это защищает от padding'а, который может добавить GRUB или специфичные версии tar.
     tar_header_t* header = (tar_header_t*)PHYS_TO_VIRT(tar_start);
-    uint32_t files_count = 0;
+    tar_header_t* search_limit = (tar_header_t*)PHYS_TO_VIRT(tar_start + 8192);
     
+    while (header < search_limit && (uint32_t)header < PHYS_TO_VIRT(tar_end)) {
+        if (k_memcmp(header->magic, "ustar", 5) == 0) break;
+        header = (tar_header_t*)((uint8_t*)header + 512);
+    }
+    
+    if (k_memcmp(header->magic, "ustar", 5) != 0) {
+        serial_print("[INITRD] FATAL: No UStar magic found in module.\n");
+        return;
+    }
+    
+    uint32_t files_count = 0;
     vfs_node_t* root = vfs_findnode("/");
     if (!root) return;
 
-    // 🛡️ БЕЗОПАСНЫЙ БУФЕР: UStar поддерживает пути до 256 байт (155 prefix + 100 name)
     char full_path[512]; 
 
-    while (header->name[0] != '\0') {
-        if (initrd_strncmp(header->magic, "ustar", 5) != 0) break;
+    while (1) {
+        // 🛡️ ИСПРАВЛЕНО: Инициализируем size нулем ДО любых goto, 
+        // чтобы избежать warning 'may be used uninitialized' и корректно 
+        // вычислить data_blocks для пустых заголовков.
+        uint32_t size = 0; 
         
-        // 1. СКЛЕЙКА PREFIX + NAME (Критический фикс UStar)
+        if ((uint32_t)header >= PHYS_TO_VIRT(tar_end)) break;
+
+        // Конец TAR архива: имя пустое
+        if (header->name[0] == '\0') {
+            if (header->magic[0] == '\0') break; // Реальный EOF (два нулевых блока)
+            goto next_header; // Пропускаем служебные пустые записи
+        }
+
+        if (k_memcmp(header->magic, "ustar", 5) != 0) break;
+        
+        // 1. СКЛЕЙКА PREFIX + NAME (UStar поддерживает пути до 256 байт)
         full_path[0] = '\0';
         if (header->prefix[0] != '\0') {
             initrd_strncpy(full_path, header->prefix, 155);
@@ -148,7 +168,7 @@ void initrd_init(void) {
         size_t cur_len = initrd_strlen(full_path);
         initrd_strncpy(full_path + cur_len, header->name, 100);
 
-        // 2. ЗАЩИТА ОТ "./" (Иммунитет, если Makefile не сработал)
+        // 2. ЗАЩИТА ОТ "./" (Обрезаем префикс текущей директории)
         char* clean_path = full_path;
         if (clean_path[0] == '.' && clean_path[1] == '/') clean_path += 2;
         
@@ -159,12 +179,12 @@ void initrd_init(void) {
             len--;
         }
 
-        uint32_t size = parse_octal(header->size, 12);
+        size = parse_octal(header->size, 12);
         char typeflag = header->typeflag;
 
         if (len == 0) goto next_header; // Пропускаем корневую точку
 
-        // 4. ЧИСТЫЙ ПАРСЕР ПУТЕЙ (Без модификации исходной строки)
+        // 4. ПАРСИНГ ПУТЕЙ (Создание промежуточных директорий)
         vfs_node_t* parent = root;
         int start = 0;
         int i = 0;
@@ -191,9 +211,10 @@ void initrd_init(void) {
         k_memcpy(filename, &clean_path[start], f_len);
         filename[f_len] = '\0';
 
+        // 5. СОЗДАНИЕ VFS УЗЛОВ
         if (typeflag == '5') {
             vfs_node_t* dir = get_or_create_dir(parent, filename);
-            // Хардкод для /boot (В будущем: парсинг прав доступа из mode)
+            // Хардкод для /boot (Защита системных файлов от Ring 3 через RBAC)
             if (parent == root && initrd_strcmp(filename, "boot") == 0) {
                 dir->flags |= FS_SYSTEM;
             }
@@ -221,7 +242,6 @@ void initrd_init(void) {
 next_header:
         uint32_t data_blocks = (size + 511) / 512;
         header = (tar_header_t*)((uint8_t*)header + 512 + (data_blocks * 512));
-        if ((uint32_t)header >= PHYS_TO_VIRT(tar_end)) break;
     }
     
     serial_printf("[INITRD] Mounted successfully. Files: %d\n", files_count);

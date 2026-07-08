@@ -3,9 +3,9 @@
 ; ============================================================================
 
 MBOOT_PAGE_ALIGN    equ 1<<0
-MBOOT_MEM_INFO      equ 1<<1  
+MBOOT_MEM_INFO      equ 1<<1
 MBOOT_HEADER_MAGIC  equ 0x1BADB002
-MBOOT_HEADER_FLAGS  equ MBOOT_PAGE_ALIGN | MBOOT_MEM_INFO 
+MBOOT_HEADER_FLAGS  equ MBOOT_PAGE_ALIGN | MBOOT_MEM_INFO  ; ✅ Только 0x3
 MBOOT_CHECKSUM      equ -(MBOOT_HEADER_MAGIC + MBOOT_HEADER_FLAGS)
 
 section .multiboot
@@ -191,13 +191,11 @@ _start:
     mov esp, stack_top
     
     ; Аргументы больше не передаются через стек! Всё в глобальных переменных.
-    mov edi, kernel_main
-    jmp edi
-
-.halt_loop:
-    cli
-    hlt
-    jmp .halt_loop
+    
+    ; 🛡️ АРХИТЕКТУРНЫЙ ФИКС: Используем call вместо jmp. 
+    ; Если kernel_main случайно вернет управление, мы безопасно упадем в halt_loop, 
+    ; а не получим Triple Fault из-за сломанного стека.
+    call kernel_main
 
 .halt_loop:
     cli
