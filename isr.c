@@ -49,14 +49,21 @@ static const char* exception_messages[] = {
     "Reserved", "Reserved", "Reserved"
 };
 
-// Дефолтный обработчик исключений (Kernel Panic)
 static void exception_handler(struct regs* r) {
+    // 1. Дамп в Serial (на случай, если VGA уже мертв)
+    serial_printf("\n[!!!] KERNEL PANIC: %s [!!!]\n", exception_messages[r->int_no]);
+    serial_printf(" INT: 0x%x | ERR: 0x%x\n", r->int_no, r->err_code);
+    serial_printf(" EIP: 0x%x | CS: 0x%x\n", r->eip, r->cs);
+    serial_printf(" ESP: 0x%x | SS: 0x%x\n", r->esp, r->ss);
+    serial_printf(" EFLAGS: 0x%x\n", r->eflags);
+    
+    // 2. Дамп на экран
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_RED);
-    k_print("\n KERNEL PANIC: ");
-    k_print(exception_messages[r->int_no]);
-    k_print(" \n");
+    k_printf("\n KERNEL PANIC: %s \n", exception_messages[r->int_no]);
+    k_printf(" EIP: 0x%x | ERR: 0x%x \n", r->eip, r->err_code);
+    
     // Останавливаем процессор
-    while(1) __asm__ volatile("hlt");
+    while(1) __asm__ volatile("cli; hlt");
 }
 
 void isr_install(void) {
