@@ -15,8 +15,10 @@
 #define MAX_ARGS 4
 #define MAX_ARG_LEN 64
 
-// Статический массив для стресс-теста PMM (занимает 128 КБ в секции .bss)
-static uint32_t test_allocations[PMM_PAGES_COUNT];
+// 🛡️ ИСПРАВЛЕНО: Ограничиваем стресс-тест 64 МБ (16384 страницы).
+// Это спасает .bss секцию ядра от раздувания на 4 МБ (как было бы с PMM_MAX_PAGES).
+#define PMM_TEST_MAX_PAGES 16384 
+static uint32_t test_allocations[PMM_TEST_MAX_PAGES];
 
 // ============================================================================
 // ПАРСИНГ АРГУМЕНТОВ
@@ -101,10 +103,10 @@ static void handle_uptime(void) {
     k_print("System Uptime: ");
     
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-    k_printf("%d hours, %d minutes, %d seconds\n", hours, minutes, seconds);
+    k_printf("%u hours, %u minutes, %u seconds\n", hours, minutes, seconds);
     
     k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK); 
-    k_printf("  (Raw ticks: %d @ %d Hz)\n", ticks, freq);
+    k_printf("  (Raw ticks: %u @ %u Hz)\n", ticks, freq);
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 }
 
@@ -120,6 +122,11 @@ static void handle_syscall(void) {
     );
     
     k_printf("\n[Shell] Syscall returned: %d\n", result);
+    if (result == (uint32_t)-1) {
+        k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        k_print("[Shell] Note: EFAULT expected if syscall.c Ring 0 check is not patched yet.\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    }
 }
 
 static void handle_font_test(void) {
@@ -170,14 +177,16 @@ static void handle_pmm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     if (k_strcmp(args[1], "status") == 0) {
         uint32_t used = pmm_get_used_pages();
         uint32_t free = pmm_get_free_pages();
-        uint32_t total = used + free;
+        uint32_t total = pmm_get_total_pages();
+        uint32_t max = pmm_get_max_pages();
         
         k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
         k_print("[PMM] --- Physical Memory Status ---\n");
         k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        k_printf("[PMM] Total Tracked: %d MB (%d pages)\n", (total * 4) / 1024, total);
-        k_printf("[PMM] Used:          %d MB (%d pages)\n", (used * 4) / 1024, used);
-        k_printf("[PMM] Free:          %d MB (%d pages)\n", (free * 4) / 1024, free);
+        k_printf("[PMM] Max Addressable: %u MB (%u pages)\n", (max * 4) / 1024, max);
+        k_printf("[PMM] Total Available: %u MB (%u pages)\n", (total * 4) / 1024, total);
+        k_printf("[PMM] Used:            %u MB (%u pages)\n", (used * 4) / 1024, used);
+        k_printf("[PMM] Free:            %u MB (%u pages)\n", (free * 4) / 1024, free);
     } 
     else if (k_strcmp(args[1], "alloc") == 0) {
         uint32_t count = 1;
@@ -206,6 +215,7 @@ static void handle_pmm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
         }
         uint32_t addr = k_atoh(args[2]);
         pmm_free_page(addr); 
+        k_print("[PMM] Free requested.\n");
     } 
     else if (k_strcmp(args[1], "test") == 0) {
         k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
@@ -222,12 +232,13 @@ static void handle_pmm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
 
         k_print("[PMM TEST] 2. Testing OOM limit...\n");
         uint32_t allocated_count = 0;
-        while (allocated_count < PMM_PAGES_COUNT) {
+        
+        while (allocated_count < PMM_TEST_MAX_PAGES) {
             uint32_t addr = pmm_alloc_page();
             if (addr == 0) break;
             test_allocations[allocated_count++] = addr;
         }
-        k_printf("[PMM TEST]    Allocated %d pages. Limit reached.\n", allocated_count);
+        k_printf("[PMM TEST]    Allocated %u pages. Limit reached.\n", allocated_count);
 
         k_print("[PMM TEST] 3. Freeing all allocated pages... ");
         for (uint32_t i = 0; i < allocated_count; i++) {
@@ -269,7 +280,7 @@ static void handle_heap(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
         if (argc < 3) { k_print("Usage: heap alloc <size>\n"); return; }
         uint32_t size = k_atoi(args[2]);
         void* ptr = kmalloc(size);
-        if (ptr) k_printf("[HEAP] Allocated %u bytes at %p\n", size, ptr);
+        if (ptr) k_printf("[HEAP] Allocated %u bytes at 0x%x\n", size, (uint32_t)ptr);
         else k_print("[HEAP] Allocation failed!\n");
     } 
     else if (k_strcmp(args[1], "free") == 0) {
@@ -293,8 +304,6 @@ static void handle_memmap(void) {
     if (count == 0) {
         k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
         k_print("[MEMMAP] ERROR: E820 map is empty!\n");
-        k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-        k_print("[MEMMAP] Check if MBOOT_MMAP is added to boot.asm flags.\n");
         k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
         return;
     }
@@ -311,11 +320,8 @@ static void handle_memmap(void) {
         uint32_t end_lo = (uint32_t)(map[i].addr + map[i].len - 1);
         uint32_t len_kb = (map[i].len >= 1024) ? (uint32_t)(map[i].len / 1024) : 1;
         
-        if (map[i].type == 1) {
+        if (map[i].type == 1 || map[i].type == 3) {
             k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            total_available += map[i].len;
-        } else if (map[i].type == 3) {
-            k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
             total_available += map[i].len;
         } else {
             k_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
@@ -351,17 +357,12 @@ static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     const char* path = "/";
     if (argc > 1) path = args[1];
 
-    serial_printf("\n[LS] =====================================\n");
-    serial_printf("[LS] Attempting to open path: '%s'\n", path);
-    
     int fd = sys_open(path, O_RDONLY);
-    serial_printf("[LS] sys_open returned fd = %d\n", fd);
     
     if (fd < 0) {
         k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
         k_printf("ls: cannot access '%s': Error %d\n", path, fd);
         k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
-        serial_printf("[LS] FAILED: sys_open returned error %d\n", fd);
         return;
     }
 
@@ -372,24 +373,12 @@ static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     k_printf("Directory: %s\n", path);
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
-    serial_print("[LS] Entering readdir loop...\n");
-    
-    // Делаем первый вызов и детально логируем результат
     int32_t res = sys_readdir(fd, index, &entry);
-    serial_printf("[LS] First sys_readdir(index=0) returned %d\n", res);
-    if (res == 0) {
-        serial_printf("[LS] First entry name: '%s'\n", entry.name);
-    }
-
     while (res == 0) {
         k_printf("  %s\n", entry.name);
         index++;
         res = sys_readdir(fd, index, &entry);
-        serial_printf("[LS] sys_readdir(index=%d) returned %d\n", index, res);
     }
-    
-    serial_printf("[LS] Loop finished. Total entries: %d\n", index);
-    serial_printf("[LS] =====================================\n\n");
     
     sys_close(fd);
 }
@@ -412,7 +401,6 @@ static void handle_cat(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     uint8_t buffer[512];
     int32_t bytes_read;
     
-    // Читаем файл чанками по 512 байта
     while ((bytes_read = sys_read(fd, buffer, sizeof(buffer))) > 0) {
         for (int32_t i = 0; i < bytes_read; i++) {
             k_putchar(buffer[i]);
@@ -525,6 +513,7 @@ void shell_run(void) {
                 }
             }
             else {
+                // 🛡️ Signed Char Trap Fix: Каст к uint8_t для корректной работы с UTF-8
                 uint8_t uc = (uint8_t)c;
                 if (uc >= 32) { 
                     if (pos < CMD_BUFFER_SIZE - 1) {
