@@ -274,3 +274,123 @@ Debug Tools: Улучшение ps, добавление top, meminfo, dmesg (к
 Testing Suite: Unit-тесты для PMM, Heap, VFS. Стресс-тесты планировщика.
 CI/CD: GitHub Actions, headless QEMU тесты при каждом git push.
 Documentation: Генерация Doxygen для API ядра.
+
+7. ВИЗИЯ: "БЕССМЕРТНАЯ КРЕПОСТЬ" (North Star)
+Философия проекта: Bare Metal OS развивается не как "еще один Linux", а как 
+промышленная, отказоустойчивая микроядерная система для запуска недоверенных 
+приложений в изолированных песочницах с гарантией бессмертия критичных сервисов.
+
+🎯 Ключевые принципы
+1. "Let it crash" (Erlang/OTP): Приложения БУДУТ падать. Ядро не пытается их лечить. 
+   Ядро изолирует падение и позволяет Супервизору (PID 1) мгновенно перезапустить сервис.
+2. Zero Trust Sandbox: Любой код в Ring 3 считается недоверенным по умолчанию. 
+   Изоляция обеспечивается на уровнях: Ring 3, Capability, Container, IPC.
+3. Crash-Only Software: Сервисы проектируются так, чтобы их можно было убить 
+   (SIGKILL) в любой момент и поднять заново < 100мс без потери состояния.
+4. Immutable Kernel: После инициализации код ядра становится Read-Only. 
+   Любая попытка модификации = Kernel Panic + OOM Killer.
+
+🏛 Архитектурные столпы
+A. ФЕНИКС (Auto-Restart Infrastructure)
+- sys_fork + sys_exec + sys_waitpid: База для Супервизора (PID 1).
+- The Supervisor Loop: /sbin/init читает конфиг, запускает сервисы через fork(), 
+  ловит их падение через waitpid() и мгновенно перезапускает через exec().
+- Micro-Reboot: Сервисы не хранят состояние в RAM. Они пишут его в VFS 
+  (/var/state/service.state) после каждой транзакции. При перезапуске читают 
+  состояние и продолжают работу с того же места.
+- Core Dumps: При фатальном Page Fault ядро сохраняет регистры (EIP, ESP, EAX) 
+  и стек упавшего процесса в /var/crash/app.core ПЕРЕД тем, как убить задачу.
+
+B. КРЕПОСТЬ (Security Hardening)
+- NX Bit (No-Execute): В Page Tables добавляется бит NX. Память может быть ЛИБО 
+  Writable (данные/стек), ЛИБО eXecutable (код). Никогда одновременно (W^X).
+- Capability-Based Security: В task_t добавляется массив capabilities[32]. 
+  Права привязаны к процессам через токены, а не к файлам через chmod.
+  Пример: curl получает только CAP_NET_SOCKET и CAP_FILE_WRITE(/tmp/out).
+- Seccomp (Syscall Filter): У каждой задачи битмап разрешенных системных вызовов. 
+  Песочнице для парсинга текста разрешены только sys_read/sys_write/sys_exit.
+  Вызов sys_open/sys_fork = мгновенное убийство с кодом EPERM.
+- VFS Namespaces (chroot): Недоверенное приложение видит только свою папку. 
+  VFS подменяет vfs_root для конкретной задачи при sys_exec.
+
+C. БЕССМЕРТНОЕ ЯДРО (Resource Governance)
+- OOM Killer: При pmm_alloc_page() == 0 ядро НЕ падает в Kernel Panic. 
+  Оно находит процесс с самым низким приоритетом (или помеченный как sandbox), 
+  вызывает vmm_destroy_address_space и освобождает память для критичных сервисов.
+- Resource Containers (Zones): Каждая песочница имеет жесткие лимиты:
+  typedef struct {
+      uint32_t max_physical_pages;  // OOM внутри контейнера
+      uint32_t cpu_weight;          // Fair Share Scheduling
+      uint32_t max_open_fds;        // Защита от исчерпания FD
+      uint32_t max_processes;       // Защита от fork-bomb
+  } resource_container_t;
+- CPU Quotas (Cgroups): Планировщик учитывает "веса" задач. Критичный сервис БД 
+  получает 80% квантов, песочница жестко ограничена 5%.
+- User-Mode Drivers (Minix 3): Драйверы ФС (FAT32) и сети работают в Ring 3 
+  как обычные процессы. Падение драйвера = перезапуск сервиса, а не Kernel Panic.
+
+D. СВЯЗЬ (Inter-Process Communication)
+- Mailboxes / Message Passing: Синхронные сообщения (как в Minix) или 
+  асинхронные очереди (как в seL4). VFS общается с fat32_server через IPC, 
+  а не через C-функции в Ring 0.
+- Capability Delegation: Токены можно делегировать ребенку при fork() или отзывать.
+
+E. ОПТИМИЗАЦИЯ (Performance)
+- Copy-on-Write (CoW): fork() не копирует память. Он создает новые Page Tables, 
+  ссылающиеся на те же физические страницы с флагом READ-ONLY. При записи 
+  срабатывает Page Fault, VMM выделяет личную копию страницы.
+  Результат: Перезапуск сервиса весом 10 МБ занимает микросекунды.
+- Immutable Sections: В linker.ld добавляется секция .immutable, которую VMM 
+  мапит с PAGE_PCD | PAGE_READ (без WRITE и EXECUTE для данных).
+
+📅 Дорожная карта внедрения (Post-Day 10)
+День 11: Process Lifecycle
+- sys_fork, sys_exec, sys_waitpid
+- Copy-on-Write (CoW) для оптимизации fork
+Цель: Фундамент для Супервизора (PID 1)
+
+День 12: Security & Hardening  
+- NX Bit (No-Execute) в Page Tables
+- W^X Enforcement (Write XOR Execute)
+- Core Dumps при Segfault
+Цель: Защита от инъекций кода и телеметрия падений
+
+День 13: The Supervisor (PID 1)
+- Написание /sbin/init с конфигом:
+  [service:shell]
+  exec=/bin/sh
+  restart=always
+- Auto-Restart при падении
+Цель: Реализация философии "Let it crash"
+
+День 14: Sandboxing
+- VFS chroot (подмена vfs_root для задачи)
+- Seccomp (фильтр системных вызовов)
+- Resource Containers + OOM Killer
+Цель: Изоляция недоверенных приложений
+
+День 15: IPC & Microkernel
+- Mailboxes (sys_send, sys_recv)
+- Shared Memory Rings
+Цель: Подготовка к User-Mode Drivers
+
+День 16+: User-Mode Drivers
+- Вынос fat32_server в Ring 3
+- Capability к I/O портам (0x1F0-0x1F7)
+- VFS <-> fat32_server через IPC
+Цель: Микроядерная архитектура (Minix 3 style)
+
+💡 Источники вдохновения
+- Minix 3 (Andrew Tanenbaum): Микроядро + User-Mode Drivers
+- seL4 (NICTA): Capability-Based Security + Formal Verification  
+- Erlang/OTP (Ericsson): "Let it crash" + Supervisor Trees (99.9999999% uptime)
+- QNX: Microkernel + Message Passing IPC
+- FreeBSD Jails / Linux cgroups: Resource Containers
+- Google Borg / Kubernetes: Crash-Only Software + Immutable Infrastructure
+
+🔒 Гарантии системы (Target SLA)
+- Ядро НИКОГДА не падает в Kernel Panic из-за бага в Ring 3 коде.
+- Критичный сервис перезапускается < 100мс после любого падения.
+- Недоверенное приложение физически не может получить доступ к ресурсам, 
+  на которые у него нет Capability-токена.
+- OOM внутри контейнера не влияет на соседние контейнеры или ядро.
