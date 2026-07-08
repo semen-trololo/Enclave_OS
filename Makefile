@@ -60,12 +60,11 @@ $(BUILD_DIR):
 # ==============================================================================
 # INITRD (АВТОМАТИЧЕСКАЯ УПАКОВКА TAR USTAR)
 # ==============================================================================
-# Make будет перепаковывать TAR только если изменятся файлы внутри initrd_src/
 $(INITRD_TAR): $(wildcard $(INITRD_DIR)/* $(INITRD_DIR)/*/* $(INITRD_DIR)/*/*/*)
 	@echo "[TAR]  Packing initrd.tar (UStar format)..."
 	@mkdir -p $(ISO_DIR)/boot
 	@if [ -d "$(INITRD_DIR)" ]; then \
-		(cd $(INITRD_DIR) && tar --format=ustar -cf ../$(INITRD_TAR) .); \
+		(cd $(INITRD_DIR) && tar --format=ustar --exclude='.*' --transform='s|^\./||' -cf ../$(INITRD_TAR) .); \
 	else \
 		echo "[WARN] $(INITRD_DIR) not found. Creating dummy initrd."; \
 		touch $(INITRD_TAR); \
