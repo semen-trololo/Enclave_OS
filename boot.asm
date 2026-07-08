@@ -157,16 +157,15 @@ _start:
     add edi, 4
     loop .fill_hh_pd
 
-      ; 5. Маппинг Framebuffer (0xFD000000 -> Индекс 1012)
-    ; ✅ ИСПРАВЛЕНО: Явная очистка всей Page Table перед заполнением
+    ; 5. Маппинг Framebuffer (0xFD000000 -> Индекс 1012)
     mov edi, fb_page_table
     xor eax, eax
-    mov ecx, 1024          ; Очищаем ВСЕ 1024 записи (4096 байт)
+    mov ecx, 1024          
     rep stosd
     
-    ; Теперь заполняем первые 768 записей (3 МБ для 1024x768x32bpp)
+    ; 🛡️ ИСПРАВЛЕНО: Добавлен флаг PAGE_PCD (0x10) для отключения кэширования MMIO
     mov edi, fb_page_table
-    mov eax, 0xFD000003    ; phys=0xFD000000, flags=PRESENT|WRITE
+    mov eax, 0xFD000013    ; phys=0xFD000000, flags=PRESENT|WRITE|PCD (0x1 + 0x2 + 0x10)
     mov ecx, 768
 .fill_fb_pt:
     mov [edi], eax
@@ -175,7 +174,7 @@ _start:
     loop .fill_fb_pt
 
     mov eax, fb_page_table
-    or eax, 0x00000003     ; PDE flags: PRESENT|WRITE
+    or eax, 0x00000013     ; PDE flags: PRESENT|WRITE|PCD
     mov [boot_page_directory + 1012*4], eax
 
     ; 6. Включаем MMU
@@ -185,10 +184,20 @@ _start:
     or eax, 0x80000010      ; PG + WP
     mov cr0, eax
 
-    ; 7. ПРЫЖОК В HIGHER HALF
+    ; 7. ПРЫЖОК В HIGHER HALF И СМЕНА СТЕКА
+    ; 🛡️ КРИТИЧЕСКИЙ ФИКС: Переходим на виртуальный стек из .bss (256 KB)
+    ; Если мы останемся на физическом boot_stack (16 KB), то при будущем 
+    ; отключении Identity Map (для User Space) ядро получит Triple Fault.
+    mov esp, stack_top
+    
     ; Аргументы больше не передаются через стек! Всё в глобальных переменных.
     mov edi, kernel_main
     jmp edi
+
+.halt_loop:
+    cli
+    hlt
+    jmp .halt_loop
 
 .halt_loop:
     cli
