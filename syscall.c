@@ -2,116 +2,113 @@
 #include "idt.h"
 #include "isr.h"
 #include "klib.h"
+#include "vfs.h"   // Маршрутизация в VFS
+#include "task.h"  // Для task_exit()
+#include "serial.h"
 #include <stdint.h>
+#include <stdbool.h>
 
-// Тип функции системного вызова
-// Принимает указатель на struct regs (где лежат аргументы из EBX, ECX, EDX)
-// Возвращает результат, который будет записан обратно в EAX
 typedef int (*syscall_func_t)(struct regs* r);
 
-// Таблица системных вызовов
 #define MAX_SYSCALLS 256
 static syscall_func_t syscall_table[MAX_SYSCALLS];
+
+// ========================================================================
+// 🛡 USER POINTER VALIDATION (Защита от CVE)
+// ========================================================================
+#define USER_SPACE_END 0xC0000000 // KERNEL_VIRT_BASE
+
+static inline bool is_user_pointer(const void* ptr, size_t size) {
+    uint32_t addr = (uint32_t)ptr;
+    // 1. Указатель не должен смотреть в Kernel Space
+    if (addr >= USER_SPACE_END) return false;
+    // 2. Размер не должен быть абсурдным
+    if (size > USER_SPACE_END) return false;
+    // 3. Защита от переполнения (wrap-around) при сложении
+    if (addr + size > USER_SPACE_END) return false; 
+    return true;
+}
 
 // ========================================================================
 // Реализации системных вызовов
 // ========================================================================
 
-// sys_exit: завершение процесса и возврат управления ядру
-static int sys_exit(struct regs* r) {
+static int sys_exit_handler(struct regs* r) {
     uint32_t exit_code = r->ebx;
-    k_printf("\n [SYSCALL] sys_exit called with code %u. Returning to kernel.\n", exit_code);
+    serial_printf("[SYSCALL] PID %d exiting with code %u\n", current_task->pid, exit_code);
 
-    // КРИТИЧЕСКИ ВАЖНО: Включаем прерывания (sti)!
-    // При входе в прерывание CPU автоматически сбрасывает IF (делает cli).
-    // Если мы не включим их обратно, hlt в k_getchar() зависнет навсегда.
-    __asm__ volatile("sti");
-
-    // Запускаем Shell прямо здесь, в контексте sys_exit.
-    // Мы уже в Ring 0, на безопасном стеке ядра (переключенном через TSS при int 0x80).
-    // Это временное, но абсолютно рабочее решение до Дня 7 (Планировщик), 
-    // где мы будем делать правильный context switch и fork/exec.
-    extern void shell_run(void);
-    shell_run();
-
-    // Fallback (никогда не выполнится, так как shell_run - бесконечный цикл)
-    while(1) {
-        __asm__ volatile("hlt");
-    }
+    // 🛡️ ИСПРАВЛЕНО: Убираем Context Hijacking.
+    // task_exit() корректно закроет FD, пометит задачу как DEAD, 
+    // и передаст управление планировщику (Reaper освободит память).
+    task_exit(); 
+    
+    // Недостижимо, так как task_exit() делает schedule() и не возвращается
     return 0;
 }
-    
-// sys_write: вывод строки
-// Аргументы: EBX = fd, ECX = const char* buf, EDX = size_t count
-static int sys_write(struct regs* r) {
-    uint32_t fd = r->ebx;
-    const char* buf = (const char*)r->ecx;
+
+static int sys_write_handler(struct regs* r) {
+    int fd = (int)r->ebx;
+    const void* buf = (const void*)r->ecx;
     uint32_t count = r->edx;
 
-    // Базовая проверка (User Pointer Validation)
-    // В будущем (День 6) здесь будет проверка, что buf находится в User Space
-    if (buf == (const char*)0) {
+    if (!is_user_pointer(buf, count)) {
+        serial_printf("[SYSCALL] FATAL: Ring 3 attempted kernel write! Addr: 0x%x\n", (uint32_t)buf);
         return -1; // EFAULT
     }
 
-    if (fd == 1) { // stdout
-        for (uint32_t i = 0; i < count; i++) {
-            if (buf[i] == '\0') break; // Защита от не-null-terminated строк
-            k_putchar(buf[i]);
-        }
-        return count;
-    }
-
-    return -1; // EBADF (неверный fd)
+    // Делегируем работу в VFS (используется fd_table процесса)
+    return sys_write(fd, buf, count);
 }
 
-// sys_yield: добровольная отдача кванта времени
-static int sys_yield(struct regs* r) {
+static int sys_read_handler(struct regs* r) {
+    int fd = (int)r->ebx;
+    void* buf = (void*)r->ecx;
+    uint32_t count = r->edx;
+
+    if (!is_user_pointer(buf, count)) {
+        serial_printf("[SYSCALL] FATAL: Ring 3 attempted kernel read! Addr: 0x%x\n", (uint32_t)buf);
+        return -1; // EFAULT
+    }
+
+    return sys_read(fd, buf, count);
+}
+
+static int sys_yield_handler(struct regs* r) {
     (void)r;
     extern void schedule(void);
-    schedule(); // Добровольно отдаём CPU следующей задаче
+    schedule(); 
     return 0;
 }
 
 // ========================================================================
 // Диспетчер системных вызовов
 // ========================================================================
-
-// Вызывается из isr_handler при срабатывании INT 0x80
 static void syscall_dispatcher(struct regs* r) {
     uint32_t syscall_num = r->eax;
 
     if (syscall_num >= MAX_SYSCALLS || syscall_table[syscall_num] == 0) {
-        k_printf("\n [SYSCALL] Invalid syscall number: %u\n", syscall_num);
-        r->eax = (uint32_t)-1; // -ENOSYS
+        serial_printf("[SYSCALL] Invalid syscall number: %u\n", syscall_num);
+        r->eax = (uint32_t)-1; 
         return;
     }
 
-    // Вызываем нужный системный вызов и сохраняем результат в EAX
     r->eax = (uint32_t)syscall_table[syscall_num](r);
 }
 
 // ========================================================================
 // Инициализация
 // ========================================================================
-
 void syscall_init(void) {
-    // 1. Обнуляем таблицу
-    for (int i = 0; i < MAX_SYSCALLS; i++) {
-        syscall_table[i] = 0;
-    }
+    for (int i = 0; i < MAX_SYSCALLS; i++) syscall_table[i] = 0;
 
-    // 2. Регистрируем системные вызовы
-    syscall_table[SYS_EXIT]  = sys_exit;
-    syscall_table[SYS_WRITE] = sys_write;
-    syscall_table[SYS_YIELD] = sys_yield;
+    syscall_table[SYS_EXIT]  = sys_exit_handler;
+    syscall_table[SYS_READ]  = sys_read_handler;
+    syscall_table[SYS_WRITE] = sys_write_handler;
+    syscall_table[SYS_YIELD] = sys_yield_handler;
 
-    // 3. Регистрируем обработчик INT 0x80 в IDT
-    // ВАЖНО: Флаг 0xEE (Present=1, DPL=3, Type=1110b - 32-bit Interrupt Gate)
-    // DPL=3 позволяет вызывать INT 0x80 из Ring 3 (User Mode)
-    extern void isr128(); // Объявляем внешнюю ASM-функцию
-    idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE);
+    extern void isr128(); 
+    idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE); // DPL=3 для Ring 3
 
-    // 4. Регистрируем C-обработчик
     isr_register_handler(128, syscall_dispatcher);
+    serial_print("[SYSCALL] INT 0x80 dispatcher initialized.\n");
 }
