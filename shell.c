@@ -10,6 +10,7 @@
 #include "framebuffer.h"
 #include "vfs.h"
 #include "serial.h"
+#include "ata.h"
 
 #define CMD_BUFFER_SIZE 256
 #define MAX_ARGS 4
@@ -63,6 +64,14 @@ static void print_help(void) {
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  ls [path]        - List directory contents\n");
     k_print("  cat <path>       - Print file contents\n");
+
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("\n  [ Storage (ATA) ]\n");
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_print("  ata info         - Show ATA drive information (IDENTIFY)\n");
+    k_print("  ata part         - Scan MBR and list partitions\n");
+    k_print("  ata read <lba>   - Read sector and show hex dump\n");
+    k_print("  ata test         - Run ATA read/write stress test\n");
 
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     k_print("\n  [ Memory Management ]\n");
@@ -412,6 +421,179 @@ static void handle_cat(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
 }
 
 // ============================================================================
+// ATA / STORAGE КОМАНДЫ (DAY 8.2)
+// ============================================================================
+static void handle_ata(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
+    if (argc < 2) {
+        k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+        k_print("Usage: ata <info|part|read|test>\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        return;
+    }
+
+    if (k_strcmp(args[1], "info") == 0) {
+        ata_identify_data_t data;
+        if (ata_identify(&data) < 0) {
+            k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+            k_print("[ATA] ERROR: Drive not detected or ATAPI (unsupported)\n");
+            k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            return;
+        }
+
+        k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+        k_print("[ATA] --- Drive IDENTIFY Data ---\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        
+        k_printf("[ATA] Model:       %s\n", data.model);
+        k_printf("[ATA] Serial:      %s\n", data.serial);
+        k_printf("[ATA] Firmware:    %.8s\n", data.firmware);
+        
+        k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        k_print("[ATA] Geometry (legacy CHS):\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        k_printf("[ATA]   Cylinders:     %u\n", data.cylinders);
+        k_printf("[ATA]   Heads:         %u\n", data.heads);
+        k_printf("[ATA]   Sec/Track:     %u\n", data.sectors_per_track);
+        
+        k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        k_print("[ATA] Capacity (LBA28):\n");
+        k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        k_printf("[ATA]   Max LBA:       %u\n", data.max_lba);
+        k_printf("[ATA]   Total Size:    %u MB\n", data.max_lba / 2048);
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    }
+    else if (k_strcmp(args[1], "part") == 0) {
+        k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+        k_print("[PART] Scanning MBR...\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        
+        int count = partition_scan();
+        if (count < 0) {
+            k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+            k_print("[PART] ERROR: Failed to read/parse MBR\n");
+            k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            return;
+        }
+        
+        k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+        k_print("[PART] --- Partition Table ---\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        k_print(" ID  Type   LBA Start    Size(sec)   Size(MB)  Notes\n");
+        k_print("--------------------------------------------------------\n");
+        
+        for (int i = 0; i < count; i++) {
+            partition_info_t* p = partition_get(i);
+            if (p == NULL) continue;
+            
+            // Подсветка FAT32 разделов (наших целевых)
+            if (p->type == 0x0B || p->type == 0x0C) {
+                k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+                k_printf(" %d   0x%02X   %-12u %-11u %-9u FAT32 ✓\n",
+                         p->id, p->type, p->lba_start,
+                         p->sector_count, p->sector_count / 2048);
+            } else {
+                k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                k_printf(" %d   0x%02X   %-12u %-11u %-9u (other)\n",
+                         p->id, p->type, p->lba_start,
+                         p->sector_count, p->sector_count / 2048);
+            }
+        }
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        k_printf("[PART] Total: %d partitions found\n", count);
+    }
+    else if (k_strcmp(args[1], "read") == 0) {
+        if (argc < 3) {
+            k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+            k_print("Usage: ata read <lba_hex_or_dec>\n");
+            k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            return;
+        }
+        
+        uint32_t lba = k_atoh(args[2]);
+        uint8_t buffer[512];
+        
+        k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+        k_printf("[ATA] Reading LBA %u (0x%x)...\n", lba, lba);
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        
+        if (ata_read_sectors(lba, 1, buffer) < 0) {
+            k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+            k_print("[ATA] ERROR: Read failed (BSY timeout / DRQ error)\n");
+            k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            return;
+        }
+        
+        k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        k_print("[ATA] Read OK. Hex dump (512 bytes):\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        
+        // Hex dump в стиле debug-вывода
+        for (int i = 0; i < 512; i += 16) {
+            k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            k_printf("%04X: ", i);
+            k_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+            
+            for (int j = 0; j < 16; j++) {
+                k_printf("%02X ", buffer[i + j]);
+            }
+            
+            k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            k_print(" |");
+            for (int j = 0; j < 16; j++) {
+                char c = (char)buffer[i + j];
+                if (c >= 32 && c <= 126) k_putchar(c);
+                else k_putchar('.');
+            }
+            k_print("|\n");
+        }
+    }
+    else if (k_strcmp(args[1], "test") == 0) {
+        k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+        k_print("[ATA TEST] Starting read stress test (10 sectors)...\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        
+        uint8_t buffer[512];
+        int failures = 0;
+        uint32_t start_ticks = timer_get_ticks();
+        
+        for (int i = 0; i < 10; i++) {
+            k_printf("[ATA TEST]   Sector %d... ", i);
+            if (ata_read_sectors((uint32_t)i, 1, buffer) < 0) {
+                k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+                k_print("[FAIL]\n");
+                k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+                failures++;
+            } else {
+                k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+                k_print("[OK]\n");
+                k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+            }
+        }
+        
+        uint32_t elapsed = timer_get_ticks() - start_ticks;
+        k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+        k_print("[ATA TEST] --- Results ---\n");
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+        k_printf("[ATA TEST] Elapsed: %u ms\n", elapsed);
+        
+        if (failures == 0) {
+            k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            k_print("[ATA TEST] All 10 reads successful!\n");
+        } else {
+            k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+            k_printf("[ATA TEST] %d failures detected!\n", failures);
+        }
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    }
+    else {
+        k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+        k_printf("Unknown ata command: %s\n", args[1]);
+        k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    }
+}
+
+
+// ============================================================================
 // ДИСПЕТЧЕР КОМАНД
 // ============================================================================
 static void execute_command(char* buffer) {
@@ -462,6 +644,10 @@ static void execute_command(char* buffer) {
     // [ VFS ]
     else if (k_strcmp(args[0], "ls") == 0) {
         handle_ls(argc, args);
+    }
+    // [ Storage (ATA) ] День 8.2
+    else if (k_strcmp(args[0], "ata") == 0) {
+        handle_ata(argc, args);
     }
     else if (k_strcmp(args[0], "cat") == 0) {
         handle_cat(argc, args);
