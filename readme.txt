@@ -668,3 +668,218 @@ User Sandboxes (Unix-style):
 - Недоверенное приложение физически не может получить доступ к ресурсам, 
   на которые у него нет Capability-токена.
 - OOM внутри контейнера не влияет на соседние контейнеры или ядро.
+
+🧪 День 10: Testing Suite — Концептуальная архитектура
+ФИЛОСОФИЯ ТЕСТИРОВАНИЯ
+Тестирование в Bare Metal OS строится на принципе "Trust, but Verify". Мы не доверяем ни одной подсистеме (PMM, VMM, Scheduler, ATA Driver) без доказательств её корректности. Каждый тест — это контракт между ядром и реальностью: "Если я сделаю X, система обязана сделать Y и остаться живой".
+Три столпа тестовой инфраструктуры:
+Pillar 1: ELF Test Suite (User Space correctness)
+Pillar 2: Stress Tests (Kernel robustness)
+Pillar 3: ATA Integrity (Storage reliability)
+Вспомогательная инфраструктура:
+PMM Accounting (счётчики alloc/free для детекции утечек)
+Test Runner (shell-команда для автоматизации)
+QEMU Headless Automation (CI/CD ready)
+ИНФРАСТРУКТУРА: PMM ACCOUNTING
+Добавляем в pmm.c глобальные счётчики:
+pmm_total_allocs — количество успешных pmm_alloc_page() с момента загрузки
+pmm_total_frees — количество успешных pmm_free_page() с момента загрузки
+API:
+pmm_get_alloc_count() — вернуть pmm_total_allocs
+pmm_get_free_count() — вернуть pmm_total_frees
+pmm_check_balance() — вернуть разницу (allocs - frees)
+Контракт: после любого теста, где все ресурсы освобождены, pmm_check_balance() ОБЯЗАН вернуть 0. Любое другое значение = memory leak.
+INFRASTRUCTURE: TEST RUNNER (SHELL)
+Shell-команды:
+run_tests — запускает весь набор ELF-тестов
+stress <spawn|forkbomb|all> — запускает стресс-тесты
+ata stress <count> <start_lba> — запускает ATA integrity test
+Логика Test Runner для каждого теста:
+Снапшот ДО: запомнить free_pages, alloc_count, task_count
+Запустить тестируемое действие
+Дождаться завершения (с таймаутом)
+Снапшот ПОСЛЕ: замерить те же метрики
+Сравнить снапшоты и вынести вердикт
+PILLAR 1: ELF TEST SUITE
+Назначение: проверить корректность User Space изоляции, Demand Paging, VMA enforcement и Grim Reaper cleanup при запуске реальных ELF-бинарников.
+Тестовые бинарники (initrd_src/bin/)
+test_hello.elf — РАБОЧИЙ процесс
+Логика: печатает "Hello" через sys_write, вызывает sys_exit(0)
+Ожидание: exit_code = 0, утечек нет, PMM balance = 0
+Что проверяет: базовый путь sys_exec → sys_exit → Grim Reaper
+test_segfault.elf — NULL Pointer Dereference
+Логика: обращается к адресу 0x00000000 (запись)
+Ожидание: SIGSEGV, NULL Guard Page срабатывает
+Что проверяет: NULL Guard Page в page_fault_handler
+test_write_text.elf — W^X Violation
+Логика: пытается писать в .text секцию (self-modifying code)
+Ожидание: SIGSEGV, VMA права нарушены
+Что проверяет: Read-Only enforcement для .text
+test_stack_overflow.elf — Stack Overflow
+Логика: бесконечная рекурсия с аллокацией на стеке
+Ожидание: SIGSEGV на Stack Guard Page
+Что проверяет: Stack Guard Page mechanism
+test_oom.elf — Memory Hog
+Логика: запрашивает 100 MB через sys_brk, пытается заполнить
+Ожидание: OOM Kill, -ENOMEM из sys_brk
+Что проверяет: OOM Protection (проактивный и реактивный)
+test_fork_bomb.elf — Resource Abuse (Day 11+)
+Логика: while(1) { sys_fork(); }
+Ожидание: Resource Limit или OOM Killer останавливает бомбу
+Что проверяет: Resource Containers, устойчивость ядра
+Test Runner логика
+Для каждого теста выполняем:
+Снапшот PMM ДО (free_pages_before, alloc_count_before)
+Запуск ELF через sys_exec → получение PID
+Ожидание завершения через sys_waitpid → получение exit_code
+Снапшот PMM ПОСЛЕ (free_pages_after, alloc_count_after)
+Валидация по 4 критериям (см. ниже)
+Критерии PASS/FAIL
+Memory Integrity: free_after == free_before (нет утечек страниц)
+Process Cleanup: task_count == baseline (нет zombie tasks)
+Crash Correctness: exit_code соответствует ожиданию
+Kernel Stability: Shell отвечает после теста (нет deadlock/panic)
+PILLAR 2: STRESS TESTS
+Назначение: проверить масштабируемость ядра, устойчивость к resource exhaustion и надёжность Grim Reaper при массовой гибели процессов. Это тест на выживаемость системы в экстремальных условиях.
+Test 2A: Mass Spawn (Kernel-Level)
+Команда: stress spawn <count>, где count = 100..500
+Сценарий:
+Создать N kernel-level задач через task_create()
+Каждая задача выполняет 100x sys_yield() (~2 sec жизни)
+Задачи завершаются через sys_exit(0)
+Grim Reaper очищает ресурсы в schedule()
+Что проверяется:
+PMM Scalability: выдерживает ли PMM 500+ аллокаций без фрагментации
+Heap Pressure: хватает ли kernel heap для 500 PCB (~2 KB каждая)
+Scheduler Fairness: Round-Robin равномерно раздаёт CPU всем задачам
+Task Table Limits: корректно ли обрабатывается переполнение таблицы
+Grim Reaper Speed: все 500 DEAD задач очищены < 100ms
+Валидация:
+created == count (или graceful failure при resource limit)
+failed tasks имеют диагностику (OOM / Heap full / Table full)
+PMM balance == 0 после завершения всех задач
+Heap balance == 0 (нет PCB leaks)
+Shell отвечает немедленно после теста
+Test 2B: Fork Bomb (User Space, Day 11+)
+Команда: stress forkbomb
+Сценарий:
+Запуск /bin/test_forkbomb.elf через sys_exec
+Бинарник в цикле: while(1) { sys_fork(); }
+Родитель и ребёнок оба продолжают fork'аться
+Тест длится 10 секунд или до срабатывания защиты
+Что проверяется:
+Resource Limits: max_processes в Resource Container → sys_fork возвращает -EAGAIN
+OOM Killer: при pmm_alloc_page() == 0 ядро убивает процесс с низким приоритетом
+Process Table: Global PID counter не переполняется критично
+Grim Reaper Speed: Reaper успевает чистить быстрее, чем создаются новые
+Критический критерий:
+Ядро ОБЯЗАНО выжить. Fork bomb может исчерпать ресурсы sandbox'а, но Kernel Space остаётся нетронутым. Shell отвечает на команды, ps работает, dmesg показывает логи OOM Killer'а.
+PILLAR 3: ATA SECTOR STRESS TEST
+Назначение: проверить целостность данных (Data Integrity) на уровне секторов. Это замена теста "1000 файлов" (который требует FAT32, отложенного до Day 16). Тестируем драйвер ATA PIO в изоляции.
+Команда: ata stress <count> <start_lba>
+Phase 1: Write Pattern Generation
+Для каждого сектора из диапазона [start_lba, start_lba + count):
+Выбор паттерна (4 типа, циклически):
+Pattern 0: Все байты 0xAA (alternating bits)
+Pattern 1: Все байты 0x55 (inverse alternating)
+Pattern 2: Sequential bytes (0x00, 0x01, ..., 0xFF, repeat)
+Pattern 3: Pseudo-random (seed = LBA, deterministic)
+Запись через ata_write_sectors()
+Подсчёт write_errors
+Phase 2: Read & Verify
+Для каждого сектора:
+Чтение через ata_read_sectors()
+Регенерация ожидаемого паттерна
+CRC32 сравнение с прочитанными данными
+Подсчёт read_errors и crc_mismatches
+Phase 3: Results & Verdict
+Метрики:
+Total time, Write time, Verify time
+Write errors, Read errors, CRC mismatches
+Throughput (KB/s) для PIO mode
+Safety Check:
+start_lba ОБЯЗАН быть >= 2048, чтобы не затереть MBR и partition table
+Что проверяется:
+ATA Write correctness: PIO write sequence работает
+ATA Read correctness: PIO read sequence работает
+Data Integrity: CRC32 детектирует все битовые ошибки
+Timing: BSY/DRQ wait корректно обрабатывает таймауты
+Error Recovery: подсчёт ошибок не роняет ядро
+Throughput: производительность PIO mode
+КРИТЕРИИ PASS/FAIL (ОБЩИЕ)
+PASS (зелёная зона):
+Exit code соответствует ожиданию
+PMM balance == 0 (нет утечек физических страниц)
+Heap balance == 0 (нет утечек kernel memory)
+Task count == baseline (нет zombie processes)
+Shell responsive immediately after test
+Kernel log не содержит panic/triple fault
+FAIL (красная зона):
+Leaked pages > 0 (PMM не освободил страницы)
+Zombie tasks > 0 (Grim Reaper не сработал)
+Wrong exit code (неожиданное поведение)
+Kernel deadlock/panic (ядро не выжило)
+ATA CRC mismatch (данные повреждены)
+СВЯЗЬ С NORTH STAR ("БЕССМЕРТНАЯ КРЕПОСТЬ")
+Философия "Let it crash":
+Processes WILL crash (fork bomb, bugs, OOM)
+Kernel NEVER crashes
+Grim Reaper ALWAYS cleans up
+PMM accounting is PERFECT (no leaks)
+System ALWAYS recovers
+Эти тесты напрямую проверяют все 5 пунктов. Если все тесты PASS — мы имеем право говорить о промышленной надёжности ядра.
+Resource Governance:
+OOM Killer проверяется test_oom.elf и stress forkbomb
+Resource Limits проверяются stress spawn (лимит task table)
+Grim Reaper проверяется во всех тестах через PMM balance
+ПЛАН РЕАЛИЗАЦИИ
+Фаза 1: Инфраструктура (2 часа)
+Добавить счётчики в pmm.c (pmm_total_allocs, pmm_total_frees)
+Добавить pmm_check_balance() API
+Добавить shell-команду run_tests с базовой логикой
+Фаза 2: ELF Test Suite (3 часа, после Day 9)
+Написать 6 тестовых ELF-бинарников (test_hello, test_segfault, test_write_text, test_stack_overflow, test_oom, test_fork_bomb)
+Интегрировать их в initrd
+Запустить через sys_exec в test runner
+Фаза 3: Stress Tests — Mass Spawn (2 часа)
+Написать handle_spawn с spawn_worker_task
+Добавить PMM accounting verification
+Тест на 100, 300, 500 задач
+Фаза 4: ATA Stress Test (2 часа, Day 8.3)
+Реализовать ata_write_sectors (сейчас только read)
+Реализовать CRC32 в klib.c
+Написать handle_ata_stress с 3 фазами
+Фаза 5: Fork Bomb Stress (1 час, после Day 11)
+Написать test_forkbomb.elf
+Интегрировать в stress forkbomb
+Проверить Resource Containers и OOM Killer
+ИТОГОВЫЙ ЧЕК-ЛИСТ ТЕСТОВ
+ELF Tests (Day 10, после Day 9):
+test_hello.elf: рабочий процесс
+test_segfault.elf: NULL pointer
+test_write_text.elf: W^X violation
+test_stack_overflow.elf: stack overflow
+test_oom.elf: memory exhaustion
+test_fork_bomb.elf: resource abuse (Day 11+)
+Stress Tests (Day 10):
+stress spawn 100: basic mass spawn
+stress spawn 300: near-limit stress
+stress spawn 500: extreme stress
+stress forkbomb: destructive test (Day 11+)
+ATA Tests (Day 8.3 / Day 10):
+ata stress 100: quick integrity check
+ata stress 1000: medium test
+ata stress 10000: full stress test
+Инфраструктура:
+PMM accounting counters
+Test runner shell commands
+Makefile targets (make tests, make test-run)
+QEMU headless automation
+ОЖИДАЕМЫЙ РЕЗУЛЬТАТ
+После прохождения всех тестов мы получаем:
+Доказательство корректности User Space изоляции (ELF Tests)
+Гарантию отсутствия memory leaks (PMM balance = 0)
+Уверенность в надёжности Grim Reaper (все zombie reaped)
+Подтверждение Data Integrity для ATA (CRC32 match)
+Подтверждение выживаемости ядра при стрессе (no kernel panic)
+Это даёт нам право перейти к Day 11 (Process Lifecycle) с чистым, проверенным фундаментом.
