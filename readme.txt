@@ -127,19 +127,47 @@ context_switch.asm:
 Устанавливает CR0.TS (взводит курок для Lazy FPU).
 
 💾 Storage & ATA (Day 8.2)
-ata.c (ATA PIO Driver + MBR Parser):
+ata.c (ATA PIO Driver + MBR Parser + FAT32):
+
+ATA PIO Driver:
 * Port I/O: Работа с регистрами Primary IDE Bus (0x1F0-0x1F7).
 * Polling Mode: Ожидание BSY/DRQ через циклы с io_delay() (без IRQ14 для простоты).
 * IDENTIFY Command: Чтение 512-байтной структуры с информацией о диске (модель, сериал, LBA capacity).
 * LBA28 Addressing: Чтение секторов через 28-битный LBA (лимит 128 GB).
-* ATAPI Detection: Проверка регистров LBA_MID/LBA_HI для отличия ATA от ATAPI (CD-ROM).
-* Byte-Swap Fix: ASCII строки в IDENTIFY (model, serial) хранятся в byte-swapped формате, требуют обмена байтов перед выводом.
+* ATAPI Detection: Проверка регистров LBA_MID (0x14) и LBA_HI (0xEB) для отличия ATA от ATAPI (CD-ROM).
+* Byte-Swap Fix: ASCII строки в IDENTIFY (model, serial, firmware) хранятся в byte-swapped формате, требуют обмена байтов перед выводом.
+* BSY/DRQ Timeout Protection: Защита от зависания на неисправных дисках (100000 итераций с io_delay).
+* Sector Count Edge Case: Поддержка sector_count=0 как 256 секторов (ATA спецификация).
+* Error Handling: Чтение регистра ATA_REG_ERROR при сбое, детальное логирование в Serial.
 
 MBR Parser (внутри ata.c):
 * MBR Signature: Проверка magic 0xAA55 в последних 2 байтах сектора 0.
 * Partition Table: Парсинг 4-х записей по 16 байт (offset 446-509).
 * FAT32 Detection: Поиск разделов с типом 0x0B (FAT32 CHS) или 0x0C (FAT32 LBA).
 * Partition Registry: Глобальный массив partition_info_t[] для хранения LBA-адресов начала разделов.
+
+FAT32 Read-Only Driver (fat32.c):
+* BPB Parsing: Чтение BIOS Parameter Block из Boot Sector (первый сектор раздела).
+* Cluster Math: Вычисление first_data_sector = reserved_sectors + (num_fats * fat_size_32).
+* Cluster → LBA Translation: Формула lba = partition_lba + first_data_sector + (cluster - 2) * sectors_per_cluster.
+* FAT Caching: Статический буфер fat_sector_buffer[512] для кэширования текущего сектора FAT (избегаем повторных чтений).
+* Chain Traversal: Функция fat32_next_cluster() читает следующий кластер из FAT-таблицы (маскирует верхние 4 бита).
+* EOF Detection: Проверка cluster >= 0x0FFFFFF8 (End of File).
+* VFS Integration: Каждый vfs_node_t хранит fat32_node_data_t (start_cluster, size, fs pointer).
+* Polymorphic Callbacks: fat32_read(), fat32_readdir(), fat32_finddir() интегрированы в VFS через указатели на функции.
+
+VFAT (Long File Names) Support:
+* LFN Entry Structure: Парсинг 32-байтных записей с атрибутом 0x0F (READ_ONLY|HIDDEN|SYSTEM|VOLUME_ID).
+* Reverse Order: LFN записи идут в обратном порядке (последний фрагмент первым, bit 6 в order = last entry).
+* UCS-2 Accumulation: Накопление символов из name1[5], name2[6], name3[2] (всего 13 UCS-2 символов на запись).
+* UCS-2 → UTF-8 Conversion: Функция ucs2_to_utf8() конвертирует 16-бит Unicode в variable-length UTF-8 (1-3 байта).
+* Checksum Verification: Функция lfn_checksum() вычисляет контрольную сумму 8.3 имени для верификации LFN записей.
+* 8.3 Fallback: Если LFN отсутствует или checksum не совпадает, используется классическое 8.3 имя (space-padded).
+* Cyrillic Support: Кириллица в именах файлов корректно отображается благодаря UTF-8 кодировке.
+* Volume Label Filter: Игнорирование записей с атрибутом FAT32_ATTR_VOLUME_ID (метка тома).
+* Deleted Entry Filter: Игнорирование записей с первым байтом 0xE5 (удаленные файлы).
+
+
 
 ⚠️ Архитектурное решение (День 8.2):
 MBR Parser интегрирован в ata.c для упрощения отладки и снижения связанности.
@@ -189,7 +217,9 @@ int k_memcmp(const void* s1, const void* s2, size_t n) — Побайтовое 
 size_t k_strlen(const char* str) — Длина строки.
 int k_strcmp(const char* s1, const char* s2) — Полное сравнение.
 int k_strncmp(const char* s1, const char* s2, size_t n) — Сравнение первых n символов.
-
+char* k_strncpy(char* dest, const char* src, size_t n) — Безопасное копирование не более n символов.
+Если src короче n, остаток буфера dest принудительно заполняется нулями ('\0'). 
+Критично для предотвращения утечки данных из стека/кучи (например, при парсинге FAT32 LFN имен и передаче их в структуры VFS dirent_t).
 🔢 Конвертация чисел
 void k_itoa(int value, char* buf, int base) — Int to ASCII (поддержка base 10/16).
 void k_uitoa(unsigned int value, char* buf, int base) — Unsigned Int to ASCII.
@@ -230,6 +260,7 @@ paging_init() (Включение CR0.PG, Direct Map, Reserving)
 fb_init() (Resurrect: перепривязка к виртуальному адресу 0xFD000000)
 heap_init() (Buddy System в 0xD0000000)
 vfs_init() & initrd_init() (Mount tmpfs)
+fat32_init()
 tasking_init() (Создание main_task, FPU setup)
 keyboard_install() & timer_init() (Включение IRQ)
 shell_run() (Бесконечный цикл CLI)
@@ -419,15 +450,21 @@ TODO на День 12 (Hardening):
 * **PMM Module Protection:** Резервирование физических страниц GRUB-модулей предотвращает Memory Corruption при создании Page Tables.
 User Pointer Validation: Все системные вызовы, принимающие указатели из Ring 3 (sys_read, sys_write), проходят строгую проверку is_user_pointer(). Любая попытка передать адрес >= 0xC0000000 (Kernel Space) пресекается с возвратом EFAULT.
 VFS Standard Streams: stdin и stdout реализованы как глобальные синглтоны vfs_node_t. Это предотвращает утечки памяти при массовом создании/уничтожении процессов.
-День 8.2: ATA PIO Driver (IDENTIFY, LBA28 Read), MBR Parser (Partition Scan), Shell Integration (ata info/part/read/test).
+День 8.2: Storage & FAT32 (ATA PIO + VFAT)
+* ATA PIO Driver: Работа с портами 0x1F0-0x1F7, LBA28 addressing, Polling Mode (без IRQ14).
+* IDENTIFY Command: Чтение 512-байтной структуры диска (модель, сериал, firmware, LBA capacity).
+* ATAPI Detection: Проверка регистров LBA_MID/LBA_HI для отличия ATA от CD-ROM.
+* Byte-Swap Fix: Корректная обработка ASCII строк в IDENTIFY (модель, сериал хранятся в byte-swapped формате).
+* BSY/DRQ Timeout Protection: Защита от зависания на неисправных дисках (100000 итераций с io_delay).
+* MBR Parser: Парсинг таблицы разделов (4 записи по 16 байт, offset 446-509), валидация сигнатуры 0xAA55.
+* FAT32 Read-Only: Парсинг BPB (BIOS Parameter Block), вычисление first_data_sector, fat1_lba.
+* Cluster Chain Navigation: Чтение FAT-таблицы, обход цепочек кластеров через fat32_next_cluster().
+* VFAT (Long File Names): Парсинг LFN записей (атрибут 0x0F), накопление UCS-2 символов.
+* UCS-2 → UTF-8 Conversion: Поддержка кириллицы и Unicode в именах файлов (до 255 символов).
+* LFN Checksum Verification: Проверка контрольной суммы 8.3 имени для верификации LFN записей.
+* VFS Mount: Флаг FS_MOUNTPOINT для "телепортации" по дереву (transparent mount).
 
 🚀 ЧТО ДЕЛАТЬ ДАЛЬШЕ (Приоритеты)
-📅 День 8.2: Storage & FAT32 (Отложено до стабилизации User Space)
-ATA PIO Driver: Работа с портами 0x1F0-0x1F7, LBA28, ожидание BSY/DRQ.
-MBR & Partitions: Чтение LBA 0, поиск активного раздела.
-FAT32 Read-Only: Парсинг BPB, обход цепочек кластеров.
-VFAT (LFN): Парсинг Long File Names (UCS-2 -> UTF-8).
-VFS Mount: Флаг FS_MOUNTPOINT для "телепортации" по дереву.
 📅 День 9: User Space & ELF Loader
 ELF Parser: Чтение e_entry, e_phoff, Program Headers (PT_LOAD).
 ELF Loader: Выделение User Space памяти, загрузка сегментов .text и .data из VFS (Initrd) в адресное пространство процесса.

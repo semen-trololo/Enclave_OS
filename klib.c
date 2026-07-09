@@ -174,6 +174,25 @@ int k_strncmp(const char* s1, const char* s2, size_t n) {
     return *(unsigned char*)s1 - *(unsigned char*)s2;
 }
 
+// Копирует не более n символов из src в dest.
+// Если src короче n, оставшееся пространство в dest заполняется нулями ('\0').
+// Это критично для безопасности, чтобы избежать утечки данных из стека/кучи.
+char* k_strncpy(char* dest, const char* src, size_t n) {
+    size_t i;
+    
+    // Копируем символы до тех пор, пока не достигнем n или конца src
+    for (i = 0; i < n && src[i] != '\0'; i++) {
+        dest[i] = src[i];
+    }
+    
+    // Заполняем остаток буфера нулями (стандартное поведение strncpy)
+    for (; i < n; i++) {
+        dest[i] = '\0';
+    }
+    
+    return dest;
+}
+
 void k_printf(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);

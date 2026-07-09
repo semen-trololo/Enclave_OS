@@ -17,6 +17,8 @@
 #include "univga_font.h"
 #include "vfs.h"
 #include "initrd.h"
+#include "ata.h"
+#include "fat32.h"
 
 // ==========================================
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ
@@ -134,6 +136,9 @@ static void init_subsystems(void) {
     initrd_init();
     serial_print("  [+] VFS & Initrd (tmpfs) mounted\n");
 
+    fat32_init();
+    serial_print("  [+] FAT32 Driver (Read-Only) mounted\n");
+
     tasking_init();
     serial_print("  [+] Task Scheduler (Round-Robin) ready\n");
 
@@ -141,6 +146,67 @@ static void init_subsystems(void) {
     timer_init(1000); // 1000 Hz
     serial_print("  [+] IRQs (Keyboard/PIT) enabled\n");
 }
+
+// ==========================================
+// НОВАЯ ФАЗА: STORAGE INITIALIZATION (Day 8.2)
+// ==========================================
+static void init_storage(void) {
+    serial_print("[BOOT] Phase 2.5: Storage Subsystem (ATA PIO)...\n");
+    
+    ata_init();
+    serial_print("  [+] ATA Primary Bus initialized (Polling Mode)\n");
+    
+    ata_identify_data_t identify_data;
+    int identify_result = ata_identify(&identify_data);
+    
+    if (identify_result == 0) {
+        // ИСПРАВЛЕНО: используем %s вместо %.40s (serial_printf не поддерживает модификаторы)
+        serial_printf("  [+] Disk: %s\n", identify_data.model);
+        serial_printf("  [+] Serial: %s\n", identify_data.serial);
+        serial_printf("  [+] Firmware: %s\n", identify_data.firmware);
+        serial_printf("  [+] LBA Capacity: %u sectors (%u MB)\n", 
+                      identify_data.lba_capacity,
+                      identify_data.lba_capacity / 2048);
+        
+        if (fb_is_available()) {
+            fb_set_color(COLOR_CYAN, COLOR_BLACK);
+            fb_print(" [ OK ] ATA: ");
+            fb_print(identify_data.model);
+            fb_print(" detected.\n");
+            fb_set_color(COLOR_LIGHT_GREY, COLOR_BLACK);
+        }
+    } else if (identify_result == -2) {
+        serial_print("  [INFO] ATAPI device detected (CD-ROM), skipping.\n");
+        if (fb_is_available()) {
+            fb_set_color(COLOR_YELLOW, COLOR_BLACK);
+            fb_print(" [INFO] ATAPI device (CD-ROM) detected.\n");
+            fb_set_color(COLOR_LIGHT_GREY, COLOR_BLACK);
+        }
+    } else {
+        serial_printf("  [WARN] ATA IDENTIFY failed (code %d).\n", identify_result);
+        if (fb_is_available()) {
+            fb_set_color(COLOR_YELLOW, COLOR_BLACK);
+            fb_print(" [WARN] No ATA disk detected.\n");
+            fb_set_color(COLOR_LIGHT_GREY, COLOR_BLACK);
+        }
+    }
+    
+    int part_count = partition_scan();
+    if (part_count > 0) {
+        serial_printf("  [+] MBR: Found %d partitions\n", part_count);
+        for (int i = 0; i < MAX_PARTITIONS; i++) {
+            partition_info_t* p = partition_get(i);
+            if (p && p->active) {
+                // ИСПРАВЛЕНО: используем %x вместо %02X
+                serial_printf("      [Part %d] Type: 0x%x, LBA: %u, Size: %u MB\n",
+                              i, p->type, p->lba_start, p->sector_count / 2048);
+            }
+        }
+    } else {
+        serial_print("  [INFO] No valid MBR partitions found.\n");
+    }
+}
+
 
 // ==========================================
 // ТОЧКА ВХОДА
@@ -163,6 +229,7 @@ void kernel_main(void) {
     // 2. Инициализация по фазам
     init_early_hardware();
     init_memory_management();
+    init_storage();        // ← НОВАЯ ФАЗА: ATA PIO + MBR
     init_subsystems();
 
     // 3. Вывод на экран (UX) - только самое важное

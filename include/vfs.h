@@ -134,6 +134,8 @@ vfs_node_t* vfs_create_node(const char* name, uint32_t flags, vfs_node_t* parent
 // Добавление ребенка к родителю (O(1) операция)
 void vfs_add_child(vfs_node_t* parent, vfs_node_t* child);
 
+vfs_node_t* vfs_mkdir_recursive(const char* path);
+
 // Внутреннее чтение/запись (для ELF Loader и ядра, обходят проверку FS_SYSTEM)
 int32_t vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
 int32_t vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* buffer);

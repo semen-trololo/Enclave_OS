@@ -51,6 +51,7 @@ int k_vsprintf(char* buf, const char* fmt, va_list args);
 size_t k_strlen(const char* str);
 int k_strcmp(const char* s1, const char* s2);
 int k_strncmp(const char* s1, const char* s2, size_t n);
+char* k_strncpy(char* dest, const char* src, size_t n);
 
 // --- Память (КРИТИЧЕСКИ ВАЖНО ДЛЯ VMM И HEAP) ---
 void* k_memset(void* ptr, int value, size_t num);
@@ -69,6 +70,7 @@ void k_itoa(int value, char* buf, int base);
 void k_uitoa(unsigned int value, char* buf, int base);
 int k_atoi(const char* str);
 uint32_t k_atoh(const char* str);
+
 
 // НОВОЕ: универсальная установка цвета
 void k_set_color(uint8_t fg, uint8_t bg); // Убрали vga_ из названий параметров!

@@ -113,6 +113,38 @@ void vfs_add_child(vfs_node_t* parent, vfs_node_t* child) {
     }
 }
 
+// Добавь в vfs.c после vfs_add_child
+vfs_node_t* vfs_mkdir_recursive(const char* path) {
+    if (!path || path[0] != '/') return NULL;
+    
+    vfs_node_t* current = vfs_root;
+    char token[VFS_MAX_FILENAME];
+    int i = 1;
+    
+    while (path[i] != '\0') {
+        while (path[i] == '/') i++;
+        if (path[i] == '\0') break;
+        
+        int t_idx = 0;
+        while (path[i] != '/' && path[i] != '\0' && t_idx < VFS_MAX_FILENAME - 1) {
+            token[t_idx++] = path[i++];
+        }
+        token[t_idx] = '\0';
+        
+        // Ищем существующую директорию
+        vfs_node_t* child = current->finddir ? current->finddir(current, token) : NULL;
+        
+        if (!child) {
+            // Создаем новую директорию
+            child = vfs_create_node(token, FS_DIRECTORY, current, NULL);
+            if (!child) return NULL;
+        }
+        
+        current = child;
+    }
+    return current;
+}
+
 // ==========================================
 // 3. МАРШРУТИЗАЦИЯ И МОНТИРОВАНИЕ
 // ==========================================
