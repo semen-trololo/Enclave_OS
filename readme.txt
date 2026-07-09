@@ -45,6 +45,7 @@ project_root/
 │   ├── task.h, vfs.h, initrd.h
 │   ├── vga.h, framebuffer.h, keyboard.h, timer.h, serial.h
 │   ├── klib.h, shell.h, syscall.h, multiboot.h, port_io.h
+│   ├── ata.h                 # ATA PIO Driver & MBR Parser (Day 8.2)
 │   └── univga_font.h         # PSF1 шрифт с кириллицей
 │
 ├── boot.asm                  # Multiboot, VBE, Higher Half Mapping
@@ -64,6 +65,7 @@ project_root/
 ├── vga.c, framebuffer.c      # Графика (Text 80x50 + GUI 1024x768)
 ├── keyboard.c, timer.c       # Драйверы PS/2 и PIT
 ├── serial.c                  # COM1 (Headless debug)
+├── ata.c                     # ATA PIO Driver & MBR Parser (Day 8.2)
 ├── klib.c, shell.c           # Утилиты и CLI
 ├── Makefile                  # Автоматизация сборки
 └── .gitignore
@@ -123,6 +125,27 @@ context_switch.asm:
 Сохраняет callee-saved регистры (EBX, ESI, EDI, EBP).
 Меняет ESP и загружает новый CR3 (TLB Flush).
 Устанавливает CR0.TS (взводит курок для Lazy FPU).
+
+💾 Storage & ATA (Day 8.2)
+ata.c (ATA PIO Driver + MBR Parser):
+* Port I/O: Работа с регистрами Primary IDE Bus (0x1F0-0x1F7).
+* Polling Mode: Ожидание BSY/DRQ через циклы с io_delay() (без IRQ14 для простоты).
+* IDENTIFY Command: Чтение 512-байтной структуры с информацией о диске (модель, сериал, LBA capacity).
+* LBA28 Addressing: Чтение секторов через 28-битный LBA (лимит 128 GB).
+* ATAPI Detection: Проверка регистров LBA_MID/LBA_HI для отличия ATA от ATAPI (CD-ROM).
+* Byte-Swap Fix: ASCII строки в IDENTIFY (model, serial) хранятся в byte-swapped формате, требуют обмена байтов перед выводом.
+
+MBR Parser (внутри ata.c):
+* MBR Signature: Проверка magic 0xAA55 в последних 2 байтах сектора 0.
+* Partition Table: Парсинг 4-х записей по 16 байт (offset 446-509).
+* FAT32 Detection: Поиск разделов с типом 0x0B (FAT32 CHS) или 0x0C (FAT32 LBA).
+* Partition Registry: Глобальный массив partition_info_t[] для хранения LBA-адресов начала разделов.
+
+⚠️ Архитектурное решение (День 8.2):
+MBR Parser интегрирован в ata.c для упрощения отладки и снижения связанности.
+Разделение на отдельный partition.c планируется на День 16 (User-Mode Drivers),
+когда ATA драйвер будет вынесен в Ring 3 как ata_server процесс, а partition_scan()
+станет отдельным IPC-сервисом или библиотечной функцией.
 
 📂 Файловая Система (Day 8)
 vfs.c (Virtual File System):
@@ -396,6 +419,7 @@ TODO на День 12 (Hardening):
 * **PMM Module Protection:** Резервирование физических страниц GRUB-модулей предотвращает Memory Corruption при создании Page Tables.
 User Pointer Validation: Все системные вызовы, принимающие указатели из Ring 3 (sys_read, sys_write), проходят строгую проверку is_user_pointer(). Любая попытка передать адрес >= 0xC0000000 (Kernel Space) пресекается с возвратом EFAULT.
 VFS Standard Streams: stdin и stdout реализованы как глобальные синглтоны vfs_node_t. Это предотвращает утечки памяти при массовом создании/уничтожении процессов.
+День 8.2: ATA PIO Driver (IDENTIFY, LBA28 Read), MBR Parser (Partition Scan), Shell Integration (ata info/part/read/test).
 
 🚀 ЧТО ДЕЛАТЬ ДАЛЬШЕ (Приоритеты)
 📅 День 8.2: Storage & FAT32 (Отложено до стабилизации User Space)
