@@ -251,9 +251,9 @@ void kernel_main(void) {
     
     // 5. Запуск пользовательских задач
     serial_print("[TASK] Spawning background tasks...\n");
-    task_create("Task_A", thread_a);
-    task_create("Task_B", thread_b);
-    task_create("Math_Task", thread_math);
+    task_create("Task_A", thread_a, false, 0);
+    task_create("Task_B", thread_b, false, 0);
+    task_create("Math_Task", thread_math, false, 0);
     serial_print("[TASK] Background tasks queued.\n");
 
     // 6. Передача управления CLI

@@ -3,28 +3,39 @@
 # ==============================================================================
 CC = i686-linux-gnu-gcc
 AS = nasm
+USER_CC = i686-linux-gnu-gcc
 
-# Директории и имена
+# Директории
 BUILD_DIR = build
-ISO_DIR = isodir
+ISO_DIR = $(BUILD_DIR)/isodir
+INITRD_ROOT = $(BUILD_DIR)/initrd_root
+USER_BIN_DIR = $(BUILD_DIR)/bin
+
+# Имена файлов
 ISO_NAME = $(BUILD_DIR)/metal_os.iso
-KERNEL_BIN = $(BUILD_DIR)/metal_os.bin
+KERNEL_BIN = $(BUILD_DIR)/kernel.bin
+INITRD_TAR = $(BUILD_DIR)/initrd.tar
+DISK_IMG = $(BUILD_DIR)/disk.img
 
-# Initrd (RAM Disk)
-INITRD_DIR = initrd_src
-INITRD_TAR = $(ISO_DIR)/boot/initrd.tar
+# Исходники
+INITRD_SRC_DIR = initrd_src
+USER_SRC_DIR = user_src
 
-# Флаги компиляции (Строго по Базе Знаний)
+# Флаги компиляции ядра (Строго по Базе Знаний)
 CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Iinclude
 CFLAGS += -fno-pie -fno-pic -fno-stack-protector
 CFLAGS += -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -mincoming-stack-boundary=2 -g
-CFLAGS += -MMD -MP  # Автоматическая генерация зависимостей от .h файлов
+CFLAGS += -MMD -MP
 
 ASFLAGS = -f elf32 -g
 LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
 
+# Флаги компиляции user-space
+USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra
+USER_LDFLAGS = -nostdlib -T user_linker.ld
+
 # ==============================================================================
-# ИСХОДНИКИ И ОБЪЕКТЫ
+# ИСХОДНИКИ И ОБЪЕКТЫ ЯДРА
 # ==============================================================================
 C_SOURCES = $(wildcard *.c)
 ASM_SOURCES = $(wildcard *.asm)
@@ -37,22 +48,30 @@ OBJ = $(BUILD_DIR)/boot.o $(filter-out $(BUILD_DIR)/boot.o,$(C_OBJS) $(ASM_OBJS)
 # Автоматически сгенерированные зависимости (.d файлы)
 DEPS = $(C_OBJS:.o=.d)
 
+# User-space исходники
+USER_C_SOURCES = $(wildcard $(USER_SRC_DIR)/*.c)
+USER_ASM_SOURCES = $(wildcard $(USER_SRC_DIR)/*.asm)
+USER_C_OBJS = $(patsubst $(USER_SRC_DIR)/%.c,$(BUILD_DIR)/user_%.o,$(USER_C_SOURCES))
+USER_ASM_OBJS = $(patsubst $(USER_SRC_DIR)/%.asm,$(BUILD_DIR)/user_%.o,$(USER_ASM_SOURCES))
+USER_ELFS = $(patsubst $(USER_SRC_DIR)/%.c,$(USER_BIN_DIR)/%.elf,$(USER_C_SOURCES)) \
+            $(patsubst $(USER_SRC_DIR)/%.asm,$(USER_BIN_DIR)/%.elf,$(USER_ASM_SOURCES))
+
 # ==============================================================================
 # ГЛАВНЫЕ ТАРГЕТЫ
 # ==============================================================================
 all: iso
 
 # Линковка ядра
-$(KERNEL_BIN): $(OBJ) linker.ld
+$(KERNEL_BIN): $(OBJ) linker.ld | $(BUILD_DIR)
 	@echo "[LINK] $@"
 	@$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(filter-out linker.ld,$^)
 
-# Компиляция C файлов
+# Компиляция C файлов ядра
 $(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
 	@echo "[CC]   $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-# Компиляция ASM файлов
+# Компиляция ASM файлов ядра
 $(BUILD_DIR)/%.o: %.asm | $(BUILD_DIR)
 	@echo "[AS]   $<"
 	@$(AS) $(ASFLAGS) $< -o $@
@@ -61,21 +80,55 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
 # ==============================================================================
+# USER-SPACE PROGRAMS (ELF Binaries)
+# ==============================================================================
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.c | $(USER_BIN_DIR)
+	@echo "[USER CC] $< -> $@"
+	@$(USER_CC) $(USER_CFLAGS) -c $< -o $(BUILD_DIR)/user_$*.o
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o
+
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.asm | $(USER_BIN_DIR)
+	@echo "[USER AS] $< -> $@"
+	@$(AS) -f elf32 $< -o $(BUILD_DIR)/user_$*.o
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o
+
+$(USER_BIN_DIR):
+	@mkdir -p $(USER_BIN_DIR)
+
+user_programs: $(USER_ELFS)
+	@if [ -n "$(USER_ELFS)" ]; then \
+		echo "[ OK ] Built $$(echo $(USER_ELFS) | wc -w) user-space programs"; \
+	fi
+
+# ==============================================================================
 # INITRD (АВТОМАТИЧЕСКАЯ УПАКОВКА TAR USTAR)
 # ==============================================================================
-$(INITRD_TAR): $(wildcard $(INITRD_DIR)/* $(INITRD_DIR)/*/* $(INITRD_DIR)/*/*/*)
-	@echo "[TAR]  Packing initrd.tar (UStar format)..."
-	@mkdir -p $(ISO_DIR)/boot
-	@rm -f $(INITRD_TAR)
-	@if [ -d "$(INITRD_DIR)" ]; then \
-		(cd $(INITRD_DIR) && tar --format=ustar -cf ../$(INITRD_TAR) .) || { echo "[FATAL] tar command failed!"; exit 1; }; \
-	else \
-		echo "[WARN] $(INITRD_DIR) not found. Creating dummy initrd."; \
-		touch $(INITRD_TAR); \
+$(INITRD_TAR): $(KERNEL_BIN) user_programs | $(INITRD_ROOT)
+	@echo "[INITRD] Preparing initrd root..."
+	@rm -rf $(INITRD_ROOT)
+	@mkdir -p $(INITRD_ROOT)
+	
+	@# Копируем статические файлы из initrd_src/
+	@if [ -d "$(INITRD_SRC_DIR)" ]; then \
+		cp -r $(INITRD_SRC_DIR)/* $(INITRD_ROOT)/ 2>/dev/null || true; \
 	fi
 	
+	@# Копируем user-space бинарники в bin/
+	@if [ -d "$(USER_BIN_DIR)" ] && [ -n "$$(ls -A $(USER_BIN_DIR) 2>/dev/null)" ]; then \
+		mkdir -p $(INITRD_ROOT)/bin; \
+		cp $(USER_BIN_DIR)/*.elf $(INITRD_ROOT)/bin/ 2>/dev/null || true; \
+	fi
+	
+	@echo "[TAR]  Packing initrd.tar (UStar format)..."
+	@rm -f $(INITRD_TAR)
+	@(cd $(INITRD_ROOT) && tar --format=ustar -cf ../initrd.tar .)
+	@echo "[ OK ] initrd.tar created"
+
+$(INITRD_ROOT):
+	@mkdir -p $(INITRD_ROOT)
+
 # ==============================================================================
-# ПРОВЕРКИ ПЕРЕД СБОРКОЙ ISO
+# ПРОВЕРКИ И ПОДГОТОВКА ПЕРЕД СБОРКОЙ ISO
 # ==============================================================================
 check_prerequisites:
 	@echo "[CHECK] Verifying prerequisites..."
@@ -83,61 +136,68 @@ check_prerequisites:
 		echo "[FATAL] linker.ld not found!"; \
 		exit 1; \
 	fi
-	@if [ ! -f "$(ISO_DIR)/boot/grub/grub.cfg" ]; then \
-		echo "[FATAL] $(ISO_DIR)/boot/grub/grub.cfg not found!"; \
-		echo "[HINT] Create grub.cfg with:"; \
-		echo "  set timeout=0"; \
-		echo "  set default=0"; \
-		echo "  menuentry \"Bare Metal OS\" {"; \
-		echo "    multiboot /boot/kernel.bin"; \
-		echo "    module /boot/initrd.tar"; \
-		echo "    boot"; \
-		echo "  }"; \
-		exit 1; \
-	fi
 	@echo "[ OK ] All prerequisites met."
+
+prepare_iso_dir: $(KERNEL_BIN) $(INITRD_TAR)
+	@echo "[ISO]  Preparing ISO directory structure..."
+	@mkdir -p $(ISO_DIR)/boot/grub
+	@cp $(KERNEL_BIN) $(ISO_DIR)/boot/kernel.bin
+	@cp $(INITRD_TAR) $(ISO_DIR)/boot/initrd.tar
+	
+	@# Генерируем grub.cfg автоматически
+	@echo "[GRUB] Generating grub.cfg..."
+	@echo 'set timeout=0' > $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'menuentry "Bare Metal OS" {' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    multiboot /boot/kernel.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    module /boot/initrd.tar' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    boot' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo "[ OK ] ISO directory prepared"
 
 # ==============================================================================
 # СБОРКА ISO (GRUB-MKRESCUE)
 # ==============================================================================
-iso: check_prerequisites $(KERNEL_BIN) $(INITRD_TAR)
-	@echo "[ISO]  Copying kernel to ISO directory..."
-	@mkdir -p $(ISO_DIR)/boot
-	@cp $(KERNEL_BIN) $(ISO_DIR)/boot/kernel.bin
+iso: check_prerequisites prepare_iso_dir
 	@echo "[ISO]  Generating bootable ISO with grub-mkrescue..."
 	@grub-mkrescue -o $(ISO_NAME) $(ISO_DIR) 2>/dev/null
 	@echo "[ OK ] ISO created: $(ISO_NAME)"
 
 # ==============================================================================
-# ОЧИСТКА
+# ATA DISK (для тестирования FAT32)
 # ==============================================================================
-clean:
-	@echo "[CLEAN] Очистка build/, ISO и временных файлов..."
-	@rm -rf $(BUILD_DIR) $(ISO_NAME) $(INITRD_TAR)
-	@rm -f $(ISO_DIR)/boot/kernel.bin
+create_disk:
+	@echo "[DISK] Создаем FAT32 диск (100 MB)..."
+	@qemu-img create -f raw $(DISK_IMG) 100M
+	@echo "[ OK ] $(DISK_IMG) создан"
 
 # ==============================================================================
-# ЗАПУСК (QEMU) С ОТЛАДКОЙ
+# ЗАПУСК (QEMU)
 # ==============================================================================
 run: iso
 	@echo "[QEMU] Стартуем $(ISO_NAME)..."
-	@echo "[DEBUG] Логи прерываний пишутся в qemu.log"
-	@qemu-system-i386 -cdrom $(ISO_NAME) -m 1024M -serial stdio -no-reboot -D qemu.log
+	@qemu-system-i386 -cdrom $(ISO_NAME) -m 1024M -serial stdio -no-reboot
 
-# Запуск с ATA диском (для тестирования ATA драйвера)
-run_ata: iso
+# Запуск с ATA диском
+run_ata: iso create_disk
 	@echo "[QEMU] Стартуем с ATA диском..."
 	@qemu-system-i386 -cdrom $(ISO_NAME) -m 1024M -serial stdio -no-reboot \
 		-boot d \
-		-drive file=disk.img,format=raw,if=ide,index=0,media=disk
+		-drive file=$(DISK_IMG),format=raw,if=ide,index=0,media=disk
 
-# Создать пустой ATA диск для тестирования
-create_disk:
-	@echo "[DISK] Создаем пустой ATA диск (100 MB)..."
-	@qemu-img create -f raw disk.img 100M
-	@echo "[ OK ] disk.img создан"
+# ==============================================================================
+# ОЧИСТКА
+# ==============================================================================
+clean:
+	@echo "[CLEAN] Удаляю build/..."
+	@rm -rf $(BUILD_DIR)
+	@echo "[ OK ] Очистка завершена"
 
-.PHONY: all clean run run_ata create_disk iso check_prerequisites
+# ==============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ТАРГЕТЫ
+# ==============================================================================
+.PHONY: all clean run run_ata create_disk iso check_prerequisites prepare_iso_dir user_programs
 
 # Включаем автоматически сгенерированные зависимости
 -include $(DEPS)

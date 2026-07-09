@@ -3,7 +3,12 @@
 #include "klib.h"
 #include "framebuffer.h"
 #include "serial.h"
-#include "isr.h" 
+#include "isr.h"
+#include "config.h"
+#include "vma.h"
+
+// Forward declaration для функции убийства процесса
+void task_kill_current(const char* reason);
 
 // ============================================================================
 // ВНЕШНИЕ СИМБОЛЫ (Boot structures из boot.asm)
@@ -19,16 +24,14 @@ extern uint8_t _kernel_start[];
 extern uint8_t _kernel_end[];
 
 // ============================================================================
-// ДИАПАЗОНЫ ПАМЯТИ (SSOT для Lazy Allocation и Framebuffer)
+// ДИАПАЗОНЫ ПАМЯТИ  Framebuffer
 // ============================================================================
-#define LAZY_ALLOC_START 0xD0000000
-#define LAZY_ALLOC_END   0xE0000000
 #define FB_VIRT_BASE     0xFD000000
 #define FB_PHYS_BASE     0xFD000000
 #define FB_SIZE_MB       16
 
 // ============================================================================
-// DAY 6.3: ON-DEMAND PAGING (PAGE FAULT HANDLER)
+// DAY 9: PARANOID PAGE FAULT HANDLER (Zero Trust Sandbox)
 // ============================================================================
 void page_fault_handler(struct regs* r) {
     uint32_t faulting_address;
@@ -40,32 +43,106 @@ void page_fault_handler(struct regs* r) {
     int reserved  = r->err_code & 0x8; 
     int id        = r->err_code & 0x10;
     
-    // Логика Lazy Allocation (Kernel Space Only)
-    if (!present && !reserved && !us) {
-        if (faulting_address >= LAZY_ALLOC_START && faulting_address < LAZY_ALLOC_END) {
+    // ========================================================================
+    // 1. NULL POINTER GUARD (Первая страница)
+    // ========================================================================
+    if (faulting_address < 0x1000) {
+        if (us) {
+            serial_printf("[PF] SIGSEGV: NULL Pointer Dereference in PID %d\n", 
+                          current_task->pid);
+            task_kill_current("NULL Pointer Dereference");
+        } else {
+            serial_print("\n[PF] === FATAL: Kernel NULL Pointer Dereference ===\n");
+            serial_printf("[PF] EIP: 0x%x\n", r->eip);
+            while(1) { __asm__ volatile("cli; hlt"); }
+        }
+    }
+    
+    // ========================================================================
+    // 2. KERNEL SPACE PROTECTION (Защита ядра от Ring 3)
+    // ========================================================================
+    if (faulting_address >= KERNEL_SPACE_START && us) {
+        serial_printf("[PF] SIGSEGV: Ring 3 attempted access to Kernel Space (0x%x) in PID %d\n", 
+                      faulting_address, current_task->pid);
+        task_kill_current("Attempted access to Kernel Space");
+    }
+    
+    // ========================================================================
+    // 3. KERNEL DEMAND PAGING (Ядро работает по старым правилам)
+    // ========================================================================
+    if (!us) {
+        if (!present && !reserved && faulting_address >= KERNEL_HEAP_VIRT && 
+            faulting_address < KERNEL_HEAP_END) {
             uint32_t phys = pmm_alloc_page();
             if (phys != 0) {
                 k_memset((void*)PHYS_TO_VIRT(phys), 0, 4096); 
                 uint32_t virt_page = faulting_address & 0xFFFFF000;
                 
                 // 🛡️ БЕЗОПАСНОСТЬ: Убран PAGE_USER для Kernel Heap!
-                // Это защищает память ядра от доступа из Ring 3.
                 vmm_map_page(virt_page, phys, PAGE_PRESENT | PAGE_WRITE);
                 
                 serial_printf("[PF] Lazy alloc: Virt 0x%x -> Phys 0x%x\n", virt_page, phys);
                 return; // IRET повторит инструкцию
+            } else {
+                serial_print("\n[PF] === FATAL: Kernel OOM ===\n");
+                while(1) { __asm__ volatile("cli; hlt"); }
             }
         }
-    }  
+        
+        // Необработанный Kernel Page Fault
+        serial_print("\n[PF] === FATAL PAGE FAULT ===\n");
+        serial_printf("[PF] Address: 0x%x | EIP: 0x%x\n", faulting_address, r->eip);
+        serial_printf("[PF] Code: P:%d W:%d U:%d R:%d I:%d\n", present, rw, us, reserved, id);
+        serial_print("[PF] System Halted.\n");
+        while(1) { __asm__ volatile("cli; hlt"); }
+    }
     
-    // FATAL: Необработанный Page Fault
-    serial_print("\n[PF] === FATAL PAGE FAULT ===\n");
-    serial_printf("[PF] Address: 0x%x | EIP: 0x%x\n", faulting_address, r->eip);
-    serial_printf("[PF] Code: P:%d W:%d U:%d R:%d I:%d\n", present, rw, us, reserved, id);
-    serial_printf("[PF] PMM Free Pages: %d\n", pmm_get_free_pages());
-    serial_print("[PF] System Halted.\n");
+    // ========================================================================
+    // 4. USER SPACE VMA ENFORCEMENT (Zero Trust)
+    // ========================================================================
+    vma_node_t* vma = vma_find(current_task, faulting_address);
     
-    while(1) { __asm__ volatile("cli; hlt"); }
+    if (!vma) {
+        serial_printf("[PF] SIGSEGV: Access to unmapped memory (0x%x) in PID %d\n", 
+                      faulting_address, current_task->pid);
+        task_kill_current("Access to unmapped memory (No VMA)");
+    }
+    
+    // ========================================================================
+    // 5. W^X ENFORCEMENT (Проверка прав доступа)
+    // ========================================================================
+    if (rw && !(vma->flags & VMA_WRITE)) {
+        serial_printf("[PF] SIGSEGV: Write to Read-Only memory (0x%x) in PID %d\n", 
+                      faulting_address, current_task->pid);
+        task_kill_current("Write to Read-Only memory (W^X violation)");
+    }
+    
+    // ========================================================================
+    // 6. DEMAND PAGING (Легальное выделение памяти)
+    // ========================================================================
+    uint32_t phys = pmm_alloc_page();
+    
+    // ========================================================================
+    // 7. OOM TRAP (Реактивная защита)
+    // ========================================================================
+    if (phys == 0) {
+        serial_printf("[PF] OOM Kill: Physical memory exhausted in PID %d\n", 
+                      current_task->pid);
+        task_kill_current("Out of Memory (OOM Kill)");
+    }
+    
+    // ========================================================================
+    // 8. Маппинг с правильными флагами
+    // ========================================================================
+    uint32_t flags = PAGE_PRESENT | PAGE_USER;
+    if (vma->flags & VMA_WRITE) flags |= PAGE_WRITE;
+    
+    k_memset((void*)PHYS_TO_VIRT(phys), 0, 4096); // Zero-fill
+    uint32_t virt_page = faulting_address & 0xFFFFF000;
+    vmm_map_page_in_pd(current_task->pdir_virt, virt_page, phys, flags);
+    
+    serial_printf("[PF] Demand paging: Virt 0x%x -> Phys 0x%x (PID %d)\n", 
+                  virt_page, phys, current_task->pid);
 }
 
 // ============================================================================
@@ -239,4 +316,18 @@ void vmm_destroy_address_space(uint32_t* pdir_virt) {
     // 2. Освобождаем Page Directory
     uint32_t pdir_phys = VIRT_TO_PHYS((uint32_t)pdir_virt);
     pmm_free_page(pdir_phys);
+}
+
+// ============================================================================
+// УБИЙСТВО ТЕКУЩЕГО ПРОЦЕССА (Вызывается из Page Fault Handler)
+// ============================================================================
+void task_kill_current(const char* reason) {
+    serial_printf("[KILL] PID %d (%s) terminated: %s\n", 
+                  current_task->pid, current_task->name, reason);
+    
+    // Вызываем стандартный механизм завершения.
+    // task_exit() закроет FD, освободит FPU, пометит задачу как DEAD 
+    // и вызовет schedule(), который переключит контекст.
+    // Возврата в page_fault_handler не будет.
+    task_exit();
 }

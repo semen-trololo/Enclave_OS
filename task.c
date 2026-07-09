@@ -5,7 +5,9 @@
 #include "tss.h"
 #include "paging.h"
 #include "isr.h"
-#include "vfs.h" 
+#include "vfs.h"
+#include "vma.h"
+#include <stdbool.h>
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
 
@@ -17,12 +19,21 @@ static task_t* fpu_owner = 0;
 static task_t* task_to_reap = NULL;
 
 // ============================================================================
-// ТРАМПЛИН (Task Wrapper)
+// ТРАМПЛИН (Task Wrapper) — Dual-Mode Support
 // ============================================================================
-void task_entry_trampoline(void (*entry_point)(void)) {
+void task_entry_trampoline(void (*entry_point)(void), bool is_user_mode, uint32_t user_esp) {
     __asm__ volatile("sti"); // Гарантированно включаем прерывания для новой задачи
-    entry_point();
-    task_exit();
+    
+    if (is_user_mode) {
+        // User-mode задача: переходим в Ring 3 через enter_usermode
+        extern void enter_usermode(uint32_t entry_point, uint32_t user_esp);
+        enter_usermode((uint32_t)entry_point, user_esp);
+        // Недостижимо: enter_usermode делает iret и не возвращается
+    } else {
+        // Kernel-mode задача: выполняем функцию напрямую в Ring 0
+        entry_point();
+        task_exit();
+    }
 }
 
 // ============================================================================
@@ -135,9 +146,10 @@ void tasking_init(void) {
 }
 
 // ============================================================================
-// СОЗДАНИЕ НОВОЙ ЗАДАЧИ
+// СОЗДАНИЕ НОВОЙ ЗАДАЧИ (Dual-Mode: Kernel/User)
 // ============================================================================
-task_t* task_create(const char* name, void (*entry_point)(void)) {
+task_t* task_create(const char* name, void (*entry_point)(void), 
+                    bool is_user_mode, uint32_t user_esp) {
     uint32_t stack_phys = pmm_alloc_page();
     if (stack_phys == 0) return 0;
     uint32_t pcb_phys = pmm_alloc_page(); 
@@ -148,6 +160,7 @@ task_t* task_create(const char* name, void (*entry_point)(void)) {
 
     task_t* new_task = (task_t*)PHYS_TO_VIRT(pcb_phys);
     k_memset(new_task, 0, sizeof(task_t));
+    new_task->vma_head = NULL; // Инициализация списка VMA
 
     new_task->pid = next_pid++;
     new_task->state = TASK_READY;
@@ -165,15 +178,22 @@ task_t* task_create(const char* name, void (*entry_point)(void)) {
     int i = 0; while(name[i] && i < 31) { new_task->name[i] = name[i]; i++; }
     new_task->name[i] = '\0';
 
-    // 🔥 STACK FORGING (Идеальное соответствие CDECL ABI)
+    // 🔥 STACK FORGING (Dual-Mode: передаем 3 аргумента в trampoline)
     uint32_t* stack_top = (uint32_t*)PHYS_TO_VIRT(stack_phys + 4096);
-    *(--stack_top) = (uint32_t)entry_point;             // [ESP+8] Arg 1 для trampoline
-    *(--stack_top) = (uint32_t)task_exit;               // [ESP+4] Fake Return Address
-    *(--stack_top) = (uint32_t)task_entry_trampoline;   // [ESP+0] EIP для первого ret
+    
+    // Аргументы для task_entry_trampoline (CDECL: справа налево)
+    *(--stack_top) = user_esp;                      // [ESP+12] Arg 3: user_esp
+    *(--stack_top) = (uint32_t)is_user_mode;        // [ESP+8]  Arg 2: is_user_mode
+    *(--stack_top) = (uint32_t)entry_point;         // [ESP+4]  Arg 1: entry_point
+    *(--stack_top) = (uint32_t)task_exit;           // [ESP+0]  Fake Return Address (если trampoline вернется)
+    
+    // Callee-saved регистры (для context_switch)
+    *(--stack_top) = (uint32_t)task_entry_trampoline; // [ESP-4] EIP для первого ret
     *(--stack_top) = 0; // EBX
     *(--stack_top) = 0; // ESI
     *(--stack_top) = 0; // EDI
     *(--stack_top) = 0; // EBP
+    
     new_task->esp = (uint32_t)stack_top;
 
     for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) new_task->fd_table[j] = 0;
@@ -181,7 +201,8 @@ task_t* task_create(const char* name, void (*entry_point)(void)) {
     
     task_queue_add(new_task);
 
-    serial_printf("[TASK] Created PID %d: %s\n", new_task->pid, name);
+    serial_printf("[TASK] Created PID %d: %s (mode: %s)\n", 
+                  new_task->pid, name, is_user_mode ? "USER" : "KERNEL");
     return new_task;
 }
 
@@ -228,9 +249,13 @@ void schedule(void) {
     // 🆕 REAPER MECHANISM: Зачистка памяти DEAD задачи
     if (task_to_reap) {
         task_t* dead = task_to_reap;
-        task_to_reap = NULL; // Сбрасываем глобальный флаг
-        
+        task_to_reap = NULL;
+    
         serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
+    
+        // 🆕 Освобождаем список VMA
+        vma_destroy_all(dead);
+    
         if (dead->pdir_virt && dead->pdir_virt != boot_page_directory) {
             vmm_destroy_address_space(dead->pdir_virt);
         }

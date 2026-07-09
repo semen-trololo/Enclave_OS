@@ -2,6 +2,7 @@
 #define TASK_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // Forward declaration для избежания циклических зависимостей с vfs.h
 // Мы не инклюдим vfs.h сюда, чтобы ядро VFS и ядро процессов были слабосвязанными.
@@ -38,14 +39,16 @@ typedef struct task {
     // Индекс массива = FD (0=stdin, 1=stdout, 2=stderr...).
     // Хранит указатели на open_file_t, которые содержат курсор (offset) и vfs_node_t.
     struct open_file* fd_table[TASK_MAX_OPEN_FILES];
-
+    // 🆕 VMA SUBSYSTEM (ДЕНЬ 9)
+    struct vma_node* vma_head; 
     char name[32];
     struct task* next;
     struct task* prev;
 } task_t;
 
 void tasking_init(void);
-task_t* task_create(const char* name, void (*entry_point)(void));
+task_t* task_create(const char* name, void (*entry_point)(void), 
+                    bool is_user_mode, uint32_t user_esp);
 void task_yield(void);
 void task_exit(void);
 void schedule(void);
@@ -60,5 +63,7 @@ void task_init_fds(task_t* task);
 // Позволяет системным вызовам (sys_open, sys_read) получать доступ 
 // к таблице файловых дескрипторов ТЕКУЩЕГО выполняемого процесса.
 extern task_t* current_task;
+// Убийство текущего процесса (вызывается из Page Fault Handler)
+void task_kill_current(const char* reason);
 
 #endif
