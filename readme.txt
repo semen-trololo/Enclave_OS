@@ -883,3 +883,29 @@ QEMU headless automation
 Подтверждение Data Integrity для ATA (CRC32 match)
 Подтверждение выживаемости ядра при стрессе (no kernel panic)
 Это даёт нам право перейти к Day 11 (Process Lifecycle) с чистым, проверенным фундаментом.
+
+🍓 RASPBERRY PI PORT (BCM2835)
+НАМЕРЕНИЕ
+После стабилизации x86 версии проекта (Day 20+), выполнить адаптацию ядра для запуска на Raspberry Pi Model B+ (SoC BCM2835, ARM1176JZF-S, 512 MB RAM). Это демонстрация промышленной гибкости архитектуры и доказательство платформенной независимости Bare Metal OS.
+ПОЧЕМУ RPI B+ ПОДХОДИТ
+Ключевая совместимость:
+ARMv6 MMU поддерживает виртуальную память (аналог x86 paging)
+512 MB RAM достаточно для всех функций проекта
+Protected Mode (SVC/User) аналогичен Ring 0/3
+~80% кода ядра (VFS, Scheduler, Heap, Shell) переиспользуется без изменений
+КОГДА
+Day 30-35, после завершения x86 версии и внедрения Hardware Abstraction Layer (HAL).
+ПЛАН ПОРТИРОВАНИЯ
+Day 25: Внедрение HAL в x86 код (абстрактный интерфейс для железа)
+Day 30: ARM boot code + UART (serial output на реальном железе)
+Day 31: PMM + VMM (ARM Translation Tables вместо x86 Page Tables)
+Day 32: Interrupts + Timer (ARM Exception Vectors, BCM2835 VIC)
+Day 33-34: Framebuffer (через Mailbox) + SD Card driver
+Day 35: Интеграция, запуск всех тестов Day 10 на ARM
+РЕЗУЛЬТАТ
+Одна кодовая база работает на двух архитектурах (x86 + ARM). Это позиционирует проект как промышленную, платформенно-независимую систему, а не учебное упражнение. Открывает путь к embedded applications (IoT, robotics).
+СЛЕДУЮЩИЕ ШАГИ (Day 40+)
+ARM Cortex-A порт (Raspberry Pi 3/4, 64-bit)
+RISC-V порт (SiFive, ESP32-C3 с MMU)
+Unified bootloader (multi-architecture support)
+
