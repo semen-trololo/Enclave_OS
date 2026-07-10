@@ -1,13 +1,13 @@
 📘 BARE METAL OS — Полная Архитектурная Документация
-Single Source of Truth (SSOT) | Версия: Day 8.1
+Single Source of Truth (SSOT) | Версия: Day 9
 
 1. СРЕДА РАЗРАБОТКИ
-
 Название: Bare Metal OS (учебно-исследовательская лабораторная работа)
 Архитектура: x86, 32-битный защищённый режим (Protected Mode), Higher Half Kernel (0xC0000000)
 Загрузчик: Multiboot 1 (GRUB)
 Формат дистрибутива: Загрузочный ISO-образ (grub-mkrescue) + Initrd (TAR UStar)
 Среда разработки: Linux (Kali / Debian / Arch)
+
 🛠 Инструментарий
 Кросс-компилятор: i686-linux-gnu-gcc (или i686-elf-gcc)
 Ассемблер: nasm
@@ -15,17 +15,22 @@ Single Source of Truth (SSOT) | Версия: Day 8.1
 Сборка: Make, xorriso, grub-pc-bin, mtools
 Эмуляция: QEMU (qemu-system-i386)
 Контроль версий: Git
+
 ⚙️ Сборка проекта и флаги компиляции
 Проект работает в Freestanding Environment (без libc). Использование стандартных заголовков <stdio.h>, <stdlib.h> запрещено. Разрешены только ISO C builtins: <stdint.h>, <stddef.h>, <stdarg.h>, <stdbool.h>.
+
 Критические CFLAGS (Makefile):
 CFLAGS  = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Iinclude
 CFLAGS += -fno-pie -fno-pic -fno-stack-protector  # Отключение защит системного GCC
 CFLAGS += -mno-sse -mno-sse2 -mno-mmx -mno-3dnow  # Запрет FPU/SSE в ядре (индустриальный стандарт)
 CFLAGS += -mincoming-stack-boundary=2 -g          # Снятие 16-byte ABI alignment для ASM-трамплинов
+
 LDFLAGS:
 LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
+
 Принцип "Голая ОС" (Bare Metal):
 Ядро не использует FPU/SSE напрямую, чтобы избежать необходимости сохранять 512-байтный FPU-контекст при каждом прерывании. Математика с плавающей точкой доступна только в User Space (Ring 3) через механизм Lazy FPU Switching.
+
 Запуск:
 make iso && make run
 # qemu-system-i386 -cdrom build/metal_os.iso -m 1024M -serial stdio -no-reboot
@@ -41,10 +46,11 @@ project_root/
 │
 ├── include/                  # Заголовочные файлы (API подсистем)
 │   ├── gdt.h, idt.h, isr.h, pic.h, tss.h
-│   ├── pmm.h, paging.h, heap.h
+│   ├── pmm.h, paging.h, heap.h, vma.h, elf.h
 │   ├── task.h, vfs.h, initrd.h
 │   ├── vga.h, framebuffer.h, keyboard.h, timer.h, serial.h
 │   ├── klib.h, shell.h, syscall.h, multiboot.h, port_io.h
+│   ├── config.h              # Single Source of Truth для всех границ памяти
 │   ├── ata.h                 # ATA PIO Driver & MBR Parser (Day 8.2)
 │   └── univga_font.h         # PSF1 шрифт с кириллицей
 │
@@ -58,7 +64,8 @@ project_root/
 ├── usermode.asm              # ASM: IRET в Ring 3 (Fake Interrupt)
 │
 ├── pmm.c, paging.c, heap.c   # Подсистемы памяти
-├── task.c                    # PCB, Round-Robin, Lazy FPU
+├── vma.c, elf.c              # Virtual Memory Areas и ELF Loader
+├── task.c                    # PCB, Round-Robin, Lazy FPU, Reaper Queue
 ├── vfs.c, initrd.c           # Файловая система и RAM-диск
 ├── gdt.c, idt.c, isr.c       # Дескрипторы и прерывания
 ├── pic.c, tss.c, syscall.c   # Железо и системные вызовы
@@ -73,7 +80,7 @@ project_root/
 3. СТРУКТУРА ФАЙЛОВ И СИСТЕМ (Глубокое погружение)
 
 🚀 Загрузчик и Инициализация
-boot.asm:
+
 boot.asm:
 * Содержит Multiboot Header (magiс 0x1BADB002).
 * Инициализирует Bochs VBE (1024x768x32bpp) через порты 0x01CE/0x01CF.
@@ -83,23 +90,38 @@ boot.asm:
 * **Defensive Handover:** Переход в `kernel_main` осуществляется через `call`, а не `jmp`. Это гарантирует, что при случайном `return` из ядра процессор корректно попадет в `.halt_loop`, а не получит Triple Fault.
 * **Multiboot Flags Trap:** В заголовке ядра биты 3-15 ЗАРЕЗЕРВИРОВАНЫ (обязаны быть 0). Установка бита 3 (`MBOOT_INFO_MODS`) здесь приведет к отказу GRUB грузить ядро. Флаг модулей выставляется GRUB'ом автоматически в структуре `multiboot_info_t`, если в `grub.cfg` есть директива `module`.
 * **NASM Local Labels:** Локальные метки (начинающиеся с точки, например `.halt_loop`) привязаны к последней глобальной метке. Дублирование локальных меток в одном скоупе вызывает ошибку ассемблера `inconsistently redefined`.
-Сохраняет eax (magic) и ebx (mmap) в глобальные переменные .boot.data, избегая уязвимостей стека.
+
 linker.ld:
 Разделяет секции на физические (.boot*) и виртуальные (.text, .data, .bss).
 Использует AT(ADDR(...) - 0xC0000000) для корректной LMA (Load Memory Address).
 Экспортирует символы _boot_start, _kernel_start, _kernel_end для PMM.
+
 kernel.c:
 Точка входа kernel_main. Реализует жесткую последовательность Bootstrap.
 Содержит стресс-тесты: Day 6.3 (On-Demand Paging), Ring 3 Transition, x87 FPU Math Task.
 
 🧠 Управление Памятью (Memory Management)
+
+config.h (Single Source of Truth):
+* Все глобальные константы памяти собраны в одном файле
+* USER_SPACE_START/END — границы пользовательского пространства (0x00000000 - 0xBFFFFFFF)
+* KERNEL_SPACE_START — начало ядра (0xC0000000)
+* LOWER_MEM_START/END — нижняя память (0x00000000 - 0x00100000)
+* PCI_MMIO_HOLE_START/END — PCI MMIO (0xE0000000 - 0xFFFFFFFF)
+* USER_STACK_VIRT_TOP/SIZE/GUARD_SIZE — стек пользователя (64KB + 4KB Guard Page)
+* USER_HEAP_START/MAX_SIZE — куча процесса (64MB максимум)
+* KERNEL_HEAP_VIRT/SIZE/END — куча ядра (32MB виртуальный пул)
+* FB_VIRT_BASE/PHYS_BASE/SIZE_MB — фреймбуфер (16MB)
+
 pmm.c (Physical Memory Manager):
 * Safe by Default: Изначально вся память помечена как занятая.
 * E820 Parsing & Dynamic Sizing: Читает карту памяти от GRUB. Статический битмап рассчитан на 4GB (128KB в .bss), но динамическая переменная `pmm_max_page` ограничивает сканирование только реальным объемом RAM, найденным в E820. Это предотвращает выход за пределы физически существующей памяти.
-* Punching Holes: Резервирует нижний 1MB, образ ядра, Multiboot info, PCI MMIO Hole.
+* Punching Holes: Резервирует нижний 1MB, образ ядра, Multiboot info, PCI MMIO Hole (использует константы из config.h).
 * O(1) Allocation: Использует битмап и аппаратную инструкцию __builtin_ctz (BSF/TZCNT).
-**Two-Pass E820 Parsing:** Сканирование карты памяти выполняется в два прохода. Pass 1 находит `max_addr` и вычисляет `pmm_max_page`. Pass 2 освобождает доступные регионы. Объединение в один проход приводит к OOM, так как `pmm_free_region()` вызывается при `pmm_max_page == 0`.
+* **Two-Pass E820 Parsing:** Сканирование карты памяти выполняется в два прохода. Pass 1 находит `max_addr` и вычисляет `pmm_max_page`. Pass 2 освобождает доступные регионы. Объединение в один проход приводит к OOM, так как `pmm_free_region()` вызывается при `pmm_max_page == 0`.
 * **Initrd Memory Protection:** Физические страницы, занятые модулями GRUB (например, `initrd.tar`), ОБЯЗАТЕЛЬНО резервируются в PMM сразу после резервирования ядра. Иначе VMM при создании Page Tables затрет TAR-архив, что приведет к монтированию пустой ФС.
+* **IRQ Safety:** Все операции с битмапом защищены cli/sti для предотвращения race conditions.
+* **PMM Accounting (День 10):** Глобальные счетчики `pmm_total_allocs` и `pmm_total_frees` для детекции утечек памяти. API: `pmm_check_balance()` возвращает 0, если все ресурсы освобождены.
 
 paging.c (Virtual Memory Manager):
 * Direct Map: Первые 512MB RAM замаплены в 0xC0000000+ (Kernel Space).
@@ -108,27 +130,74 @@ paging.c (Virtual Memory Manager):
 * Deep Destroy: `vmm_destroy_address_space()` корректно освобождает не только Page Tables, но и сами физические страницы данных (PTE), предотвращая утечки памяти при завершении процессов.
 * Shared Kernel Space: vmm_create_address_space() клонирует индексы 768-1023 из глобального PD.
 * **PAGE_PS Hardware Check:** 7-й бит в PDE аппаратно называется PS (Page Size Extension). VMM проверяет `pde & PAGE_PS` перед созданием Page Tables, чтобы предотвратить коррупцию памяти внутри 4MB регионов.
-* **SSOT Macros:** Макросы трансляции адресов (`KERNEL_VIRT_BASE`, `VIRT_TO_PHYS`, `PHYS_TO_VIRT`) определены СТРОГО ОДИН РАЗ в `paging.h`. Переопределение их в `.c` файлах нарушает Single Source of Truth.
+* **SSOT Macros:** Макросы трансляции адресов (`VIRT_TO_PHYS`, `PHYS_TO_VIRT`) определены СТРОГО ОДИН РАЗ в `paging.h`. Переопределение их в `.c` файлах нарушает Single Source of Truth.
+* **Paranoid Page Fault Handler (Zero Trust Sandbox):**
+  - NULL Pointer Guard — мгновенный SIGSEGV при обращении к 0x00000000
+  - Kernel Space Protection — SIGSEGV при попытке Ring 3 доступа к ядру
+  - VMA Enforcement — проверка наличия VMA перед выделением страниц
+  - W^X Enforcement — защита от записи в Read-Only память
+  - OOM Trap — реактивное убийство процесса при исчерпании RAM
 
 heap.c (Kernel Heap):
 * Buddy System: Неявное бинарное дерево (tree[TREE_SIZE]). O(1) Merge через XOR (buddy = curr ^ 1).
 * Zero-Cost Lazy Heap: Heap больше не "съедает" 32 МБ физической RAM на старте. Он только резервирует виртуальный диапазон. Физические страницы выделяются аппаратно через Page Fault (INT 14) только в момент первой записи (например, при сохранении BlockHeader).
 * Защита: BlockHeader с magic = 0xDEADBEEF для детекта double-free и повреждения границ.
+* IRQ Safety: Все операции с деревом защищены cli/sti.
+* Bounds Checking: kfree() проверяет, что указатель принадлежит диапазону Heap'а.
+* Heap Accounting (День 10): Глобальные счетчики `heap_total_allocs` и `heap_total_frees` для детекции утечек. API: `heap_check_balance()`.
 
-⚙️ Многозадачность (Day 7)
+vma.c (Virtual Memory Areas):
+* Сортированный связный список VMA для каждого процесса
+* vma_add() — добавление VMA с автоматической сортировкой по start адресу
+* vma_find() — линейный поиск VMA, содержащей заданный адрес
+* vma_destroy_all() — очистка всех VMA процесса (вызывается Grim Reaper'ом)
+* Интеграция в task_t через поле vma_head
+
+elf.c (ELF Loader):
+* Парсинг ELF32 Header и Program Headers (PT_LOAD сегменты)
+* Загрузка .text, .data, .bss с правильными правами доступа (Read/Write/Execute)
+* Создание VMA для каждого сегмента с флагами из ELF
+* Маппинг физических страниц в Page Directory процесса
+* Копирование данных из файла в выделенные страницы
+* Интеграция с sys_exec для запуска ELF-бинарников в Ring 3
+
+⚙️ Многозадачность (Day 7-9)
+
 task.c (Scheduler):
-PCB (task_t): Хранит PID, State, ESP, CR3, FD Table и FPU State (512 байт, 16-byte aligned).
+PCB (task_t): Хранит PID, State, ESP, CR3, FD Table, VMA List и FPU State (512 байт, 16-byte aligned).
 Round-Robin: Кольцевой двусвязный список. schedule() вызывается из PIT (каждые 20мс) или добровольно (sys_yield).
 Lazy FPU: Бит CR0.TS (Task Switched) устанавливается при переключении. При FPU-инструкции возникает #NM (INT 7), который делает fxsave/fxrstor.
-Reaper Mechanism: Освобождение памяти DEAD-задач происходит строго после switch_context в schedule().
+Reaper Queue: Мертвые задачи добавляются в односвязный список `dead_tasks_head`. Следующая запланированная задача после возврата из switch_context очищает ВСЕ задачи из очереди, предотвращая утечки памяти.
+task_create(): Принимает опциональный параметр `custom_pdir` для передачи готового Address Space (используется sys_exec для загрузки ELF).
+task_kill_current(): Принудительное убийство процесса из Page Fault Handler (включает прерывания перед вызовом task_exit).
+Task Accounting (День 10): Глобальный счетчик `task_count` для детекции zombie processes. API: `task_get_count()`.
+
 context_switch.asm:
 Сохраняет callee-saved регистры (EBX, ESI, EDI, EBP).
 Меняет ESP и загружает новый CR3 (TLB Flush).
 Устанавливает CR0.TS (взводит курок для Lazy FPU).
 
-💾 Storage & ATA (Day 8.2)
-ata.c (ATA PIO Driver + MBR Parser + FAT32):
+usermode.asm:
+Готовит стек для IRET в Ring 3.
+Загружает пользовательские сегменты (SS=0x23, CS=0x1B).
+Включает прерывания (IF bit в EFLAGS).
+Делает iret для перехода в Ring 3.
 
+syscall.c (System Calls):
+INT 0x80 (DPL=3) — точка входа для Ring 3.
+sys_exit — вызывает task_exit(), который запускает Grim Reaper.
+sys_write/sys_read — проверка указателей через is_user_pointer(), делегирование в VFS.
+sys_yield — добровольная передача CPU через schedule().
+sys_brk — динамическое управление кучей процесса (расширение VMA без физического выделения).
+sys_exec — загрузка и запуск ELF-бинарников в Ring 3:
+  1. Создание нового Address Space через vmm_create_address_space()
+  2. Загрузка ELF через elf_load() (создает VMA для сегментов)
+  3. Создание задачи через task_create() с передачей готового pdir_virt
+  4. Добавление VMA для стека и кучи в новый процесс
+
+💾 Storage & ATA (Day 8.2)
+
+ata.c (ATA PIO Driver + MBR Parser + FAT32):
 ATA PIO Driver:
 * Port I/O: Работа с регистрами Primary IDE Bus (0x1F0-0x1F7).
 * Polling Mode: Ожидание BSY/DRQ через циклы с io_delay() (без IRQ14 для простоты).
@@ -167,8 +236,6 @@ VFAT (Long File Names) Support:
 * Volume Label Filter: Игнорирование записей с атрибутом FAT32_ATTR_VOLUME_ID (метка тома).
 * Deleted Entry Filter: Игнорирование записей с первым байтом 0xE5 (удаленные файлы).
 
-
-
 ⚠️ Архитектурное решение (День 8.2):
 MBR Parser интегрирован в ata.c для упрощения отладки и снижения связанности.
 Разделение на отдельный partition.c планируется на День 16 (User-Mode Drivers),
@@ -176,11 +243,13 @@ MBR Parser интегрирован в ata.c для упрощения отла�
 станет отдельным IPC-сервисом или библиотечной функцией.
 
 📂 Файловая Система (Day 8)
+
 vfs.c (Virtual File System):
 Полиморфизм: vfs_node_t содержит указатели на функции (read, write, readdir). VFS не знает о FAT32 или RAM.
 LCRS Tree: Left-Child Right-Sibling для каталогов (отказ от realloc).
 3-звенная модель FD: vfs_node_t (Inode) -> open_file_t (offset, ref_count) -> fd_table в PCB.
 RBAC: Флаг FS_SYSTEM. Ядро игнорирует его, Ring 3 получает EACCES.
+
 initrd.c (RAM Disk):
 Парсит TAR UStar из GRUB Module.
 Разворачивает структуру в tmpfs (Heap). Автоматически создает промежуточные директории.
@@ -189,23 +258,25 @@ initrd.c (RAM Disk):
 * **TAR Padding Tolerance:** Парсер сканирует первые 8KB модуля в поисках валидного magic, что делает его устойчивым к padding'у от GRUB или специфичных версий `tar`.
 
 🖥 Графика и Вывод
+
 framebuffer.c:
 Double Buffering: Рисование в back_buffer (RAM).
 Dirty Rectangles: fb_flush() копирует в LFB только изменившийся бокс через rep movsl.
 Unicode: Встроенный UTF-8 State Machine и чтение UCS-2 таблиц из PSF1 шрифтов.
+
 vga.c: Текстовый режим 80x50. Загрузка кастомного шрифта 8x8 в Plane 2 через порты VGA Controller.
+
 klib.c: Паттерн Strategy. output_char() прозрачно маршрутизирует вывод в FB или VGA.
 
 🛡 Прерывания и Железо
+
 gdt.c: Flat Model (4GB), Ring 0/3 Code/Data сегменты, TSS Descriptor.
 idt.c: 256 векторов. EOI Lock Bypass: outb(0x20, 0x20) отправляется в PIC ДО вызова C-обработчика, чтобы schedule() не заблокировал IRQ.
 tss.c: Настройка ESP0 для аппаратного переключения стека при прерываниях из Ring 3.
-syscall.c: INT 0x80 (DPL=3). sys_exit использует Context Hijacking (прямой вызов shell_run() из Ring 0).
 timer.c: PIT (1000 Hz). Квант времени = 20 тиков.
 keyboard.c: PS/2 (IRQ1). Ring Buffer (Producer-Consumer), обработка Make/Break кодов, Shift/Ctrl/CapsLock.
 
 ОПИСАНИЕ ФУНКЦИЙ БИБЛИОТЕКИ klib.c
-
 klib.c — это стандартная библиотека ядра, заменяющая libc. Она полностью freestanding и не использует системные вызовы.
 
 📦 Работа с памятью
@@ -218,8 +289,9 @@ size_t k_strlen(const char* str) — Длина строки.
 int k_strcmp(const char* s1, const char* s2) — Полное сравнение.
 int k_strncmp(const char* s1, const char* s2, size_t n) — Сравнение первых n символов.
 char* k_strncpy(char* dest, const char* src, size_t n) — Безопасное копирование не более n символов.
-Если src короче n, остаток буфера dest принудительно заполняется нулями ('\0'). 
+Если src короче n, остаток буфера dest принудительно заполняется нулями ('\0').
 Критично для предотвращения утечки данных из стека/кучи (например, при парсинге FAT32 LFN имен и передаче их в структуры VFS dirent_t).
+
 🔢 Конвертация чисел
 void k_itoa(int value, char* buf, int base) — Int to ASCII (поддержка base 10/16).
 void k_uitoa(unsigned int value, char* buf, int base) — Unsigned Int to ASCII.
@@ -234,16 +306,14 @@ void k_set_color(uint8_t vga_fg, uint8_t vga_bg) — Установка цвет
 void k_printf(const char* fmt, ...) — Форматированный вывод. Поддерживает %d, %u, %x, %p, %s, %c, %%. (Внимание: модификаторы ширины типа %08x не поддерживаются и ломают va_list).
 int k_vsprintf(char* buf, const char* fmt, va_list args) — Форматирование в буфер (используется fb_printf).
 
-serial.h 
+serial.h
 #ifndef SERIAL_H
 #define SERIAL_H
-
 void serial_init(void);
 void serial_putc(char c);
 void serial_print(const char* str);
 // Форматированный вывод в Serial-порт (поддерживает %x, %p, %d, %u, %s, %c)
 void serial_printf(const char* fmt, ...);
-
 #endif
 
 5. АРХИТЕКТУРНЫЕ ТОНКОСТИ И TODO
@@ -269,7 +339,7 @@ shell_run() (Бесконечный цикл CLI)
 0x00000000 - 0x00100000 : Lower Memory (IVT, BDA, VGA RAM) -> Зарезервировано PMM.
 0x00100000 - 0x01000000 : Kernel Image & Boot Structures (1MB - 16MB) -> Зарезервировано PMM.
 0xC0000000 - 0xDFFFFFFF : Higher Half Kernel (Direct Map 512MB RAM).
-0xD0000000 - 0xD2000000 : Kernel Heap (32MB Virtual Pool, Buddy System). Физически не выделен на старте, бэкапится страницами по требованию (On-Demand Paging)..
+0xD0000000 - 0xD2000000 : Kernel Heap (32MB Virtual Pool, Buddy System). Физически не выделен на старте, бэкапится страницами по требованию (On-Demand Paging).
 0xE0000000 - 0xFFFFFFFF : PCI MMIO Hole -> Зарезервировано PMM.
 0xFD000000 - 0xFE000000 : Framebuffer LFB (16MB, PAGE_PCD).
 
@@ -277,11 +347,11 @@ shell_run() (Бесконечный цикл CLI)
 Framebuffer PCD (Page Cache Disable): При маппинге LFB (Linear Framebuffer) в boot.asm и paging.c ОБЯЗАТЕЛЬНО использовать флаг PAGE_PCD (0x10). Без него CPU кэширует записи в видеопамять, что вызывает артефакты, тиринг и падение FPS.
 Virtual Stack Switch: Сразу после включения CR0.PG в boot.asm необходимо выполнить mov esp, stack_top, чтобы переключиться с временного физического стека (16KB) на полноценный виртуальный стек в Higher Half (256KB). Иначе ядро упадет в Triple Fault при отключении Identity Map.
 Context Hijacking is Dead: sys_exit больше не запускает shell_run() напрямую. Он вызывает task_exit(), что гарантирует освобождение стека, Page Directory и FD таблицы через механизм Grim Reaper в schedule().
-Grim Reaper Pattern: Освобождение ресурсов TASK_DEAD задачи невозможно в её собственном контексте (так как switch_context использует её стек для выхода). Используется глобальный флаг task_to_reap, который перехватывается следующей запланированной задачей сразу после возврата из switch_context.
+Reaper Queue Pattern: Освобождение ресурсов TASK_DEAD задачи невозможно в её собственном контексте (так как switch_context использует её стек для выхода). Мертвые задачи добавляются в глобальную очередь `dead_tasks_head`, которая очищается следующей запланированной задачей сразу после возврата из switch_context. Это предотвращает потерю задач при race conditions.
 Scheduler IRQ Safety: schedule() обязан сохранять EFLAGS и выполнять cli на входе, чтобы предотвратить повреждение связного списка задач, если schedule() вызван добровольно (sys_yield) при активных прерываниях.
-* Heap-VMM Synergy (Lazy Write): `kmalloc()` возвращает виртуальный адрес, у которого нет физической страницы (PTE пуст). Физическая страница аллоцируется из PMM только когда ядро попытается записать туда данные (например, `header->magic = 0xDEADBEEF`), что триггерит INT 14. Это экономит десятки мегабайт RAM.
-* VMM Deep Free Trap: При уничтожении адресного пространства (смерть процесса) недостаточно освободить только Page Directory и Page Tables. Необходимо пройтись по всем валидным PTE и вызвать `pmm_free_page()` для самих страниц данных, иначе система быстро упадет в OOM из-за утечки физической памяти.
-* Kernel Heap Isolation: Обработчик Page Fault для диапазона 0xD0000000 (Kernel Heap) ОБЯЗАН мапить страницы без флага `PAGE_USER`. Иначе пользовательский процесс сможет легально читать/писать в кучу ядра, просто обратившись по этому адресу.
+Heap-VMM Synergy (Lazy Write): `kmalloc()` возвращает виртуальный адрес, у которого нет физической страницы (PTE пуст). Физическая страница аллоцируется из PMM только когда ядро попытается записать туда данные (например, `header->magic = 0xDEADBEEF`), что триггерит INT 14. Это экономит десятки мегабайт RAM.
+VMM Deep Free Trap: При уничтожении адресного пространства (смерть процесса) недостаточно освободить только Page Directory и Page Tables. Необходимо пройтись по всем валидным PTE и вызвать `pmm_free_page()` для самих страниц данных, иначе система быстро упадет в OOM из-за утечки физической памяти.
+Kernel Heap Isolation: Обработчик Page Fault для диапазона 0xD0000000 (Kernel Heap) ОБЯЗАН мапить страницы без флага `PAGE_USER`. Иначе пользовательский процесс сможет легально читать/писать в кучу ядра, просто обратившись по этому адресу.
 VIRT_TO_PHYS Underflow: Секции .boot имеют адреса < 0xC0000000. Макрос VIRT_TO_PHYS обязан содержать проверку addr >= 0xC0000000, иначе произойдет unsigned underflow и загрузка мусора в CR3.
 TSS ESP0 Virtual Address: В schedule() при обновлении TSS нужно передавать виртуальный адрес стека ядра (PHYS_TO_VIRT), иначе MMU не найдет стек при прерывании из Ring 3.
 EOI Lock: Отправка EOI в PIC должна быть ДО вызова C-обработчика IRQ, иначе schedule() переключит задачу, и линия IRQ заблокируется навсегда.
@@ -291,47 +361,45 @@ All-Zero FXRSTOR: Буфер fpu_state нельзя оставлять нуле�
 Stack Forging (ABI): При создании задачи стек "подделывается" вручную. Перед первой инструкцией ret в switch_context на стеке должны лежать callee-saved регистры и адрес task_entry_trampoline.
 Signed Char Trap: В Shell при фильтрации ввода всегда приводить char к uint8_t, иначе UTF-8 байты (кириллица) интерпретируются как отрицательные числа и отбрасываются.
 PSF1 UCS-2: Таблицы Unicode в PSF1 шрифтах закодированы в UTF-16LE. Читать их нужно через uint16_t*, а не посимвольно.
+sys_exec Address Space Handover: sys_exec создает новый Address Space, загружает в него ELF (создавая VMA для сегментов), и передает готовый pdir_virt в task_create(). Это предотвращает двойное создание Page Directory и утечки памяти.
 
 🏗 Принципы проектирования API
 * **Dependency Inversion (DIP):** Высокоуровневые подсистемы (`heap.c`, `vfs.c`) не включают заголовки низкоуровневых драйверов (`vga.h`). Определения цветов перенесены в `klib.h`, делая API самодостаточным. Подсистемы памяти остаются в неведении о том, используется ли VGA или Framebuffer (Strategy Pattern).
 * **Header Self-Sufficiency:** Заголовочный файл, использующий `bool`/`true`/`false`, обязан включать `<stdbool.h>` напрямую, чтобы любой `.c` файл, сделавший `#include`, автоматически получил все необходимые типы.
 * **Implicit Function Declaration:** Компиляция с `-Wall -Wextra` требует явного подключения заголовков. Использование `serial_printf` в `isr.c` требует `#include "serial.h"`.
 * **Double Dump for Panic:** Фатальные исключения (ISR) выводят дамп регистров ОДНОВРЕМЕННО в VGA (для локального пользователя) и Serial COM1 (для headless-отладки), так как видеодрайвер может быть в невалидном состоянии.
-
+* **Single Source of Truth (SSOT):** Все глобальные константы памяти (границы User/Kernel Space, Heap, Stack, Framebuffer) определены СТРОГО ОДИН РАЗ в `include/config.h`. Любой файл, использующий эти константы, обязан делать `#include "config.h"`.
 
 📅 День 9: User Space & Memory Protection
 ✅ Реализовано
 Инфраструктура VMA (Virtual Memory Areas):
+include/config.h — Single Source of Truth для всех границ памяти (User Space, Kernel Heap, Stack, Framebuffer)
+include/vma.h + src/vma.c — подсистема VMA с сортированным связным списком
+Интеграция VMA в task_t и автоматическая очистка через Grim Reaper
 
-    include/config.h — Single Source of Truth для всех границ памяти (User Space, Kernel Heap, Stack, Framebuffer)
-    include/vma.h + src/vma.c — подсистема VMA с сортированным связным списком
-    Интеграция VMA в task_t и автоматическая очистка через Grim Reaper
 Защита памяти (Zero Trust Sandbox):
-
-    Параноидальный page_fault_handler с проверкой VMA перед выделением страниц
-    NULL Pointer Guard — мгновенный SIGSEGV при обращении к 0x00000000
-    W^X Enforcement — защита от записи в .text секции
-    OOM Trap — проактивная проверка в sys_brk и реактивное убийство процесса при исчерпании RAM
-    Stack Guard Page — детектирование переполнения стека
+Параноидальный page_fault_handler с проверкой VMA перед выделением страниц
+NULL Pointer Guard — мгновенный SIGSEGV при обращении к 0x00000000
+Kernel Space Protection — SIGSEGV при попытке Ring 3 доступа к ядру
+W^X Enforcement — защита от записи в .text секции
+OOM Trap — проактивная проверка в sys_brk и реактивное убийство процесса при исчерпании RAM
 
 Системные вызовы:
-
-    sys_brk — динамическое управление кучей (расширение VMA без физического выделения)
-    sys_exec — загрузка и запуск ELF-бинарников в Ring 3
+sys_brk — динамическое управление кучей (расширение VMA без физического выделения)
+sys_exec — загрузка и запуск ELF-бинарников в Ring 3
 
 ELF Loader:
+include/elf.h + src/elf.c — парсинг ELF Header и Program Headers (PT_LOAD)
+Загрузка сегментов .text, .data, .bss с правильными правами доступа
+Создание VMA для каждого сегмента ELF
+Интеграция с task_create() через передачу готового Address Space
 
-    include/elf.h + src/elf.c — парсинг ELF Header и Program Headers (PT_LOAD)
-    Загрузка сегментов .text, .data, .bss с правильными правами доступа
-    Создание VMA для Heap и Stack при запуске процесса
 Инфраструктура сборки:
-
-    Переделан Makefile — все артефакты в build/, автоматическая компиляция user-space программ
-    user_linker.ld — linker script для ELF-бинарников
-    Тестовый бинарник user_src/hello.asm — Hello World через sys_write
+Переделан Makefile — все артефакты в build/, автоматическая компиляция user-space программ
+user_linker.ld — linker script для ELF-бинарников
+Тестовый бинарник user_src/hello.asm — Hello World через sys_write
 
 🎯 Итоговая архитектура памяти процесса
-
 0xFFFFFFFF ┌─────────────────────────┐
 │   Kernel Space          │ (Shared, Read-Only для Ring 3)
 0xC0000000 ├─────────────────────────┤
@@ -347,14 +415,9 @@ ELF Loader:
 │   NULL Guard Page       │ NO VMA (NULL Pointer Trap)
 0x00000000 └─────────────────────────┘
 
-🚀 Следующие шаги
-
-    Тестирование ELF Loader (запуск hello.elf через Shell)
-
-
 6. ПЛАН РАЗВИТИЯ (Дорожная карта)
 
-✅ ЧТО РАБОТАЕТ (Завершено на День 8.1)
+✅ ЧТО РАБОТАЕТ (Завершено на День 9)
 День 1-3: Загрузчик, GDT/IDT, VGA, Keyboard, базовый Shell.
 День 4: Privilege Separation (Ring 0/3), TSS, Syscalls (INT 0x80), Context Hijacking.
 День 5: Оптимизация PMM (__builtin_ctz), Double Buffering, Dirty Rectangles, PSF1 Unicode.
@@ -365,6 +428,7 @@ ELF Loader:
 * **PMM Module Protection:** Резервирование физических страниц GRUB-модулей предотвращает Memory Corruption при создании Page Tables.
 User Pointer Validation: Все системные вызовы, принимающие указатели из Ring 3 (sys_read, sys_write), проходят строгую проверку is_user_pointer(). Любая попытка передать адрес >= 0xC0000000 (Kernel Space) пресекается с возвратом EFAULT.
 VFS Standard Streams: stdin и stdout реализованы как глобальные синглтоны vfs_node_t. Это предотвращает утечки памяти при массовом создании/уничтожении процессов.
+
 День 8.2: Storage & FAT32 (ATA PIO + VFAT)
 * ATA PIO Driver: Работа с портами 0x1F0-0x1F7, LBA28 addressing, Polling Mode (без IRQ14).
 * IDENTIFY Command: Чтение 512-байтной структуры диска (модель, сериал, firmware, LBA capacity).
@@ -379,105 +443,407 @@ VFS Standard Streams: stdin и stdout реализованы как глобал
 * LFN Checksum Verification: Проверка контрольной суммы 8.3 имени для верификации LFN записей.
 * VFS Mount: Флаг FS_MOUNTPOINT для "телепортации" по дереву (transparent mount).
 
+День 9: User Space & Memory Protection
+* VMA (Virtual Memory Areas): Инфраструктура для управления виртуальной памятью процессов
+* Zero Trust Sandbox: Параноидальная защита памяти (NULL Guard, W^X, OOM Trap)
+* ELF Loader: Загрузка и запуск ELF-бинарников в Ring 3
+* sys_brk/sys_exec: Динамическое управление памятью и запуск процессов
+* Reaper Queue: Безопасное освобождение ресурсов мертвых процессов
+
 🚀 ЧТО ДЕЛАТЬ ДАЛЬШЕ (Приоритеты)
-📅 День 10: Advanced Shell & Debug
-Shell Features: History (стрелки вверх/вниз), Tab Completion, Pipes (|), Redirects (>, <).
-Debug Tools: Улучшение ps, добавление top, meminfo, dmesg (кольцевой буфер логов ядра).
-ДЕНЬ 10.1 ВАЖНЫЙ ЭТАП СМОТРИ РАЗДЕЛ ТЕСТЫ, ДЕЛАЕМ СТРЕС ТЕСТЫ . ФИКСИРУЕМ ВЕРСИЮ.
-📅 День 11: Polish & CI/CD
-Testing Suite: Unit-тесты для PMM, Heap, VFS. Стресс-тесты планировщика.
-CI/CD: GitHub Actions, headless QEMU тесты при каждом git push.
-Documentation: Генерация Doxygen для API ядра.
+
+📅 День 10: Testing Suite — Концептуальная архитектура
+
+ФИЛОСОФИЯ ТЕСТИРОВАНИЯ
+Тестирование в Bare Metal OS строится на принципе "Trust, but Verify". Мы не доверяем ни одной подсистеме (PMM, VMM, Scheduler, ATA Driver) без доказательств её корректности. Каждый тест — это контракт между ядром и реальностью: "Если я сделаю X, система обязана сделать Y и остаться живой".
+
+Три столпа тестовой инфраструктуры:
+Pillar 1: ELF Test Suite (User Space correctness)
+Pillar 2: Stress Tests (Kernel robustness)
+Pillar 3: ATA Integrity (Storage reliability)
+
+Вспомогательная инфраструктура:
+PMM Accounting (счётчики alloc/free для детекции утечек) ✅ ИНФРАСТРУКТУРА ГОТОВА
+Heap Accounting (счётчики для kernel heap) ✅ ИНФРАСТРУКТУРА ГОТОВА
+Task Accounting (счётчик живых задач) ✅ ИНФРАСТРУКТУРА ГОТОВА
+Test Runner (shell-команда для автоматизации)
+QEMU Headless Automation (CI/CD ready)
+
+INFRASTRUCTURE: PMM/HEAP/TASK ACCOUNTING (✅ Реализовано)
+Добавлены глобальные счётчики:
+pmm_total_allocs — количество успешных pmm_alloc_page() с момента загрузки
+pmm_total_frees — количество успешных pmm_free_page() с момента загрузки
+heap_total_allocs/heap_total_frees — аналогично для kernel heap
+task_count — количество живых задач
+
+API:
+pmm_get_alloc_count(), pmm_get_free_count(), pmm_check_balance()
+heap_get_alloc_count(), heap_get_free_count(), heap_check_balance()
+task_get_count()
+
+Контракт: после любого теста, где все ресурсы освобождены, pmm_check_balance() и heap_check_balance() ОБЯЗАНЫ вернуть 0. Любое другое значение = memory leak.
+
+INFRASTRUCTURE: TEST RUNNER (SHELL) (🚧 В разработке)
+Shell-команды:
+run_tests — запускает весь набор ELF-тестов
+stress <spawn|forkbomb|all> — запускает стресс-тесты
+ata stress <count> <start_lba> — запускает ATA integrity test
+
+Логика Test Runner для каждого теста:
+Снапшот ДО: запомнить free_pages, alloc_count, task_count
+Запустить тестируемое действие
+Дождаться завершения (с таймаутом)
+Снапшот ПОСЛЕ: замерить те же метрики
+Сравнить снапшоты и вынести вердикт
+
+PILLAR 1: ELF TEST SUITE (🚧 В разработке)
+Назначение: проверить корректность User Space изоляции, Demand Paging, VMA enforcement и Grim Reaper cleanup при запуске реальных ELF-бинарников.
+
+Тестовые бинарники (initrd_src/bin/)
+test_hello.elf — РАБОЧИЙ процесс
+Логика: печатает "Hello" через sys_write, вызывает sys_exit(0)
+Ожидание: exit_code = 0, утечек нет, PMM balance = 0
+Что проверяет: базовый путь sys_exec → sys_exit → Grim Reaper
+
+test_segfault.elf — NULL Pointer Dereference
+Логика: обращается к адресу 0x00000000 (запись)
+Ожидание: SIGSEGV, NULL Guard Page срабатывает
+Что проверяет: NULL Guard Page в page_fault_handler
+
+test_write_text.elf — W^X Violation
+Логика: пытается писать в .text секцию (self-modifying code)
+Ожидание: SIGSEGV, VMA права нарушены
+Что проверяет: Read-Only enforcement для .text
+
+test_stack_overflow.elf — Stack Overflow
+Логика: бесконечная рекурсия с аллокацией на стеке
+Ожидание: SIGSEGV на Stack Guard Page
+Что проверяет: Stack Guard Page mechanism
+
+test_oom.elf — Memory Hog
+Логика: запрашивает 100 MB через sys_brk, пытается заполнить
+Ожидание: OOM Kill, -ENOMEM из sys_brk
+Что проверяет: OOM Protection (проактивный и реактивный)
+
+test_fork_bomb.elf — Resource Abuse (Day 11+)
+Логика: while(1) { sys_fork(); }
+Ожидание: Resource Limit или OOM Killer останавливает бомбу
+Что проверяет: Resource Containers, устойчивость ядра
+
+Test Runner логика
+Для каждого теста выполняем:
+Снапшот PMM ДО (free_pages_before, alloc_count_before)
+Запуск ELF через sys_exec → получение PID
+Ожидание завершения через sys_waitpid → получение exit_code
+Снапшот PMM ПОСЛЕ (free_pages_after, alloc_count_after)
+Валидация по 4 критериям (см. ниже)
+
+Критерии PASS/FAIL
+Memory Integrity: free_after == free_before (нет утечек страниц)
+Process Cleanup: task_count == baseline (нет zombie tasks)
+Crash Correctness: exit_code соответствует ожиданию
+Kernel Stability: Shell отвечает после теста (нет deadlock/panic)
+
+PILLAR 2: STRESS TESTS (🚧 В разработке)
+Назначение: проверить масштабируемость ядра, устойчивость к resource exhaustion и надёжность Grim Reaper при массовой гибели процессов. Это тест на выживаемость системы в экстремальных условиях.
+
+Test 2A: Mass Spawn (Kernel-Level)
+Команда: stress spawn <count>, где count = 100..500
+Сценарий:
+Создать N kernel-level задач через task_create()
+Каждая задача выполняет 100x sys_yield() (~2 sec жизни)
+Задачи завершаются через sys_exit(0)
+Grim Reaper очищает ресурсы в schedule()
+Что проверяется:
+PMM Scalability: выдерживает ли PMM 500+ аллокаций без фрагментации
+Heap Pressure: хватает ли kernel heap для 500 PCB (~2 KB каждая)
+Scheduler Fairness: Round-Robin равномерно раздаёт CPU всем задачам
+Task Table Limits: корректно ли обрабатывается переполнение таблицы
+Grim Reaper Speed: все 500 DEAD задач очищены < 100ms
+Валидация:
+created == count (или graceful failure при resource limit)
+failed tasks имеют диагностику (OOM / Heap full / Table full)
+PMM balance == 0 после завершения всех задач
+Heap balance == 0 (нет PCB leaks)
+Shell отвечает немедленно после теста
+
+Test 2B: Fork Bomb (User Space, Day 11+)
+Команда: stress forkbomb
+Сценарий:
+Запуск /bin/test_forkbomb.elf через sys_exec
+Бинарник в цикле: while(1) { sys_fork(); }
+Родитель и ребёнок оба продолжают fork'аться
+Тест длится 10 секунд или до срабатывания защиты
+Что проверяется:
+Resource Limits: max_processes в Resource Container → sys_fork возвращает -EAGAIN
+OOM Killer: при pmm_alloc_page() == 0 ядро убивает процесс с низким приоритетом
+Process Table: Global PID counter не переполняется критично
+Grim Reaper Speed: Reaper успевает чистить быстрее, чем создаются новые
+Критический критерий:
+Ядро ОБЯЗАНО выжить. Fork bomb может исчерпать ресурсы sandbox'а, но Kernel Space остаётся нетронутым. Shell отвечает на команды, ps работает, dmesg показывает логи OOM Killer'а.
+
+PILLAR 3: ATA SECTOR STRESS TEST (🚧 В разработке)
+Назначение: проверить целостность данных (Data Integrity) на уровне секторов. Это замена теста "1000 файлов" (который требует FAT32, отложенного до Day 16). Тестируем драйвер ATA PIO в изоляции.
+
+Команда: ata stress <count> <start_lba>
+Phase 1: Write Pattern Generation
+Для каждого сектора из диапазона [start_lba, start_lba + count):
+Выбор паттерна (4 типа, циклически):
+Pattern 0: Все байты 0xAA (alternating bits)
+Pattern 1: Все байты 0x55 (inverse alternating)
+Pattern 2: Sequential bytes (0x00, 0x01, ..., 0xFF, repeat)
+Pattern 3: Pseudo-random (seed = LBA, deterministic)
+Запись через ata_write_sectors()
+Подсчёт write_errors
+
+Phase 2: Read & Verify
+Для каждого сектора:
+Чтение через ata_read_sectors()
+Регенерация ожидаемого паттерна
+CRC32 сравнение с прочитанными данными
+Подсчёт read_errors и crc_mismatches
+
+Phase 3: Results & Verdict
+Метрики:
+Total time, Write time, Verify time
+Write errors, Read errors, CRC mismatches
+Throughput (KB/s) для PIO mode
+Safety Check:
+start_lba ОБЯЗАН быть >= 2048, чтобы не затереть MBR и partition table
+Что проверяется:
+ATA Write correctness: PIO write sequence работает
+ATA Read correctness: PIO read sequence работает
+Data Integrity: CRC32 детектирует все битовые ошибки
+Timing: BSY/DRQ wait корректно обрабатывает таймауты
+Error Recovery: подсчёт ошибок не роняет ядро
+Throughput: производительность PIO mode
+
+КРИТЕРИИ PASS/FAIL (ОБЩИЕ)
+PASS (зелёная зона):
+Exit code соответствует ожиданию
+PMM balance == 0 (нет утечек физических страниц)
+Heap balance == 0 (нет утечек kernel memory)
+Task count == baseline (нет zombie processes)
+Shell responsive immediately after test
+Kernel log не содержит panic/triple fault
+
+FAIL (красная зона):
+Leaked pages > 0 (PMM не освободил страницы)
+Zombie tasks > 0 (Grim Reaper не сработал)
+Wrong exit code (неожиданное поведение)
+Kernel deadlock/panic (ядро не выжило)
+ATA CRC mismatch (данные повреждены)
+
+СВЯЗЬ С NORTH STAR ("БЕССМЕРТНАЯ КРЕПОСТЬ")
+Философия "Let it crash":
+Processes WILL crash (fork bomb, bugs, OOM)
+Kernel NEVER crashes
+Grim Reaper ALWAYS cleans up
+PMM accounting is PERFECT (no leaks)
+System ALWAYS recovers
+
+Эти тесты напрямую проверяют все 5 пунктов. Если все тесты PASS — мы имеем право говорить о промышленной надёжности ядра.
+
+Resource Governance:
+OOM Killer проверяется test_oom.elf и stress forkbomb
+Resource Limits проверяются stress spawn (лимит task table)
+Grim Reaper проверяется во всех тестах через PMM balance
+
+ПЛАН РЕАЛИЗАЦИИ
+Фаза 1: Инфраструктура (2 часа) ✅ ЗАВЕРШЕНО
+Добавить счётчики в pmm.c (pmm_total_allocs, pmm_total_frees) ✅
+Добавить pmm_check_balance() API ✅
+Добавить счётчики в heap.c ✅
+Добавить task_count в task.c ✅
+
+Фаза 2: Test Runner Shell Commands (2 часа) 🚧
+Добавить shell-команду run_tests с базовой логикой
+Добавить shell-команду stress spawn <count>
+Добавить shell-команду ata stress <count> <lba>
+
+Фаза 3: ELF Test Suite (3 часа) 🚧
+Написать 6 тестовых ELF-бинарников (test_hello, test_segfault, test_write_text, test_stack_overflow, test_oom, test_fork_bomb)
+Интегрировать их в initrd
+Запустить через sys_exec в test runner
+
+Фаза 4: Stress Tests — Mass Spawn (2 часа) 🚧
+Написать handle_spawn с spawn_worker_task
+Добавить PMM accounting verification
+Тест на 100, 300, 500 задач
+
+Фаза 5: ATA Stress Test (2 часа) 🚧
+Реализовать ata_write_sectors (сейчас только read)
+Реализовать CRC32 в klib.c
+Написать handle_ata_stress с 3 фазами
+
+Фаза 6: Fork Bomb Stress (1 час, после Day 11) 🚧
+Написать test_forkbomb.elf
+Интегрировать в stress forkbomb
+Проверить Resource Containers и OOM Killer
+
+ИТОГОВЫЙ ЧЕК-ЛИСТ ТЕСТОВ
+ELF Tests (Day 10):
+test_hello.elf: рабочий процесс
+test_segfault.elf: NULL pointer
+test_write_text.elf: W^X violation
+test_stack_overflow.elf: stack overflow
+test_oom.elf: memory exhaustion
+test_fork_bomb.elf: resource abuse (Day 11+)
+
+Stress Tests (Day 10):
+stress spawn 100: basic mass spawn
+stress spawn 300: near-limit stress
+stress spawn 500: extreme stress
+stress forkbomb: destructive test (Day 11+)
+
+ATA Tests (Day 10):
+ata stress 100: quick integrity check
+ata stress 1000: medium test
+ata stress 10000: full stress test
+
+Инфраструктура:
+PMM accounting counters ✅
+Heap accounting counters ✅
+Task accounting counter ✅
+Test runner shell commands 🚧
+Makefile targets (make tests, make test-run) 🚧
+QEMU headless automation 🚧
+
+ОЖИДАЕМЫЙ РЕЗУЛЬТАТ
+После прохождения всех тестов мы получаем:
+Доказательство корректности User Space изоляции (ELF Tests)
+Гарантию отсутствия memory leaks (PMM balance = 0)
+Уверенность в надёжности Grim Reaper (все zombie reaped)
+Подтверждение Data Integrity для ATA (CRC32 match)
+Подтверждение выживаемости ядра при стрессе (no kernel panic)
+
+Это даёт нам право перейти к Day 11 (Process Lifecycle) с чистым, проверенным фундаментом.
+
+📅 День 11: Process Lifecycle
+- sys_fork, sys_exec, sys_waitpid
+- Copy-on-Write (CoW) для оптимизации fork
+Цель: Фундамент для Супервизора (PID 1)
+
+📅 День 12: Security & Hardening
+- NX Bit (No-Execute) в Page Tables
+- W^X Enforcement (Write XOR Execute)
+- Core Dumps при Segfault
+Цель: Защита от инъекций кода и телеметрия падений
+
+📅 День 13: The Supervisor (PID 1)
+- Написание /sbin/init с конфигом:
+[service:shell]
+exec=/bin/sh
+restart=always
+- Auto-Restart при падении
+Цель: Реализация философии "Let it crash"
+
+📅 День 14: Sandboxing
+- VFS chroot (подмена vfs_root для задачи)
+- Seccomp (фильтр системных вызовов)
+- Resource Containers + OOM Killer
+Цель: Изоляция недоверенных приложений
+
+📅 День 15: IPC & Microkernel
+- Mailboxes (sys_send, sys_recv)
+- Shared Memory Rings
+Цель: Подготовка к User-Mode Drivers
+
+📅 День 16+: User-Mode Drivers
+- Вынос fat32_server в Ring 3
+- Capability к I/O портам (0x1F0-0x1F7)
+- VFS <-> fat32_server через IPC
+Цель: Микроядерная архитектура (Minix 3 style)
 
 🧠 RESEARCH BACKLOG (Блок для изучения)
-Этот раздел содержит концепции, требующие глубокой теоретической проработки и аккуратной реализации. Они не блокируют День 9, но критически важны для безопасности, производительности и соответствия промышленным стандартам 
+Этот раздел содержит концепции, требующие глубокой теоретической проработки и аккуратной реализации. Они не блокируют День 10, но критически важны для безопасности, производительности и соответствия промышленным стандартам.
 
 7. ВИЗИЯ: "БЕССМЕРТНАЯ КРЕПОСТЬ" (North Star)
-Философия проекта: Bare Metal OS развивается не как "еще один Linux", а как 
-промышленная, отказоустойчивая микроядерная система для запуска недоверенных 
+Философия проекта: Bare Metal OS развивается не как "еще один Linux", а как
+промышленная, отказоустойчивая микроядерная система для запуска недоверенных
 приложений в изолированных песочницах с гарантией бессмертия критичных сервисов.
 
 🎯 Ключевые принципы
-1. "Let it crash" (Erlang/OTP): Приложения БУДУТ падать. Ядро не пытается их лечить. 
-   Ядро изолирует падение и позволяет Супервизору (PID 1) мгновенно перезапустить сервис.
-2. Zero Trust Sandbox: Любой код в Ring 3 считается недоверенным по умолчанию. 
-   Изоляция обеспечивается на уровнях: Ring 3, Capability, Container, IPC.
-3. Crash-Only Software: Сервисы проектируются так, чтобы их можно было убить 
-   (SIGKILL) в любой момент и поднять заново < 100мс без потери состояния.
-4. Immutable Kernel: После инициализации код ядра становится Read-Only. 
-   Любая попытка модификации = Kernel Panic + OOM Killer.
+1. "Let it crash" (Erlang/OTP): Приложения БУДУТ падать. Ядро не пытается их лечить.
+Ядро изолирует падение и позволяет Супервизору (PID 1) мгновенно перезапустить сервис.
+2. Zero Trust Sandbox: Любой код в Ring 3 считается недоверенным по умолчанию.
+Изоляция обеспечивается на уровнях: Ring 3, Capability, Container, IPC.
+3. Crash-Only Software: Сервисы проектируются так, чтобы их можно было убить
+(SIGKILL) в любой момент и поднять заново < 100мс без потери состояния.
+4. Immutable Kernel: После инициализации код ядра становится Read-Only.
+Любая попытка модификации = Kernel Panic + OOM Killer.
 
 🏛 Архитектурные столпы
+
 A. ФЕНИКС (Auto-Restart Infrastructure)
 - sys_fork + sys_exec + sys_waitpid: База для Супервизора (PID 1).
-- The Supervisor Loop: /sbin/init читает конфиг, запускает сервисы через fork(), 
-  ловит их падение через waitpid() и мгновенно перезапускает через exec().
-- Micro-Reboot: Сервисы не хранят состояние в RAM. Они пишут его в VFS 
-  (/var/state/service.state) после каждой транзакции. При перезапуске читают 
-  состояние и продолжают работу с того же места.
-- Core Dumps: При фатальном Page Fault ядро сохраняет регистры (EIP, ESP, EAX) 
-  и стек упавшего процесса в /var/crash/app.core ПЕРЕД тем, как убить задачу.
+- The Supervisor Loop: /sbin/init читает конфиг, запускает сервисы через fork(),
+ловит их падение через waitpid() и мгновенно перезапускает через exec().
+- Micro-Reboot: Сервисы не хранят состояние в RAM. Они пишут его в VFS
+(/var/state/service.state) после каждой транзакции. При перезапуске читают
+состояние и продолжают работу с того же места.
+- Core Dumps: При фатальном Page Fault ядро сохраняет регистры (EIP, ESP, EAX)
+и стек упавшего процесса в /var/crash/app.core ПЕРЕД тем, как убить задачу.
 
 B. КРЕПОСТЬ (Security Hardening)
-- NX Bit (No-Execute): В Page Tables добавляется бит NX. Память может быть ЛИБО 
-  Writable (данные/стек), ЛИБО eXecutable (код). Никогда одновременно (W^X).
-- Capability-Based Security: В task_t добавляется массив capabilities[32]. 
-  Права привязаны к процессам через токены, а не к файлам через chmod.
-  Пример: curl получает только CAP_NET_SOCKET и CAP_FILE_WRITE(/tmp/out).
-- Seccomp (Syscall Filter): У каждой задачи битмап разрешенных системных вызовов. 
-  Песочнице для парсинга текста разрешены только sys_read/sys_write/sys_exit.
-  Вызов sys_open/sys_fork = мгновенное убийство с кодом EPERM.
-- VFS Namespaces (chroot): Недоверенное приложение видит только свою папку. 
-  VFS подменяет vfs_root для конкретной задачи при sys_exec.
+- NX Bit (No-Execute): В Page Tables добавляется бит NX. Память может быть ЛИБО
+Writable (данные/стек), ЛИБО eXecutable (код). Никогда одновременно (W^X).
+- Capability-Based Security: В task_t добавляется массив capabilities[32].
+Права привязаны к процессам через токены, а не к файлам через chmod.
+Пример: curl получает только CAP_NET_SOCKET и CAP_FILE_WRITE(/tmp/out).
+- Seccomp (Syscall Filter): У каждой задачи битмап разрешенных системных вызовов.
+Песочнице для парсинга текста разрешены только sys_read/sys_write/sys_exit.
+Вызов sys_open/sys_fork = мгновенное убийство с кодом EPERM.
+- VFS Namespaces (chroot): Недоверенное приложение видит только свою папку.
+VFS подменяет vfs_root для конкретной задачи при sys_exec.
 
 C. БЕССМЕРТНОЕ ЯДРО (Resource Governance)
-- OOM Killer: При pmm_alloc_page() == 0 ядро НЕ падает в Kernel Panic. 
-  Оно находит процесс с самым низким приоритетом (или помеченный как sandbox), 
-  вызывает vmm_destroy_address_space и освобождает память для критичных сервисов.
+- OOM Killer: При pmm_alloc_page() == 0 ядро НЕ падает в Kernel Panic.
+Оно находит процесс с самым низким приоритетом (или помеченный как sandbox),
+вызывает vmm_destroy_address_space и освобождает память для критичных сервисов.
 - Resource Containers (Zones): Каждая песочница имеет жесткие лимиты:
-  typedef struct {
-      uint32_t max_physical_pages;  // OOM внутри контейнера
-      uint32_t cpu_weight;          // Fair Share Scheduling
-      uint32_t max_open_fds;        // Защита от исчерпания FD
-      uint32_t max_processes;       // Защита от fork-bomb
-  } resource_container_t;
-- CPU Quotas (Cgroups): Планировщик учитывает "веса" задач. Критичный сервис БД 
-  получает 80% квантов, песочница жестко ограничена 5%.
-- User-Mode Drivers (Minix 3): Драйверы ФС (FAT32) и сети работают в Ring 3 
-  как обычные процессы. Падение драйвера = перезапуск сервиса, а не Kernel Panic.
+typedef struct {
+uint32_t max_physical_pages;  // OOM внутри контейнера
+uint32_t cpu_weight;          // Fair Share Scheduling
+uint32_t max_open_fds;        // Защита от исчерпания FD
+uint32_t max_processes;       // Защита от fork-bomb
+} resource_container_t;
+- CPU Quotas (Cgroups): Планировщик учитывает "веса" задач. Критичный сервис БД
+получает 80% квантов, песочница жестко ограничена 5%.
+- User-Mode Drivers (Minix 3): Драйверы ФС (FAT32) и сети работают в Ring 3
+как обычные процессы. Падение драйвера = перезапуск сервиса, а не Kernel Panic.
 
 D. СВЯЗЬ (Inter-Process Communication)
-- Mailboxes / Message Passing: Синхронные сообщения (как в Minix) или 
-  асинхронные очереди (как в seL4). VFS общается с fat32_server через IPC, 
-  а не через C-функции в Ring 0.
+- Mailboxes / Message Passing: Синхронные сообщения (как в Minix) или
+асинхронные очереди (как в seL4). VFS общается с fat32_server через IPC,
+а не через C-функции в Ring 0.
 - Capability Delegation: Токены можно делегировать ребенку при fork() или отзывать.
 
 E. ОПТИМИЗАЦИЯ (Performance)
-- Copy-on-Write (CoW): fork() не копирует память. Он создает новые Page Tables, 
-  ссылающиеся на те же физические страницы с флагом READ-ONLY. При записи 
-  срабатывает Page Fault, VMM выделяет личную копию страницы.
-  Результат: Перезапуск сервиса весом 10 МБ занимает микросекунды.
-- Immutable Sections: В linker.ld добавляется секция .immutable, которую VMM 
-  мапит с PAGE_PCD | PAGE_READ (без WRITE и EXECUTE для данных).
+- Copy-on-Write (CoW): fork() не копирует память. Он создает новые Page Tables,
+ссылающиеся на те же физические страницы с флагом READ-ONLY. При записи
+срабатывает Page Fault, VMM выделяет личную копию страницы.
+Результат: Перезапуск сервиса весом 10 МБ занимает микросекунды.
+- Immutable Sections: В linker.ld добавляется секция .immutable, которую VMM
+мапит с PAGE_PCD | PAGE_READ (без WRITE и EXECUTE для данных).
 
 F. ЖИЗНЕННЫЙ ЦИКЛ (Hybrid Process Model)
-
-Архитектура использует комбинированный подход к управлению жизненным циклом процессов, 
+Архитектура использует комбинированный подход к управлению жизненным циклом процессов,
 сочетая лучшие практики Unix и Erlang/OTP для разных типов задач:
 
 1. Unix-style (Orphan Adoption) — для пользовательских приложений:
-   * Когда родитель умирает, все его живые дети автоматически усыновляются Init Task (PID 1)
-   * Дети продолжают работать без перебоев, сохраняя свое состояние
-   * Подходит для: пользовательских приложений, фоновых задач, демонов, тестовых процессов
-   * Флаг в task_t: orphan_on_exit = 1 (по умолчанию)
-   * Пример: Shell запускает web server в фоне -> Shell падает -> web server усыновляется init и продолжает работать
+* Когда родитель умирает, все его живые дети автоматически усыновляются Init Task (PID 1)
+* Дети продолжают работать без перебоев, сохраняя свое состояние
+* Подходит для: пользовательских приложений, фоновых задач, демонов, тестовых процессов
+* Флаг в task_t: orphan_on_exit = 1 (по умолчанию)
+* Пример: Shell запускает web server в фоне -> Shell падает -> web server усыновляется init и продолжает работать
 
 2. Erlang-style (Linked Processes) — для критичных сервисов:
-   * Падение родителя = каскадное падение всех связанных детей (linked processes)
-   * Супервизор (PID 1) мгновенно перезапускает ВСЕ дерево процессов < 100мс
-   * Подходит для: Shell + Helper, VFS Servers (fat32, tmpfs), IPC Daemon, Network Stack
-   * Флаги в task_t: orphan_on_exit = 0, monitor_children = 1
-   * Гарантирует: Процессы всегда в синхронизированном состоянии (нет stale state)
+* Падение родителя = каскадное падение всех связанных детей (linked processes)
+* Супервизор (PID 1) мгновенно перезапускает ВСЕ дерево процессов < 100мс
+* Подходит для: Shell + Helper, VFS Servers (fat32, tmpfs), IPC Daemon, Network Stack
+* Флаги в task_t: orphan_on_exit = 0, monitor_children = 1
+* Гарантирует: Процессы всегда в синхронизированном состоянии (нет stale state)
 
 Критичные сервисы (Erlang-style):
 ┌─────────────────────────────────────────┐
@@ -510,25 +876,23 @@ F. ЖИЗНЕННЫЙ ЦИКЛ (Hybrid Process Model)
 
 Orphan Adoption Algorithm:
 void sys_exit(int code) {
-    task_t* current = current_task;
-    
-    if (current->orphan_on_exit) {
-        // Unix-style: усыновить детей init
-        while (current->children != NULL) {
-            task_t* child = current->children;
-            current->children = child->next_sibling;
-            child->parent = init_task;
-            child->next_sibling = init_task->children;
-            init_task->children = child;
-        }
-    } else if (current->monitor_children) {
-        // Erlang-style: убить всех детей
-        kill_all_children(current);
-    }
-    
-    current->state = TASK_DEAD;
-    task_to_reap = current;
-    schedule();
+task_t* current = current_task;
+if (current->orphan_on_exit) {
+// Unix-style: усыновить детей init
+while (current->children != NULL) {
+task_t* child = current->children;
+current->children = child->next_sibling;
+child->parent = init_task;
+child->next_sibling = init_task->children;
+init_task->children = child;
+}
+} else if (current->monitor_children) {
+// Erlang-style: убить всех детей
+kill_all_children(current);
+}
+current->state = TASK_DEAD;
+task_to_reap = current;
+schedule();
 }
 
 Idle Task (PID 0):
@@ -553,8 +917,8 @@ init (PID 1) — Root Supervisor
 │   ├── fat32_server (PID 20)
 │   └── tmpfs_server (PID 21)
 └── ipc_supervisor (PID 4) — one_for_all
-    ├── mailbox_server (PID 30)
-    └── shared_memory_server (PID 31)
+├── mailbox_server (PID 30)
+└── shared_memory_server (PID 31)
 
 User Sandboxes (Unix-style):
 └── user_app (PID 100) — orphan_on_exit=1
@@ -565,47 +929,9 @@ User Sandboxes (Unix-style):
 
 Это дает 99.999% uptime для критичных сервисов и гибкость для пользовательских приложений.
 
-
-📅 Дорожная карта внедрения (Post-Day 10)
-День 11: Process Lifecycle
-- sys_fork, sys_exec, sys_waitpid
-- Copy-on-Write (CoW) для оптимизации fork
-Цель: Фундамент для Супервизора (PID 1)
-
-День 12: Security & Hardening  
-- NX Bit (No-Execute) в Page Tables
-- W^X Enforcement (Write XOR Execute)
-- Core Dumps при Segfault
-Цель: Защита от инъекций кода и телеметрия падений
-
-День 13: The Supervisor (PID 1)
-- Написание /sbin/init с конфигом:
-  [service:shell]
-  exec=/bin/sh
-  restart=always
-- Auto-Restart при падении
-Цель: Реализация философии "Let it crash"
-
-День 14: Sandboxing
-- VFS chroot (подмена vfs_root для задачи)
-- Seccomp (фильтр системных вызовов)
-- Resource Containers + OOM Killer
-Цель: Изоляция недоверенных приложений
-
-День 15: IPC & Microkernel
-- Mailboxes (sys_send, sys_recv)
-- Shared Memory Rings
-Цель: Подготовка к User-Mode Drivers
-
-День 16+: User-Mode Drivers
-- Вынос fat32_server в Ring 3
-- Capability к I/O портам (0x1F0-0x1F7)
-- VFS <-> fat32_server через IPC
-Цель: Микроядерная архитектура (Minix 3 style)
-
 💡 Источники вдохновения
 - Minix 3 (Andrew Tanenbaum): Микроядро + User-Mode Drivers
-- seL4 (NICTA): Capability-Based Security + Formal Verification  
+- seL4 (NICTA): Capability-Based Security + Formal Verification
 - Erlang/OTP (Ericsson): "Let it crash" + Supervisor Trees (99.9999999% uptime)
 - QNX: Microkernel + Message Passing IPC
 - FreeBSD Jails / Linux cgroups: Resource Containers
@@ -614,236 +940,25 @@ User Sandboxes (Unix-style):
 🔒 Гарантии системы (Target SLA)
 - Ядро НИКОГДА не падает в Kernel Panic из-за бага в Ring 3 коде.
 - Критичный сервис перезапускается < 100мс после любого падения.
-- Недоверенное приложение физически не может получить доступ к ресурсам, 
-  на которые у него нет Capability-токена.
+- Недоверенное приложение физически не может получить доступ к ресурсам,
+на которые у него нет Capability-токена.
 - OOM внутри контейнера не влияет на соседние контейнеры или ядро.
 
-🧪 День 10: Testing Suite — Концептуальная архитектура
-ФИЛОСОФИЯ ТЕСТИРОВАНИЯ
-Тестирование в Bare Metal OS строится на принципе "Trust, but Verify". Мы не доверяем ни одной подсистеме (PMM, VMM, Scheduler, ATA Driver) без доказательств её корректности. Каждый тест — это контракт между ядром и реальностью: "Если я сделаю X, система обязана сделать Y и остаться живой".
-Три столпа тестовой инфраструктуры:
-Pillar 1: ELF Test Suite (User Space correctness)
-Pillar 2: Stress Tests (Kernel robustness)
-Pillar 3: ATA Integrity (Storage reliability)
-Вспомогательная инфраструктура:
-PMM Accounting (счётчики alloc/free для детекции утечек)
-Test Runner (shell-команда для автоматизации)
-QEMU Headless Automation (CI/CD ready)
-ИНФРАСТРУКТУРА: PMM ACCOUNTING
-Добавляем в pmm.c глобальные счётчики:
-pmm_total_allocs — количество успешных pmm_alloc_page() с момента загрузки
-pmm_total_frees — количество успешных pmm_free_page() с момента загрузки
-API:
-pmm_get_alloc_count() — вернуть pmm_total_allocs
-pmm_get_free_count() — вернуть pmm_total_frees
-pmm_check_balance() — вернуть разницу (allocs - frees)
-Контракт: после любого теста, где все ресурсы освобождены, pmm_check_balance() ОБЯЗАН вернуть 0. Любое другое значение = memory leak.
-INFRASTRUCTURE: TEST RUNNER (SHELL)
-Shell-команды:
-run_tests — запускает весь набор ELF-тестов
-stress <spawn|forkbomb|all> — запускает стресс-тесты
-ata stress <count> <start_lba> — запускает ATA integrity test
-Логика Test Runner для каждого теста:
-Снапшот ДО: запомнить free_pages, alloc_count, task_count
-Запустить тестируемое действие
-Дождаться завершения (с таймаутом)
-Снапшот ПОСЛЕ: замерить те же метрики
-Сравнить снапшоты и вынести вердикт
-PILLAR 1: ELF TEST SUITE
-Назначение: проверить корректность User Space изоляции, Demand Paging, VMA enforcement и Grim Reaper cleanup при запуске реальных ELF-бинарников.
-Тестовые бинарники (initrd_src/bin/)
-test_hello.elf — РАБОЧИЙ процесс
-Логика: печатает "Hello" через sys_write, вызывает sys_exit(0)
-Ожидание: exit_code = 0, утечек нет, PMM balance = 0
-Что проверяет: базовый путь sys_exec → sys_exit → Grim Reaper
-test_segfault.elf — NULL Pointer Dereference
-Логика: обращается к адресу 0x00000000 (запись)
-Ожидание: SIGSEGV, NULL Guard Page срабатывает
-Что проверяет: NULL Guard Page в page_fault_handler
-test_write_text.elf — W^X Violation
-Логика: пытается писать в .text секцию (self-modifying code)
-Ожидание: SIGSEGV, VMA права нарушены
-Что проверяет: Read-Only enforcement для .text
-test_stack_overflow.elf — Stack Overflow
-Логика: бесконечная рекурсия с аллокацией на стеке
-Ожидание: SIGSEGV на Stack Guard Page
-Что проверяет: Stack Guard Page mechanism
-test_oom.elf — Memory Hog
-Логика: запрашивает 100 MB через sys_brk, пытается заполнить
-Ожидание: OOM Kill, -ENOMEM из sys_brk
-Что проверяет: OOM Protection (проактивный и реактивный)
-test_fork_bomb.elf — Resource Abuse (Day 11+)
-Логика: while(1) { sys_fork(); }
-Ожидание: Resource Limit или OOM Killer останавливает бомбу
-Что проверяет: Resource Containers, устойчивость ядра
-Test Runner логика
-Для каждого теста выполняем:
-Снапшот PMM ДО (free_pages_before, alloc_count_before)
-Запуск ELF через sys_exec → получение PID
-Ожидание завершения через sys_waitpid → получение exit_code
-Снапшот PMM ПОСЛЕ (free_pages_after, alloc_count_after)
-Валидация по 4 критериям (см. ниже)
-Критерии PASS/FAIL
-Memory Integrity: free_after == free_before (нет утечек страниц)
-Process Cleanup: task_count == baseline (нет zombie tasks)
-Crash Correctness: exit_code соответствует ожиданию
-Kernel Stability: Shell отвечает после теста (нет deadlock/panic)
-PILLAR 2: STRESS TESTS
-Назначение: проверить масштабируемость ядра, устойчивость к resource exhaustion и надёжность Grim Reaper при массовой гибели процессов. Это тест на выживаемость системы в экстремальных условиях.
-Test 2A: Mass Spawn (Kernel-Level)
-Команда: stress spawn <count>, где count = 100..500
-Сценарий:
-Создать N kernel-level задач через task_create()
-Каждая задача выполняет 100x sys_yield() (~2 sec жизни)
-Задачи завершаются через sys_exit(0)
-Grim Reaper очищает ресурсы в schedule()
-Что проверяется:
-PMM Scalability: выдерживает ли PMM 500+ аллокаций без фрагментации
-Heap Pressure: хватает ли kernel heap для 500 PCB (~2 KB каждая)
-Scheduler Fairness: Round-Robin равномерно раздаёт CPU всем задачам
-Task Table Limits: корректно ли обрабатывается переполнение таблицы
-Grim Reaper Speed: все 500 DEAD задач очищены < 100ms
-Валидация:
-created == count (или graceful failure при resource limit)
-failed tasks имеют диагностику (OOM / Heap full / Table full)
-PMM balance == 0 после завершения всех задач
-Heap balance == 0 (нет PCB leaks)
-Shell отвечает немедленно после теста
-Test 2B: Fork Bomb (User Space, Day 11+)
-Команда: stress forkbomb
-Сценарий:
-Запуск /bin/test_forkbomb.elf через sys_exec
-Бинарник в цикле: while(1) { sys_fork(); }
-Родитель и ребёнок оба продолжают fork'аться
-Тест длится 10 секунд или до срабатывания защиты
-Что проверяется:
-Resource Limits: max_processes в Resource Container → sys_fork возвращает -EAGAIN
-OOM Killer: при pmm_alloc_page() == 0 ядро убивает процесс с низким приоритетом
-Process Table: Global PID counter не переполняется критично
-Grim Reaper Speed: Reaper успевает чистить быстрее, чем создаются новые
-Критический критерий:
-Ядро ОБЯЗАНО выжить. Fork bomb может исчерпать ресурсы sandbox'а, но Kernel Space остаётся нетронутым. Shell отвечает на команды, ps работает, dmesg показывает логи OOM Killer'а.
-PILLAR 3: ATA SECTOR STRESS TEST
-Назначение: проверить целостность данных (Data Integrity) на уровне секторов. Это замена теста "1000 файлов" (который требует FAT32, отложенного до Day 16). Тестируем драйвер ATA PIO в изоляции.
-Команда: ata stress <count> <start_lba>
-Phase 1: Write Pattern Generation
-Для каждого сектора из диапазона [start_lba, start_lba + count):
-Выбор паттерна (4 типа, циклически):
-Pattern 0: Все байты 0xAA (alternating bits)
-Pattern 1: Все байты 0x55 (inverse alternating)
-Pattern 2: Sequential bytes (0x00, 0x01, ..., 0xFF, repeat)
-Pattern 3: Pseudo-random (seed = LBA, deterministic)
-Запись через ata_write_sectors()
-Подсчёт write_errors
-Phase 2: Read & Verify
-Для каждого сектора:
-Чтение через ata_read_sectors()
-Регенерация ожидаемого паттерна
-CRC32 сравнение с прочитанными данными
-Подсчёт read_errors и crc_mismatches
-Phase 3: Results & Verdict
-Метрики:
-Total time, Write time, Verify time
-Write errors, Read errors, CRC mismatches
-Throughput (KB/s) для PIO mode
-Safety Check:
-start_lba ОБЯЗАН быть >= 2048, чтобы не затереть MBR и partition table
-Что проверяется:
-ATA Write correctness: PIO write sequence работает
-ATA Read correctness: PIO read sequence работает
-Data Integrity: CRC32 детектирует все битовые ошибки
-Timing: BSY/DRQ wait корректно обрабатывает таймауты
-Error Recovery: подсчёт ошибок не роняет ядро
-Throughput: производительность PIO mode
-КРИТЕРИИ PASS/FAIL (ОБЩИЕ)
-PASS (зелёная зона):
-Exit code соответствует ожиданию
-PMM balance == 0 (нет утечек физических страниц)
-Heap balance == 0 (нет утечек kernel memory)
-Task count == baseline (нет zombie processes)
-Shell responsive immediately after test
-Kernel log не содержит panic/triple fault
-FAIL (красная зона):
-Leaked pages > 0 (PMM не освободил страницы)
-Zombie tasks > 0 (Grim Reaper не сработал)
-Wrong exit code (неожиданное поведение)
-Kernel deadlock/panic (ядро не выжило)
-ATA CRC mismatch (данные повреждены)
-СВЯЗЬ С NORTH STAR ("БЕССМЕРТНАЯ КРЕПОСТЬ")
-Философия "Let it crash":
-Processes WILL crash (fork bomb, bugs, OOM)
-Kernel NEVER crashes
-Grim Reaper ALWAYS cleans up
-PMM accounting is PERFECT (no leaks)
-System ALWAYS recovers
-Эти тесты напрямую проверяют все 5 пунктов. Если все тесты PASS — мы имеем право говорить о промышленной надёжности ядра.
-Resource Governance:
-OOM Killer проверяется test_oom.elf и stress forkbomb
-Resource Limits проверяются stress spawn (лимит task table)
-Grim Reaper проверяется во всех тестах через PMM balance
-ПЛАН РЕАЛИЗАЦИИ
-Фаза 1: Инфраструктура (2 часа)
-Добавить счётчики в pmm.c (pmm_total_allocs, pmm_total_frees)
-Добавить pmm_check_balance() API
-Добавить shell-команду run_tests с базовой логикой
-Фаза 2: ELF Test Suite (3 часа, после Day 9)
-Написать 6 тестовых ELF-бинарников (test_hello, test_segfault, test_write_text, test_stack_overflow, test_oom, test_fork_bomb)
-Интегрировать их в initrd
-Запустить через sys_exec в test runner
-Фаза 3: Stress Tests — Mass Spawn (2 часа)
-Написать handle_spawn с spawn_worker_task
-Добавить PMM accounting verification
-Тест на 100, 300, 500 задач
-Фаза 4: ATA Stress Test (2 часа, Day 8.3)
-Реализовать ata_write_sectors (сейчас только read)
-Реализовать CRC32 в klib.c
-Написать handle_ata_stress с 3 фазами
-Фаза 5: Fork Bomb Stress (1 час, после Day 11)
-Написать test_forkbomb.elf
-Интегрировать в stress forkbomb
-Проверить Resource Containers и OOM Killer
-ИТОГОВЫЙ ЧЕК-ЛИСТ ТЕСТОВ
-ELF Tests (Day 10, после Day 9):
-test_hello.elf: рабочий процесс
-test_segfault.elf: NULL pointer
-test_write_text.elf: W^X violation
-test_stack_overflow.elf: stack overflow
-test_oom.elf: memory exhaustion
-test_fork_bomb.elf: resource abuse (Day 11+)
-Stress Tests (Day 10):
-stress spawn 100: basic mass spawn
-stress spawn 300: near-limit stress
-stress spawn 500: extreme stress
-stress forkbomb: destructive test (Day 11+)
-ATA Tests (Day 8.3 / Day 10):
-ata stress 100: quick integrity check
-ata stress 1000: medium test
-ata stress 10000: full stress test
-Инфраструктура:
-PMM accounting counters
-Test runner shell commands
-Makefile targets (make tests, make test-run)
-QEMU headless automation
-ОЖИДАЕМЫЙ РЕЗУЛЬТАТ
-После прохождения всех тестов мы получаем:
-Доказательство корректности User Space изоляции (ELF Tests)
-Гарантию отсутствия memory leaks (PMM balance = 0)
-Уверенность в надёжности Grim Reaper (все zombie reaped)
-Подтверждение Data Integrity для ATA (CRC32 match)
-Подтверждение выживаемости ядра при стрессе (no kernel panic)
-Это даёт нам право перейти к Day 11 (Process Lifecycle) с чистым, проверенным фундаментом.
-
 🍓 RASPBERRY PI PORT (BCM2835)
+
 НАМЕРЕНИЕ
 После стабилизации x86 версии проекта (Day 20+), выполнить адаптацию ядра для запуска на Raspberry Pi Model B+ (SoC BCM2835, ARM1176JZF-S, 512 MB RAM). Это демонстрация промышленной гибкости архитектуры и доказательство платформенной независимости Bare Metal OS.
+
 ПОЧЕМУ RPI B+ ПОДХОДИТ
 Ключевая совместимость:
 ARMv6 MMU поддерживает виртуальную память (аналог x86 paging)
 512 MB RAM достаточно для всех функций проекта
 Protected Mode (SVC/User) аналогичен Ring 0/3
 ~80% кода ядра (VFS, Scheduler, Heap, Shell) переиспользуется без изменений
+
 КОГДА
 Day 30-35, после завершения x86 версии и внедрения Hardware Abstraction Layer (HAL).
+
 ПЛАН ПОРТИРОВАНИЯ
 Day 25: Внедрение HAL в x86 код (абстрактный интерфейс для железа)
 Day 30: ARM boot code + UART (serial output на реальном железе)
@@ -851,8 +966,10 @@ Day 31: PMM + VMM (ARM Translation Tables вместо x86 Page Tables)
 Day 32: Interrupts + Timer (ARM Exception Vectors, BCM2835 VIC)
 Day 33-34: Framebuffer (через Mailbox) + SD Card driver
 Day 35: Интеграция, запуск всех тестов Day 10 на ARM
+
 РЕЗУЛЬТАТ
 Одна кодовая база работает на двух архитектурах (x86 + ARM). Это позиционирует проект как промышленную, платформенно-независимую систему, а не учебное упражнение. Открывает путь к embedded applications (IoT, robotics).
+
 СЛЕДУЮЩИЕ ШАГИ (Day 40+)
 ARM Cortex-A порт (Raspberry Pi 3/4, 64-bit)
 RISC-V порт (SiFive, ESP32-C3 с MMU)
@@ -864,7 +981,8 @@ BCM2835 — это идеальный полигон для изучения emb
 Он достаточно мощный, чтобы тянуть VFS, VMM и ELF-лоадер без лагов.
 Он достаточно простой (одно ядро, ARMv6), чтобы ты не утонул в дебрях SMP-синхронизации и когерентности кэшей, как это было бы на Cortex-A72 (Raspberry Pi 4).
 У него лучшая документация в мире: BCM2835 ARM Peripherals Manual (200 страниц) описывает каждый бит каждого регистра.
+
 Что ты получишь в итоге:
 Ты возьмешь маленькую плату размером с кредитку, воткнешь в нее HDMI и USB-клавиатуру, включишь в розетку, и через 0.8 секунды на экране телевизора появится твой собственный графический Shell, работающий на твоем собственном ядре, без единой строчки кода от Linux.
-Это то чувство, ради которого вообще стоит писать Bare Metal ОС. 🚀
 
+Это то чувство, ради которого вообще стоит писать Bare Metal ОС. 🚀
