@@ -20,7 +20,7 @@ typedef struct task {
     uint32_t pid;             
     task_state_t state;       
     uint32_t esp;             
-    uint32_t kernel_stack;    
+    uint32_t kernel_stack_virt; // ✅ ИСПРАВЛЕНО: Виртуальный адрес стека ядра (из kmalloc)
     uint32_t* pdir_virt;      
     uint32_t cr3;             
     
@@ -29,13 +29,17 @@ typedef struct task {
     struct open_file* fd_table[TASK_MAX_OPEN_FILES];
     struct vma_node* vma_head; 
     char name[32];
+    
+    // Указатели для планировщика (Run Queue - кольцевой список)
     struct task* next;
     struct task* prev;
+    
+    // ✅ Указатель для сборщика мусора (Reaper Queue)
+    struct task* reaper_next; 
 } task_t;
 
 void tasking_init(void);
 
-// ✅ ИСПРАВЛЕНО: Добавлен параметр custom_pdir для передачи готового Address Space
 task_t* task_create(const char* name, void (*entry_point)(void), 
                     bool is_user_mode, uint32_t user_esp, uint32_t* custom_pdir);
 
@@ -47,7 +51,6 @@ void task_print_list(void);
 
 void task_init_fds(task_t* task);
 
-// [ДЕНЬ 10] TASK ACCOUNTING & KILL
 uint32_t task_get_count(void);
 void task_kill_current(const char* reason);
 

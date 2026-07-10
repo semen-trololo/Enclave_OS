@@ -19,6 +19,7 @@
 #include "initrd.h"
 #include "ata.h"
 #include "fat32.h"
+#include "tmpfs.h"
 
 // ==========================================
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ
@@ -99,6 +100,9 @@ static void init_subsystems(void) {
 
     fat32_init();
     serial_print("  [+] FAT32 Driver (Read-Only) mounted\n");
+    
+    tmpfs_init();
+    serial_print("  [+] TMPFS mounted\n");
 
     tasking_init();
     serial_print("  [+] Task Scheduler (Round-Robin) ready\n");

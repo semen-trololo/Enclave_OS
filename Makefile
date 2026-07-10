@@ -31,7 +31,8 @@ ASFLAGS = -f elf32 -g
 LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
 
 # Флаги компиляции user-space
-USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra
+# ✅ ИСПРАВЛЕНО: Добавлен -fno-optimize-sibling-calls для отключения TCO
+USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra -fno-optimize-sibling-calls
 USER_LDFLAGS = -nostdlib -T user_linker.ld
 
 # ==============================================================================

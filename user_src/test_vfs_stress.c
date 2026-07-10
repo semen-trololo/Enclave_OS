@@ -23,13 +23,6 @@ static uint32_t crc32(const uint8_t* data, uint32_t len) {
     return crc ^ 0xFFFFFFFF;
 }
 
-// Обертка для unlink (syscall 10)
-static inline int sys_unlink(const char* path) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(10), "b"(path));
-    return ret;
-}
-
 void _start() {
     crc32_init();
     

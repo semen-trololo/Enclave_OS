@@ -143,6 +143,39 @@ static int sys_brk_handler(struct regs* r) {
 }
 
 // ========================================================================
+// ✅ ДОБАВЛЕНО: VFS System Calls (Zero Trust Sandbox)
+// ========================================================================
+static int sys_unlink_handler(struct regs* r) {
+    const char* path = (const char*)r->ebx;
+    if (!is_user_pointer(path, 1)) {
+        serial_printf("[SYSCALL] sys_unlink: Invalid path pointer\n");
+        return -14;
+    }
+    return sys_unlink(path);
+}
+
+static int sys_open_handler(struct regs* r) {
+    const char* path = (const char*)r->ebx;
+    uint32_t flags = (uint32_t)r->ecx; // ✅ ИСПРАВЛЕНО: uint32_t для соответствия vfs.h
+    
+    // Zero Trust: проверяем указатель из Ring 3
+    if (!is_user_pointer(path, 1)) {
+        serial_printf("[SYSCALL] sys_open: Invalid path pointer\n");
+        return -14; // EFAULT
+    }
+    
+    // ✅ ИСПРАВЛЕНО: Убран extern. Функция sys_open уже видна из #include "vfs.h"
+    return sys_open(path, flags);
+}
+
+static int sys_close_handler(struct regs* r) {
+    int fd = (int)r->ebx;
+    
+    // ✅ ИСПРАВЛЕНО: Убран extern. Функция sys_close уже видна из #include "vfs.h"
+    return sys_close(fd);
+}
+
+// ========================================================================
 // sys_exec: Загрузка и запуск ELF-бинарника в User Mode
 // ========================================================================
 static int sys_exec_handler(struct regs* r) {
@@ -217,6 +250,9 @@ void syscall_init(void) {
     syscall_table[SYS_READ]  = sys_read_handler;
     syscall_table[SYS_WRITE] = sys_write_handler;
     syscall_table[SYS_YIELD] = sys_yield_handler;
+    syscall_table[SYS_OPEN]  = sys_open_handler;   // ✅ ДОБАВЛЕНО
+    syscall_table[SYS_CLOSE] = sys_close_handler;  // ✅ ДОБАВЛЕНО
+    syscall_table[SYS_UNLINK] = sys_unlink_handler; // ✅ ДОБАВЛЕНО
     syscall_table[SYS_BRK] = sys_brk_handler;
     syscall_table[SYS_EXEC] = sys_exec_handler;
     extern void isr128(); 

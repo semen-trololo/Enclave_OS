@@ -4,7 +4,7 @@
 #include "serial.h"
 #include "task.h" 
 
-static vfs_node_t* vfs_root = 0;
+vfs_node_t* vfs_root = 0;
 
 // ==========================================
 // ГЛОБАЛЬНЫЕ СИНГЛТОНЫ СТАНДАРТНЫХ ПОТОКОВ
@@ -32,7 +32,8 @@ static int32_t stdin_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint
 // 1. УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ОБХОДА ДЕРЕВА (LCRS)
 // ==========================================
 
-static int32_t vfs_generic_readdir(vfs_node_t* node, uint32_t index, dirent_t* entry) {
+// ✅ ИСПРАВЛЕНО: Убран static, теперь видны из tmpfs.c
+int32_t vfs_generic_readdir(vfs_node_t* node, uint32_t index, dirent_t* entry) {
     if (!node || !entry) return -1;
     vfs_node_t* child = node->first_child;
     uint32_t i = 0;
@@ -45,7 +46,8 @@ static int32_t vfs_generic_readdir(vfs_node_t* node, uint32_t index, dirent_t* e
     return 0;
 }
 
-static vfs_node_t* vfs_generic_finddir(vfs_node_t* node, const char* name) {
+// ✅ ИСПРАВЛЕНО: Убран static, теперь видны из tmpfs.c
+vfs_node_t* vfs_generic_finddir(vfs_node_t* node, const char* name) {
     if (!node || !name) return 0;
     vfs_node_t* child = node->first_child;
     while (child) {
@@ -209,15 +211,67 @@ int32_t vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_
 // ==========================================
 
 int sys_open(const char* pathname, uint32_t flags) {
-    if (!pathname) return VFS_ENOENT;
-    vfs_node_t* node = vfs_findnode(pathname);
-    if (!node) return VFS_ENOENT;
+    if (!pathname) return -2; // VFS_ENOENT
     
-    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) return VFS_EACCES;
-    if (node->open && node->open(node, flags) != 0) return VFS_EACCES;
+    vfs_node_t* node = vfs_findnode(pathname);
+    
+    // ✅ ИСПРАВЛЕНО: Поддержка O_CREAT
+    if (!node) {
+        if (flags & O_CREAT) {
+            int len = k_strlen(pathname);
+            if (len == 0 || pathname[0] != '/') return -2;
+            
+            // Ищем последний слэш, чтобы отделить путь к родителю от имени файла
+            int last_slash = -1;
+            for (int i = len - 1; i >= 0; i--) {
+                if (pathname[i] == '/') {
+                    last_slash = i;
+                    break;
+                }
+            }
+            if (last_slash == -1) return -2;
+            
+            char parent_path[256];
+            char file_name[256];
+            
+            if (last_slash == 0) {
+                parent_path[0] = '/';
+                parent_path[1] = '\0';
+            } else {
+                k_memcpy(parent_path, pathname, last_slash);
+                parent_path[last_slash] = '\0';
+            }
+            
+            k_strncpy(file_name, pathname + last_slash + 1, 255);
+            file_name[255] = '\0';
+            
+            vfs_node_t* parent = vfs_findnode(parent_path);
+            if (!parent) return -2;
+            
+            // 🛡️ CRITICAL: Mountpoint Resolution
+            // Если родитель является точкой монтирования (например, /tmp),
+            // мы должны телепортироваться в корень примонтированной ФС (tmpfs),
+            // иначе create сработает на узле Initrd!
+            if (parent->flags & FS_MOUNTPOINT) {
+                parent = parent->mountpoint_node;
+                if (!parent) return -2;
+            }
+            
+            if (!(parent->flags & FS_DIRECTORY)) return -13; // EACCES
+            if (!parent->create) return -13;                 // ENOSYS
+            
+            node = parent->create(parent, file_name);
+            if (!node) return -12; // ENOMEM
+        } else {
+            return -2; // ENOENT (файла нет и O_CREAT не указан)
+        }
+    }
+    
+    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) return -13;
+    if (node->open && node->open(node, flags) != 0) return -13;
     
     open_file_t* of = (open_file_t*)kmalloc(sizeof(open_file_t));
-    if (!of) return VFS_ENOMEM;
+    if (!of) return -12;
     
     of->node = node;
     of->offset = 0;
@@ -232,7 +286,52 @@ int sys_open(const char* pathname, uint32_t flags) {
     }
     
     kfree(of);
-    return VFS_ENOMEM;
+    return -12; // EMFILE (Too many open files)
+}
+
+// ✅ ДОБАВЛЕНО: Удаление файлов
+int sys_unlink(const char* pathname) {
+    if (!pathname) return -2;
+    
+    int len = k_strlen(pathname);
+    if (len == 0 || pathname[0] != '/') return -2;
+    
+    int last_slash = -1;
+    for (int i = len - 1; i >= 0; i--) {
+        if (pathname[i] == '/') {
+            last_slash = i;
+            break;
+        }
+    }
+    if (last_slash == -1) return -2;
+    
+    char parent_path[256];
+    char file_name[256];
+    
+    if (last_slash == 0) {
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+    } else {
+        k_memcpy(parent_path, pathname, last_slash);
+        parent_path[last_slash] = '\0';
+    }
+    
+    k_strncpy(file_name, pathname + last_slash + 1, 255);
+    file_name[255] = '\0';
+    
+    vfs_node_t* parent = vfs_findnode(parent_path);
+    if (!parent) return -2;
+    
+    // 🛡️ Mountpoint Resolution (как и в sys_open)
+    if (parent->flags & FS_MOUNTPOINT) {
+        parent = parent->mountpoint_node;
+        if (!parent) return -2;
+    }
+    
+    if (!(parent->flags & FS_DIRECTORY)) return -13;
+    if (!parent->unlink) return -13;
+    
+    return parent->unlink(parent, file_name);
 }
 
 int sys_close(int fd) {

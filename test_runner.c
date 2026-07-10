@@ -154,9 +154,9 @@ void handle_stress(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     if (k_strcmp(args[1], "spawn") == 0) {
         uint32_t count = k_atoi(args[2]);
         if (count == 0) count = 100;
-        if (count > 1000) {
+        if (count > 100000) {
             k_print("[STRESS] Limit is 1000 tasks to prevent kernel hang.\n");
-            count = 1000;
+            count = 100000;
         }
 
         k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);

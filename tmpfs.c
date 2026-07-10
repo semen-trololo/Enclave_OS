@@ -18,7 +18,8 @@ vfs_node_t* tmpfs_root = NULL;
 // ============================================================================
 
 static int tmpfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
-    tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)node->fs_data;
+    // ✅ ИСПРАВЛЕНО: fs_data -> private_data
+    tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)node->private_data;
     if (!fdata || !fdata->data) return 0;
 
     if (offset >= fdata->size) return 0;
@@ -29,7 +30,8 @@ static int tmpfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t*
 }
 
 static int tmpfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
-    tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)node->fs_data;
+    // ✅ ИСПРАВЛЕНО: fs_data -> private_data
+    tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)node->private_data;
     if (!fdata) return -1;
 
     uint32_t new_size = offset + size;
@@ -65,16 +67,16 @@ static vfs_node_t* tmpfs_create(vfs_node_t* parent, const char* name) {
     new_node->flags = FS_FILE;
     new_node->parent = parent;
 
-    // Добавляем в LCRS дерево (Left-Child Right-Sibling)
-    if (!parent->child) {
-        parent->child = new_node;
+    // ✅ ИСПРАВЛЕНО: child -> first_child, sibling -> next_sibling
+    if (!parent->first_child) {
+        parent->first_child = new_node;
     } else {
-        vfs_node_t* sibling = parent->child;
-        while (sibling->sibling) sibling = sibling->sibling;
-        sibling->sibling = new_node;
+        vfs_node_t* sibling = parent->first_child;
+        while (sibling->next_sibling) sibling = sibling->next_sibling;
+        sibling->next_sibling = new_node;
     }
 
-    // Создаем fs_data
+    // Создаем private_data
     tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)kmalloc(sizeof(tmpfs_file_data_t));
     if (!fdata) {
         kfree(new_node);
@@ -83,7 +85,8 @@ static vfs_node_t* tmpfs_create(vfs_node_t* parent, const char* name) {
     fdata->data = NULL;
     fdata->size = 0;
     fdata->capacity = 0;
-    new_node->fs_data = fdata;
+    // ✅ ИСПРАВЛЕНО: fs_data -> private_data
+    new_node->private_data = fdata;
 
     // Назначаем коллбэки
     new_node->read = tmpfs_read;
@@ -95,16 +98,19 @@ static vfs_node_t* tmpfs_create(vfs_node_t* parent, const char* name) {
 
 static int tmpfs_unlink(vfs_node_t* parent, const char* name) {
     vfs_node_t* prev = NULL;
-    vfs_node_t* curr = parent->child;
+    // ✅ ИСПРАВЛЕНО: child -> first_child
+    vfs_node_t* curr = parent->first_child;
 
     while (curr) {
         if (k_strcmp(curr->name, name) == 0) {
             // Удаляем из дерева
-            if (prev) prev->sibling = curr->sibling;
-            else parent->child = curr->sibling;
+            // ✅ ИСПРАВЛЕНО: sibling -> next_sibling
+            if (prev) prev->next_sibling = curr->next_sibling;
+            else parent->first_child = curr->next_sibling;
 
             // Освобождаем память (Тест на утечки Heap!)
-            tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)curr->fs_data;
+            // ✅ ИСПРАВЛЕНО: fs_data -> private_data
+            tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)curr->private_data;
             if (fdata) {
                 if (fdata->data) kfree(fdata->data);
                 kfree(fdata);
@@ -115,7 +121,8 @@ static int tmpfs_unlink(vfs_node_t* parent, const char* name) {
             return 0;
         }
         prev = curr;
-        curr = curr->sibling;
+        // ✅ ИСПРАВЛЕНО: sibling -> next_sibling
+        curr = curr->next_sibling;
     }
     return -2; // ENOENT
 }
@@ -134,18 +141,13 @@ void tmpfs_init(void) {
     tmpfs_root->create = tmpfs_create;
     tmpfs_root->unlink = tmpfs_unlink;
     
-    // Здесь нужно примонтировать tmpfs_root к корневой ноде VFS как "tmp"
-    // Если у тебя есть функция vfs_mount или ты вручную добавляешь в root->child:
-    extern vfs_node_t* vfs_root; // Или как у тебя называется корень VFS
+    // ✅ ИСПРАВЛЕНО: Используем стандартные функции из vfs.h
+    tmpfs_root->readdir = vfs_generic_readdir;
+    tmpfs_root->finddir = vfs_generic_finddir;
+    
+    // ✅ ИСПРАВЛЕНО: Используем vfs_add_child вместо прямого манипулирования деревом
     if (vfs_root) {
-        if (!vfs_root->child) {
-            vfs_root->child = tmpfs_root;
-        } else {
-            vfs_node_t* sib = vfs_root->child;
-            while(sib->sibling) sib = sib->sibling;
-            sib->sibling = tmpfs_root;
-        }
-        tmpfs_root->parent = vfs_root;
+        vfs_add_child(vfs_root, tmpfs_root);
     }
     
     serial_print("[TMPFS] Mounted at /tmp\n");

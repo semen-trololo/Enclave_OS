@@ -13,8 +13,7 @@
 #include "ata.h"
 
 #define CMD_BUFFER_SIZE 256
-#define MAX_ARGS 4
-#define MAX_ARG_LEN 64
+
 
 // 🛡️ ИСПРАВЛЕНО: Ограничиваем стресс-тест 64 МБ (16384 страницы).
 #define PMM_TEST_MAX_PAGES 16384 
