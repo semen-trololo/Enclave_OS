@@ -3,26 +3,27 @@
 #include "paging.h"
 #include "klib.h"
 #include "serial.h"
+#include "config.h" // ✅ SSOT
 
 // ============================================================================
-// КОНСТАНТЫ И КОНФИГУРАЦИЯ
+// КОНСТАНТЫ И КОНФИГУРАЦИЯ (SSOT)
 // ============================================================================
-#define HEAP_START 0xD0000000
-#define HEAP_SIZE  (32 * 1024 * 1024) // 32 MB Virtual Pool
-#define HEAP_PAGES (HEAP_SIZE / 4096)  // 8192 pages
+// Используем KERNEL_HEAP_VIRT и KERNEL_HEAP_SIZE из config.h
+#define HEAP_START KERNEL_HEAP_VIRT
+#define HEAP_SIZE  KERNEL_HEAP_SIZE
+#define HEAP_END   KERNEL_HEAP_END
+
+#define HEAP_PAGES (HEAP_SIZE / 4096)  
 
 // MAX_ORDER: 2^13 * 4KB = 32MB. 
-// Уровень 0 = 4KB, Уровень 13 = 32MB.
 #define MAX_ORDER 13   
-#define TREE_SIZE  16384 // 2^(13 + 1) узлов в неявном бинарном дереве
+#define TREE_SIZE  16384 // 2^(13 + 1) узлов
 
-// Статусы узлов дерева
-#define NODE_UNUSED 0 // Внутренний узел, слит с родителем
-#define NODE_FREE   1 // Блок свободен
-#define NODE_ALLOC  2 // Блок выделен
-#define NODE_SPLIT  3 // Блок разбит на близнецов
+#define NODE_UNUSED 0 
+#define NODE_FREE   1 
+#define NODE_ALLOC  2 
+#define NODE_SPLIT  3 
 
-// Заголовок блока (скрыт от пользователя)
 typedef struct {
     uint32_t size;
     uint32_t magic;
@@ -30,27 +31,43 @@ typedef struct {
 
 #define HEADER_MAGIC 0xDEADBEEF
 
-// Метаданные: неявное бинарное дерево (в .bss секции)
 static uint8_t tree[TREE_SIZE];
 
-// ============================================================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (O(1) Hardware Accelerated)
-// ============================================================================
+// [ДЕНЬ 10] HEAP ACCOUNTING
+static uint32_t heap_total_allocs = 0;
+static uint32_t heap_total_frees = 0;
 
-// Вычисляет глубину узла (0 для корня, 13 для листьев) через Count Leading Zeros
+// ============================================================================
+// IRQ SAFETY HELPERS (Защита критических секций от прерываний)
+// ============================================================================
+static inline uint32_t read_eflags(void) {
+    uint32_t flags;
+    __asm__ volatile("pushf ; pop %0" : "=r"(flags));
+    return flags;
+}
+
+static inline void load_eflags(uint32_t flags) {
+    __asm__ volatile("push %0 ; popf" : : "r"(flags));
+}
+
+static inline void disable_interrupts(void) {
+    __asm__ volatile("cli");
+}
+
+// ============================================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================================
 static inline int get_depth(int node) {
     if (node <= 0) return 0;
     return 31 - __builtin_clz(node);
 }
 
-// Рекурсивный поиск свободного блока (спуск по дереву)
 static int find_free(int node, int current_level, int target_level) {
     if (tree[node] == NODE_ALLOC) return -1;
     if (tree[node] == NODE_FREE) return node; 
     
     if (tree[node] == NODE_SPLIT) {
         if (current_level == target_level) return -1;
-        // Ищем в левом, затем в правом поддереве
         int left = find_free(node * 2, current_level - 1, target_level);
         if (left != -1) return left;
         return find_free(node * 2 + 1, current_level - 1, target_level);
@@ -64,27 +81,24 @@ static int find_free(int node, int current_level, int target_level) {
 void heap_init(void) {
     serial_print("[HEAP] Initializing Buddy System (Lazy Allocation mode)...\n");
     
-    // 🛡️ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Мы НЕ выделяем физические страницы здесь!
-    // Страницы будут выделяться аппаратно через Page Fault Handler (INT 14),
-    // когда ядро впервые попытается записать данные в выданный kmalloc адрес.
-    // Это экономит 32 МБ физической RAM на старте системы.
+    heap_total_allocs = 0;
+    heap_total_frees = 0;
     
     k_memset(tree, NODE_UNUSED, sizeof(tree));
-    tree[1] = NODE_FREE; // Корень (весь виртуальный пул 32 МБ) свободен
+    tree[1] = NODE_FREE; 
     
     serial_printf("[HEAP] Virtual pool ready: 0x%x - 0x%x (%u MB)\n", 
-                  HEAP_START, HEAP_START + HEAP_SIZE, HEAP_SIZE / (1024*1024));
+                  HEAP_START, HEAP_END, HEAP_SIZE / (1024*1024));
 }
 
 // ============================================================================
-// АЛЛОКАЦИЯ (kmalloc)
+// АЛЛОКАЦИЯ (kmalloc) - IRQ SAFE
 // ============================================================================
 void* kmalloc(size_t size) {
     if (size == 0 || size > HEAP_SIZE) return NULL;
     
     size_t req_size = size + sizeof(BlockHeader);
     
-    // 1. Находим минимальный уровень (размер блока), способный вместить запрос
     int target_level = 0;
     uint32_t block_size = 4096;
     while (block_size < req_size && target_level < MAX_ORDER) {
@@ -92,16 +106,18 @@ void* kmalloc(size_t size) {
         target_level++;
     }
     
-    if (block_size < req_size) return NULL; // Запрос больше всего Heap'а
+    if (block_size < req_size) return NULL; 
     
-    // 2. Ищем свободный узел
+    uint32_t flags = read_eflags();
+    disable_interrupts(); // 🛡️ Защита от Race Conditions
+
     int node = find_free(1, MAX_ORDER, target_level);
     if (node == -1) {
+        load_eflags(flags);
         serial_print("[HEAP] OOM: Buddy system full!\n");
         return NULL; 
     }
     
-    // 3. Спускаемся вниз, разделяя (split) блоки по пути
     int depth = get_depth(node);
     int curr_level = MAX_ORDER - depth;
     int curr = node;
@@ -110,19 +126,21 @@ void* kmalloc(size_t size) {
         tree[curr] = NODE_SPLIT;
         int left = curr * 2;
         int right = curr * 2 + 1;
-        tree[right] = NODE_FREE; // Правый близнец становится свободным
-        curr = left;             // Идем по левому пути
+        tree[right] = NODE_FREE; 
+        curr = left;             
         curr_level--;
     }
     tree[curr] = NODE_ALLOC;
     
-    // 4. Вычисляем виртуальный адрес по индексу узла
     int curr_depth = get_depth(curr);
     int block_index = curr - (1 << curr_depth);
     uint32_t offset = block_index * block_size;
     uint32_t virt_addr = HEAP_START + offset;
     
-    // 5. Пишем заголовок (Эта запись триггерит Page Fault -> Lazy Alloc физической страницы!)
+    heap_total_allocs++; // [ДЕНЬ 10] Accounting
+    load_eflags(flags); // Восстановление состояния прерываний
+    
+    // 🛡️ Lazy Write: Эта запись триггерит Page Fault -> VMM выделяет физ. страницу
     BlockHeader* header = (BlockHeader*)virt_addr;
     header->size = block_size;
     header->magic = HEADER_MAGIC;
@@ -131,23 +149,28 @@ void* kmalloc(size_t size) {
 }
 
 // ============================================================================
-// ОСВОБОЖДЕНИЕ (kfree)
+// ОСВОБОЖДЕНИЕ (kfree) - IRQ SAFE + BOUNDS CHECKING
 // ============================================================================
 void kfree(void* ptr) {
     if (!ptr) return;
     
-    // 1. Читаем заголовок
     BlockHeader* header = (BlockHeader*)((uint32_t)ptr - sizeof(BlockHeader));
+    uint32_t virt_addr = (uint32_t)header;
+    
+    // 🛡️ Bounds Checking: Защита от передачи невалидного указателя
+    if (virt_addr < HEAP_START || virt_addr >= HEAP_END) {
+        serial_printf("[HEAP] FATAL: kfree called with out-of-bounds pointer 0x%x\n", (uint32_t)ptr);
+        return;
+    }
+    
     if (header->magic != HEADER_MAGIC) {
         serial_printf("[HEAP] FATAL: Invalid magic in kfree! (Double free or corruption at 0x%x)\n", (uint32_t)ptr);
         return;
     }
     
     uint32_t block_size = header->size;
-    uint32_t virt_addr = (uint32_t)header;
     uint32_t offset = virt_addr - HEAP_START;
     
-    // 2. Вычисляем уровень и индекс узла в дереве
     int target_level = 0;
     uint32_t temp_size = 4096;
     while (temp_size < block_size) {
@@ -159,28 +182,42 @@ void kfree(void* ptr) {
     int block_index = offset / block_size;
     int curr = (1 << depth) + block_index;
     
-    // 3. Освобождаем узел
-    tree[curr] = NODE_FREE;
-    header->magic = 0; // Затираем магическое число для защиты от double-free
+    uint32_t flags = read_eflags();
+    disable_interrupts(); // 🛡️ Защита от Race Conditions
     
-    // 4. Каскадное слияние (merge) с близнецами (XOR Trick)
+    tree[curr] = NODE_FREE;
+    header->magic = 0; 
+    heap_total_frees++; // [ДЕНЬ 10] Accounting
+    
+    // Каскадное слияние (merge) с близнецами (XOR Trick)
     while (curr > 1) {
-        int buddy = curr ^ 1;      // Адрес близнеца через XOR
+        int buddy = curr ^ 1;      
         int parent = curr / 2;
         
         if (tree[buddy] == NODE_FREE) {
             tree[curr] = NODE_UNUSED;
             tree[buddy] = NODE_UNUSED;
-            tree[parent] = NODE_FREE; // Родитель становится свободным
-            curr = parent;            // Поднимаемся выше
+            tree[parent] = NODE_FREE; 
+            curr = parent;            
         } else {
-            break; // Близнец занят или разбит, слияние невозможно
+            break; 
         }
     }
+    
+    load_eflags(flags);
 }
 
 // ============================================================================
-// ДИАГНОСТИКА (Для Shell)
+// [ДЕНЬ 10] HEAP ACCOUNTING API
+// ============================================================================
+uint32_t heap_get_alloc_count(void) { return heap_total_allocs; }
+uint32_t heap_get_free_count(void) { return heap_total_frees; }
+int32_t heap_check_balance(void) { 
+    return (int32_t)(heap_total_allocs - heap_total_frees); 
+}
+
+// ============================================================================
+// ДИАГНОСТИКА
 // ============================================================================
 void heap_print_status(void) {
     uint32_t free_bytes = 0;
@@ -200,7 +237,6 @@ void heap_print_status(void) {
     uint32_t free_kb = free_bytes / 1024;
     uint32_t alloc_kb = alloc_bytes / 1024;
 
-    // Используем k_set_color (Strategy Pattern), а не vga_set_color!
     k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
     k_printf("\n--- [ Kernel Heap Status ] ---\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
@@ -237,7 +273,7 @@ void heap_run_tests(void) {
     kfree(p3);
     
     k_print("[HEAP TEST] 4. OOM protection... ");
-    void* p4 = kmalloc(40 * 1024 * 1024);  // 40 MB > 32 MB heap
+    void* p4 = kmalloc(40 * 1024 * 1024);  
     if (!p4) k_print("[OK]\n");
     else k_print("[FAIL]\n");
     
