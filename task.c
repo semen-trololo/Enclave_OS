@@ -7,6 +7,7 @@
 #include "isr.h"
 #include "vfs.h"
 #include "vma.h"
+#include "syscall.h"
 #include <stdbool.h>
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
@@ -15,24 +16,23 @@ task_t* current_task = 0;
 uint32_t next_pid = 1;
 static task_t* fpu_owner = 0;
 
-// 🆕 ГЛОБАЛЬНЫЙ REAPER: Задача, которую нужно "похоронить" после переключения контекста
-static task_t* task_to_reap = NULL;
-// 🛡️ ИСПРАВЛЕНИЕ: Заменяем одиночный указатель на очередь мертвых задач (Reaper Queue)
-// Это предотвращает потерю задач, если следующая задача умрет до выполнения зачистки.
+// ✅ ИСПРАВЛЕНО: Только Reaper Queue, убран task_to_reap
 static task_t* dead_tasks_head = NULL;
+
+// [ДЕНЬ 10] TASK ACCOUNTING
+static uint32_t task_count = 0;
+uint32_t task_get_count(void) { return task_count; }
+
 // ============================================================================
-// ТРАМПЛИН (Task Wrapper) — Dual-Mode Support
+// ТРАМПЛИН (Task Wrapper)
 // ============================================================================
 void task_entry_trampoline(void (*entry_point)(void), bool is_user_mode, uint32_t user_esp) {
-    __asm__ volatile("sti"); // Гарантированно включаем прерывания для новой задачи
+    __asm__ volatile("sti"); 
     
     if (is_user_mode) {
-        // User-mode задача: переходим в Ring 3 через enter_usermode
         extern void enter_usermode(uint32_t entry_point, uint32_t user_esp);
         enter_usermode((uint32_t)entry_point, user_esp);
-        // Недостижимо: enter_usermode делает iret и не возвращается
     } else {
-        // Kernel-mode задача: выполняем функцию напрямую в Ring 0
         entry_point();
         task_exit();
     }
@@ -51,7 +51,7 @@ static void device_not_available_handler(struct regs* r) {
     }
     in_nm_handler = 1;
 
-    __asm__ volatile("clts"); // Сбрасываем CR0.TS ДО fxsave
+    __asm__ volatile("clts"); 
 
     uint32_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
@@ -101,6 +101,7 @@ static void task_queue_add(task_t* task) {
 // ============================================================================
 void tasking_init(void) {
     serial_print("[TASK] Initializing Task Manager...\n");
+    task_count = 0;
     
     uint32_t main_pcb_phys = pmm_alloc_page();
     if (main_pcb_phys == 0) {
@@ -113,8 +114,9 @@ void tasking_init(void) {
     
     main_task_ptr->pid = next_pid++;
     main_task_ptr->state = TASK_RUNNING;
-    main_task_ptr->kernel_stack = 0; // Использует boot_stack
+    main_task_ptr->kernel_stack = 0; 
     
+    extern uint32_t* boot_page_directory;
     main_task_ptr->pdir_virt = boot_page_directory;
     main_task_ptr->cr3 = VIRT_TO_PHYS((uint32_t)boot_page_directory);
 
@@ -125,20 +127,21 @@ void tasking_init(void) {
     current_task = main_task_ptr;
     main_task_ptr->next = main_task_ptr;
     main_task_ptr->prev = main_task_ptr;
+    task_count++; // ✅ ИСПРАВЛЕНО
     
     task_init_fds(main_task_ptr);
     
     uint32_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~(1 << 2); // Clear EM
-    cr0 |= (1 << 1);  // Set MP
-    cr0 |= (1 << 5);  // Set NE
+    cr0 &= ~(1 << 2); 
+    cr0 |= (1 << 1);  
+    cr0 |= (1 << 5);  
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
 
     uint32_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1 << 9);  // OSFXSR
-    cr4 |= (1 << 10); // OSXMMEXCPT
+    cr4 |= (1 << 9);  
+    cr4 |= (1 << 10); 
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
     
     isr_register_handler(7, device_not_available_handler);
@@ -148,10 +151,10 @@ void tasking_init(void) {
 }
 
 // ============================================================================
-// СОЗДАНИЕ НОВОЙ ЗАДАЧИ (Dual-Mode: Kernel/User)
+// СОЗДАНИЕ НОВОЙ ЗАДАЧИ (С поддержкой готового Address Space)
 // ============================================================================
 task_t* task_create(const char* name, void (*entry_point)(void), 
-                    bool is_user_mode, uint32_t user_esp) {
+                    bool is_user_mode, uint32_t user_esp, uint32_t* custom_pdir) {
     uint32_t stack_phys = pmm_alloc_page();
     if (stack_phys == 0) return 0;
     uint32_t pcb_phys = pmm_alloc_page(); 
@@ -162,35 +165,44 @@ task_t* task_create(const char* name, void (*entry_point)(void),
 
     task_t* new_task = (task_t*)PHYS_TO_VIRT(pcb_phys);
     k_memset(new_task, 0, sizeof(task_t));
-    new_task->vma_head = NULL; // Инициализация списка VMA
+    new_task->vma_head = NULL; 
 
     new_task->pid = next_pid++;
     new_task->state = TASK_READY;
     new_task->kernel_stack = stack_phys;
     
-    new_task->pdir_virt = vmm_create_address_space();
-    if (!new_task->pdir_virt) {
-        serial_print("[TASK] OOM: Failed to create Address Space!\n");
-        pmm_free_page(stack_phys);
-        pmm_free_page(pcb_phys);
-        return 0;
+    // ✅ ИСПРАВЛЕНО: Используем переданный custom_pdir или создаем новый
+    if (is_user_mode) {
+        if (custom_pdir) {
+            new_task->pdir_virt = custom_pdir;
+            new_task->cr3 = VIRT_TO_PHYS((uint32_t)custom_pdir);
+        } else {
+            new_task->pdir_virt = vmm_create_address_space();
+            if (!new_task->pdir_virt) {
+                serial_print("[TASK] OOM: Failed to create Address Space!\n");
+                pmm_free_page(stack_phys);
+                pmm_free_page(pcb_phys);
+                return 0;
+            }
+            new_task->cr3 = VIRT_TO_PHYS((uint32_t)new_task->pdir_virt);
+        }
+    } else {
+        extern uint32_t* boot_page_directory;
+        new_task->pdir_virt = boot_page_directory;
+        new_task->cr3 = VIRT_TO_PHYS((uint32_t)boot_page_directory);
     }
-    new_task->cr3 = VIRT_TO_PHYS((uint32_t)new_task->pdir_virt);
 
     int i = 0; while(name[i] && i < 31) { new_task->name[i] = name[i]; i++; }
     new_task->name[i] = '\0';
 
-    // 🔥 STACK FORGING (Dual-Mode: передаем 3 аргумента в trampoline)
     uint32_t* stack_top = (uint32_t*)PHYS_TO_VIRT(stack_phys + 4096);
     
-    // Аргументы для task_entry_trampoline (CDECL: справа налево)
-    *(--stack_top) = user_esp;                      // [ESP+12] Arg 3: user_esp
-    *(--stack_top) = (uint32_t)is_user_mode;        // [ESP+8]  Arg 2: is_user_mode
-    *(--stack_top) = (uint32_t)entry_point;         // [ESP+4]  Arg 1: entry_point
-    *(--stack_top) = (uint32_t)task_exit;           // [ESP+0]  Fake Return Address (если trampoline вернется)
+    *(--stack_top) = user_esp;                      
+    *(--stack_top) = (uint32_t)is_user_mode;        
+    *(--stack_top) = (uint32_t)entry_point;         
+    *(--stack_top) = (uint32_t)task_exit;           
     
-    // Callee-saved регистры (для context_switch)
-    *(--stack_top) = (uint32_t)task_entry_trampoline; // [ESP-4] EIP для первого ret
+    *(--stack_top) = (uint32_t)task_entry_trampoline; 
     *(--stack_top) = 0; // EBX
     *(--stack_top) = 0; // ESI
     *(--stack_top) = 0; // EDI
@@ -201,7 +213,11 @@ task_t* task_create(const char* name, void (*entry_point)(void),
     for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) new_task->fd_table[j] = 0;
     task_init_fds(new_task); 
     
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
     task_queue_add(new_task);
+    task_count++; // ✅ ИСПРАВЛЕНО
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 
     serial_printf("[TASK] Created PID %d: %s (mode: %s)\n", 
                   new_task->pid, name, is_user_mode ? "USER" : "KERNEL");
@@ -236,22 +252,18 @@ void schedule(void) {
         tss_set_kernel_stack(0x10, PHYS_TO_VIRT(new_task->kernel_stack + 4096));
     }
 
-    // Убрано: if (old_task->state == TASK_DEAD) task_to_reap = old_task;
-    // Теперь мертвые задачи попадают в dead_tasks_head через task_exit()
-
     switch_context(&old_task->esp, new_task->esp, new_task->cr3);
     
     // --- ЗДЕСЬ ПРОДОЛЖАЕТ ВЫПОЛНЕНИЕ УЖЕ НОВАЯ ЗАДАЧА ---
 
     // 🛡️ REAPER MECHANISM: Зачистка ВСЕХ задач из очереди мертвых
     if (dead_tasks_head != NULL) {
-        // Запрещаем прерывания на время зачистки, чтобы не нарушить структуру VMM/PMM
         uint32_t reap_flags;
         __asm__ volatile("pushf; pop %0; cli" : "=r"(reap_flags));
         
         while (dead_tasks_head != NULL) {
             task_t* dead = dead_tasks_head;
-            dead_tasks_head = dead->next; // Переходим к следующему мертвецу
+            dead_tasks_head = dead->next; 
         
             serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
         
@@ -266,7 +278,7 @@ void schedule(void) {
             }
             pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
             
-            task_count--; // [ДЕНЬ 10] Accounting
+            task_count--;
         }
         
         __asm__ volatile("push %0; popf" : : "r"(reap_flags));
@@ -292,7 +304,6 @@ void task_exit(void) {
 
     current_task->state = TASK_DEAD;
     
-    // 🛡️ IRQ SAFETY: Защита связного списка от прерываний
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
     
@@ -303,12 +314,47 @@ void task_exit(void) {
         current_task = 0; 
     }
     
-    // 🛡️ REAPER QUEUE: Добавляем задачу в список мертвых (переиспользуем поле next)
     current_task->next = dead_tasks_head;
     dead_tasks_head = current_task;
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
+    schedule();
+    while(1) __asm__ volatile("cli; hlt"); 
+}
+
+// ============================================================================
+// [ДЕНЬ 10] ПРИНУДИТЕЛЬНОЕ УБИЙСТВО (Page Fault / OOM Killer)
+// ============================================================================
+void task_kill_current(const char* reason) {
+    if (!current_task || current_task->pid == 0) {
+        serial_printf("[KILL] FATAL: Attempt to kill invalid task: %s\n", reason);
+        while(1) __asm__ volatile("cli; hlt");
+    }
+    
+    serial_printf("[KILL] PID %d (%s) killed: %s\n", current_task->pid, current_task->name, reason);
+    
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        if (current_task->fd_table[i] != 0) {
+            sys_close(i);
+            current_task->fd_table[i] = 0;
+        }
+    }
+    
+    current_task->state = TASK_DEAD;
+    
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    
+    if (current_task->next != current_task) {
+        current_task->prev->next = current_task->next;
+        current_task->next->prev = current_task->prev;
+    } else {
+        current_task = 0; 
+    }
+    
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    
     schedule();
     while(1) __asm__ volatile("cli; hlt"); 
 }
@@ -352,7 +398,6 @@ void task_print_list(void) {
         k_set_color(state_color, VGA_COLOR_BLACK);
         k_print(state_str);
         
-        // Выравнивание пробелами (так как k_printf не поддерживает %s с шириной)
         int len = 0; while(state_str[len]) len++;
         for (int i = 0; i < 7 - len; i++) k_print(" ");
         
