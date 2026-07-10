@@ -238,6 +238,7 @@ void test_init(void) {
     run_elf_test("/bin/test_write_text.elf", "W^X Violation (Write to .text)");
     run_elf_test("/bin/test_stack_overflow.elf", "Stack Guard Page");
     run_elf_test("/bin/test_oom.elf", "OOM Protection");
+    run_elf_test("/bin/test_vfs_stress.elf", "VFS tmpfs 1000 files + CRC32");
 
     k_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     k_print("\n========================================\n");
