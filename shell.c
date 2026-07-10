@@ -17,7 +17,6 @@
 #define MAX_ARG_LEN 64
 
 // 🛡️ ИСПРАВЛЕНО: Ограничиваем стресс-тест 64 МБ (16384 страницы).
-// Это спасает .bss секцию ядра от раздувания на 4 МБ (как было бы с PMM_MAX_PAGES).
 #define PMM_TEST_MAX_PAGES 16384 
 static uint32_t test_allocations[PMM_TEST_MAX_PAGES];
 
@@ -49,7 +48,7 @@ static int parse_args(char* buffer, char args[MAX_ARGS][MAX_ARG_LEN]) {
 // ============================================================================
 static void print_help(void) {
     k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
-    k_print("=== Available Commands ===\n);
+    k_print("=== Available Commands ===\n");
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     k_print("  [ General ]\n");
@@ -88,6 +87,12 @@ static void print_help(void) {
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  font test        - Render ASCII and Cyrillic test table\n");
     
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_print("  [ Testing (Day 10) ]\n");
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    k_print("  run_tests        - Run full ELF test suite\n");
+    k_print("  stress spawn <N> - Mass spawn N kernel tasks\n");
+
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     k_print("  [ System ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
@@ -592,7 +597,6 @@ static void handle_ata(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     }
 }
 
-
 // ============================================================================
 // ДИСПЕТЧЕР КОМАНД
 // ============================================================================
@@ -651,6 +655,14 @@ static void execute_command(char* buffer) {
     }
     else if (k_strcmp(args[0], "cat") == 0) {
         handle_cat(argc, args);
+    }
+    
+    // [ Testing (Day 10) ]
+    else if (k_strcmp(args[0], "run_tests") == 0) {
+        test_init();
+    }
+    else if (k_strcmp(args[0], "stress") == 0) {
+        handle_stress(argc, args);
     }
     
     // [ Unknown ]
