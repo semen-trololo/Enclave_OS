@@ -6,9 +6,7 @@
 #include "isr.h"
 #include "config.h"
 #include "vma.h"
-
-// Forward declaration для функции убийства процесса
-void task_kill_current(const char* reason);
+#include "task.h"
 
 // ============================================================================
 // ВНЕШНИЕ СИМБОЛЫ (Boot structures из boot.asm)
@@ -78,7 +76,7 @@ void page_fault_handler(struct regs* r) {
                 k_memset((void*)PHYS_TO_VIRT(phys), 0, 4096); 
                 uint32_t virt_page = faulting_address & 0xFFFFF000;
                 
-                // 🛡️ БЕЗОПАСНОСТЬ: Убран PAGE_USER для Kernel Heap!
+                // БЕЗОПАСНОСТЬ: Убран PAGE_USER для Kernel Heap!
                 vmm_map_page(virt_page, phys, PAGE_PRESENT | PAGE_WRITE);
                 
                 serial_printf("[PF] Lazy alloc: Virt 0x%x -> Phys 0x%x\n", virt_page, phys);
@@ -149,13 +147,11 @@ void page_fault_handler(struct regs* r) {
 // ИНИЦИАЛИЗАЦИЯ VMM (Bootstrap Sequence)
 // ============================================================================
 void paging_init(void) {
-    serial_print("[VMM] Patching PDEs for Ring 3 access...\n");
-    for (uint32_t i = 0; i < 1024; i++) {
-        if (boot_page_directory[i] & PAGE_PRESENT) {
-            boot_page_directory[i] |= PAGE_USER;
-        }
-    }
-
+    // ✅ ИСПРАВЛЕНО: Убран катастрофический патчинг boot_page_directory с PAGE_USER
+    // Этот цикл добавлял PAGE_USER ко ВСЕМ PDE, включая Kernel Space (индексы 768-1023),
+    // что позволяло Ring 3 процессам читать/писать во всю память ядра.
+    // User Space PDE создаются динамически в vmm_map_page_in_pd с правильными флагами.
+    
     serial_print("[VMM] Reserving kernel structures in PMM...\n");
     pmm_reserve_region(0x00100000, 0x01000000); // Conservative 1MB-16MB block
     
@@ -174,7 +170,7 @@ void paging_init(void) {
     uint32_t total_ram_pages = (512 * 1024 * 1024) / 4096; 
     for (uint32_t i = 0; i < total_ram_pages; i++) {
         uint32_t phys = i * 4096;
-        uint32_t virt = phys + KERNEL_VIRT_BASE;
+        uint32_t virt = phys + KERNEL_SPACE_START;
         vmm_map_page(virt, phys, PAGE_PRESENT | PAGE_WRITE); // Kernel space - no PAGE_USER
     }
     
@@ -202,8 +198,7 @@ void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_
 
     uint32_t pde = pd_virt[dir_index];
 
-    // 🛡️ БЕЗОПАСНОСТЬ: Проверка на 4MB страницы (PSE)
-    // Если PDE уже мапит 4MB блок, создание Page Table внутри него приведет к коррупции памяти.
+    // БЕЗОПАСНОСТЬ: Проверка на 4MB страницы (PSE)
     if (pde & PAGE_PS) {
         serial_print("[VMM] FATAL: 4MB Page detected in PDE!\n");
         while(1) __asm__("cli; hlt"); 
@@ -254,11 +249,10 @@ void vmm_unmap_page_in_pd(uint32_t* pd_virt, uint32_t virt) {
         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     }
     
-    // 💡 TODO (Day 12 Hardening): PT Leak Protection
+    // TODO (Day 12 Hardening): PT Leak Protection
     // Проверить, стала ли вся Page Table пустой (все 1024 PTE == 0).
     // Если да, освободить саму страницу Page Table через pmm_free_page(pt_phys),
-    // и обнулить PDE. Иначе при массовом создании/убийстве процессов мы будем 
-    // терять по 4KB памяти на каждую "опустевшую" Page Table.
+    // и обнулить PDE.
 }
 
 // ============================================================================
@@ -272,7 +266,6 @@ uint32_t* vmm_create_address_space(void) {
     k_memset(virt_pd, 0, 4096);
     
     // Клонирование Kernel Space (индексы 768-1023)
-    // Это обеспечивает Shared Kernel Space — все процессы видят одно ядро.
     for (int i = 768; i < 1024; i++) {
         virt_pd[i] = boot_page_directory[i];
     }
@@ -300,8 +293,7 @@ void vmm_destroy_address_space(uint32_t* pdir_virt) {
             uint32_t pt_phys = pdir_virt[i] & 0xFFFFF000;
             uint32_t* pt_virt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
             
-            // 🛡️ CRITICAL: Освобождаем сами страницы данных (PTE)
-            // Без этого система быстро упадет в OOM из-за утечки физической памяти.
+            // CRITICAL: Освобождаем сами страницы данных (PTE)
             for (uint32_t j = 0; j < 1024; j++) {
                 if (pt_virt[j] & PAGE_PRESENT) {
                     uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
@@ -325,9 +317,9 @@ void task_kill_current(const char* reason) {
     serial_printf("[KILL] PID %d (%s) terminated: %s\n", 
                   current_task->pid, current_task->name, reason);
     
-    // Вызываем стандартный механизм завершения.
-    // task_exit() закроет FD, освободит FPU, пометит задачу как DEAD 
-    // и вызовет schedule(), который переключит контекст.
-    // Возврата в page_fault_handler не будет.
+    // Включаем прерывания перед вызовом task_exit
+    // task_exit закрывает FD через sys_close, который может ожидать IRQ
+    __asm__ volatile("sti");
+    
     task_exit();
 }
