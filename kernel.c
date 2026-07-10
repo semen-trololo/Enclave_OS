@@ -38,46 +38,7 @@ extern framebuffer_info_t fb_params;
 extern uint32_t multiboot_info_ptr;
 extern uint32_t multiboot_magic_val;
 extern uint8_t stack_top;
-extern void enter_usermode(uint32_t user_esp);
-
-// ==========================================
-// ТЕСТОВЫЕ ПОТОКИ (Day 7)
-// ==========================================
-static void thread_a(void) {
-    while(1) {
-        // Busy wait для нагрузки планировщика
-        for(volatile int i = 0; i < 10000000; i++);
-    }
-}
-
-static void thread_b(void) {
-    while(1) {
-        for(volatile int i = 0; i < 10000000; i++);
-    }
-}
-
-static void thread_math(void) {
-    while(1) {
-        double a = 3.14159;
-        double b = 2.71828;
-        double result;
-        
-        // Принудительное использование x87 FPU. 
-        // Триггерит #NM (INT 7) для проверки Lazy FPU Switching.
-        __asm__ volatile (
-            "fldl %1\n\t"   
-            "fldl %2\n\t"   
-            "faddp\n\t"     
-            "fstpl %0\n\t"  
-            : "=m"(result)
-            : "m"(a), "m"(b)
-        );
-        
-        //serial_printf("[TASK: MATH] FPU computed: %d (approx)\n", (int)result);
-        for(volatile int i = 0; i < 10000000; i++);
-        task_yield();
-    }
-}
+extern void enter_usermode(uint32_t entry_point, uint32_t user_esp);
 
 // ==========================================
 // ФАЗЫ ИНИЦИАЛИЗАЦИИ
@@ -250,11 +211,7 @@ void kernel_main(void) {
     }
     
     // 5. Запуск пользовательских задач
-    serial_print("[TASK] Spawning background tasks...\n");
-    task_create("Task_A", thread_a, false, 0);
-    task_create("Task_B", thread_b, false, 0);
-    task_create("Math_Task", thread_math, false, 0);
-    serial_print("[TASK] Background tasks queued.\n");
+    // task_create("Task_A", thread_a, false, 0, NULL);
 
     // 6. Передача управления CLI
     serial_print("[BOOT] Handover to Shell. Have fun! ;)\n\n");
