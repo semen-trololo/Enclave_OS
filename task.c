@@ -17,7 +17,9 @@ static task_t* fpu_owner = 0;
 
 // 🆕 ГЛОБАЛЬНЫЙ REAPER: Задача, которую нужно "похоронить" после переключения контекста
 static task_t* task_to_reap = NULL;
-
+// 🛡️ ИСПРАВЛЕНИЕ: Заменяем одиночный указатель на очередь мертвых задач (Reaper Queue)
+// Это предотвращает потерю задач, если следующая задача умрет до выполнения зачистки.
+static task_t* dead_tasks_head = NULL;
 // ============================================================================
 // ТРАМПЛИН (Task Wrapper) — Dual-Mode Support
 // ============================================================================
@@ -207,10 +209,9 @@ task_t* task_create(const char* name, void (*entry_point)(void),
 }
 
 // ============================================================================
-// ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IRQ SAFE)
+// ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER QUEUE + IRQ SAFE)
 // ============================================================================
 void schedule(void) {
-    // 🛡️ ЗАЩИТА ОТ RACE CONDITION: Сохраняем EFLAGS и отключаем прерывания
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
 
@@ -231,48 +232,53 @@ void schedule(void) {
     new_task->state = TASK_RUNNING;
     current_task = new_task;
 
-    // Обновление TSS ESP0 (для прерываний из Ring 3)
     if (new_task->kernel_stack != 0) {
         tss_set_kernel_stack(0x10, PHYS_TO_VIRT(new_task->kernel_stack + 4096));
     }
 
-    // Если предыдущая задача умерла, передаем её "следующему" для зачистки
-    if (old_task->state == TASK_DEAD) {
-        task_to_reap = old_task;
-    }
+    // Убрано: if (old_task->state == TASK_DEAD) task_to_reap = old_task;
+    // Теперь мертвые задачи попадают в dead_tasks_head через task_exit()
 
-    // ТЕЛЕПОРТАЦИЯ
     switch_context(&old_task->esp, new_task->esp, new_task->cr3);
     
     // --- ЗДЕСЬ ПРОДОЛЖАЕТ ВЫПОЛНЕНИЕ УЖЕ НОВАЯ ЗАДАЧА ---
 
-    // 🆕 REAPER MECHANISM: Зачистка памяти DEAD задачи
-    if (task_to_reap) {
-        task_t* dead = task_to_reap;
-        task_to_reap = NULL;
-    
-        serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
-    
-        // 🆕 Освобождаем список VMA
-        vma_destroy_all(dead);
-    
-        if (dead->pdir_virt && dead->pdir_virt != boot_page_directory) {
-            vmm_destroy_address_space(dead->pdir_virt);
+    // 🛡️ REAPER MECHANISM: Зачистка ВСЕХ задач из очереди мертвых
+    if (dead_tasks_head != NULL) {
+        // Запрещаем прерывания на время зачистки, чтобы не нарушить структуру VMM/PMM
+        uint32_t reap_flags;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(reap_flags));
+        
+        while (dead_tasks_head != NULL) {
+            task_t* dead = dead_tasks_head;
+            dead_tasks_head = dead->next; // Переходим к следующему мертвецу
+        
+            serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
+        
+            vma_destroy_all(dead);
+        
+            extern uint32_t* boot_page_directory;
+            if (dead->pdir_virt && dead->pdir_virt != boot_page_directory) {
+                vmm_destroy_address_space(dead->pdir_virt);
+            }
+            if (dead->kernel_stack != 0) {
+                pmm_free_page(dead->kernel_stack);
+            }
+            pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
+            
+            task_count--; // [ДЕНЬ 10] Accounting
         }
-        if (dead->kernel_stack != 0) {
-            pmm_free_page(dead->kernel_stack);
-        }
-        pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
+        
+        __asm__ volatile("push %0; popf" : : "r"(reap_flags));
     }
 
-    // Восстанавливаем EFLAGS (включаем прерывания, если они были включены)
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
 
 void task_yield(void) { schedule(); }
 
 // ============================================================================
-// ЗАВЕРШЕНИЕ ЗАДАЧИ
+// ЗАВЕРШЕНИЕ ЗАДАЧИ (Normal Exit)
 // ============================================================================
 void task_exit(void) {
     fpu_release_ownership(current_task);
@@ -286,12 +292,22 @@ void task_exit(void) {
 
     current_task->state = TASK_DEAD;
     
+    // 🛡️ IRQ SAFETY: Защита связного списка от прерываний
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    
     if (current_task->next != current_task) {
         current_task->prev->next = current_task->next;
         current_task->next->prev = current_task->prev;
     } else {
         current_task = 0; 
     }
+    
+    // 🛡️ REAPER QUEUE: Добавляем задачу в список мертвых (переиспользуем поле next)
+    current_task->next = dead_tasks_head;
+    dead_tasks_head = current_task;
+    
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 
     schedule();
     while(1) __asm__ volatile("cli; hlt"); 
