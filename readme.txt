@@ -53,7 +53,8 @@ project_root/
 │   ├── config.h              # Single Source of Truth для всех границ памяти
 │   ├── ata.h                 # ATA PIO Driver & MBR Parser (Day 8.2)
 │   └── univga_font.h         # PSF1 шрифт с кириллицей
-│
+│    -- elf.h                 # Load ELF
+
 ├── boot.asm                  # Multiboot, VBE, Higher Half Mapping
 ├── linker.ld                 # Карта памяти (LMA/VMA)
 ├── kernel.c                  # Точка входа (kernel_main), Bootstrap
@@ -75,6 +76,7 @@ project_root/
 ├── ata.c                     # ATA PIO Driver & MBR Parser (Day 8.2)
 ├── klib.c, shell.c           # Утилиты и CLI
 ├── Makefile                  # Автоматизация сборки
+ __ elf.c                     # Load ELF
 └── .gitignore
 
 3. СТРУКТУРА ФАЙЛОВ И СИСТЕМ (Глубокое погружение)
