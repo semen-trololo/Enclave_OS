@@ -49,7 +49,7 @@ static int parse_args(char* buffer, char args[MAX_ARGS][MAX_ARG_LEN]) {
 // ============================================================================
 static void print_help(void) {
     k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
-    k_print("\n=== Available Commands ===\n\n");
+    k_print("=== Available Commands ===\n);
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     k_print("  [ General ]\n");
@@ -60,13 +60,13 @@ static void print_help(void) {
     k_print("  ps               - List running processes\n");
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    k_print("\n  [ File System (VFS) ]\n");
+    k_print("  [ File System (VFS) ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  ls [path]        - List directory contents\n");
     k_print("  cat <path>       - Print file contents\n");
 
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    k_print("\n  [ Storage (ATA) ]\n");
+    k_print("  [ Storage (ATA) ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  ata info         - Show ATA drive information (IDENTIFY)\n");
     k_print("  ata part         - Scan MBR and list partitions\n");
@@ -74,7 +74,7 @@ static void print_help(void) {
     k_print("  ata test         - Run ATA read/write stress test\n");
 
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    k_print("\n  [ Memory Management ]\n");
+    k_print("  [ Memory Management ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  memmap           - Show E820 physical memory map\n");
     k_print("  pmm status       - Show physical memory usage\n");
@@ -84,12 +84,12 @@ static void print_help(void) {
     k_print("  heap <cmd>       - Heap operations (status|alloc|free|test)\n");
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    k_print("\n  [ Graphics & Fonts ]\n");
+    k_print("  [ Graphics & Fonts ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  font test        - Render ASCII and Cyrillic test table\n");
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    k_print("\n  [ System ]\n");
+    k_print("  [ System ]\n");
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_print("  syscall          - Test INT 0x80 (sys_write)\n");
     k_print("\n");
