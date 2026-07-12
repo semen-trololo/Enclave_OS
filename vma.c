@@ -4,6 +4,7 @@
 #include "klib.h"
 #include "serial.h"
 #include <stdbool.h>
+#include "kerrno.h"
 
 bool vma_intersects(task_t* task, uint32_t start, uint32_t end, vma_node_t* ignore_vma) {
     if (!task) return false;
@@ -52,7 +53,7 @@ uint32_t vma_find_free_area(task_t* task, uint32_t size) {
     }
     
     // Проверяем, влезет ли область после последней VMA
-    if (current_addr + size <= USER_MMAP_START + USER_MMAP_MAX_SIZE) {
+    if (current_addr + size <= (uint32_t)USER_MMAP_START + (uint32_t)USER_MMAP_MAX_SIZE) {
         return current_addr;
     }
     
@@ -207,4 +208,20 @@ void vma_destroy_all(task_t* task) {
     }
 
     task->vma_head = NULL;
+}
+int vma_clone(task_t* child_task, task_t* parent_task) {
+    child_task->vma_head = NULL;
+    
+    vma_node_t* current = parent_task->vma_head;
+    while (current) {
+        int ret = vma_add(child_task, current->start, current->end, current->flags);
+        if (ret < 0) {
+            // OOM - откатываем все созданные VMA
+            vma_destroy_all(child_task);
+            return -ENOMEM;
+        }
+        current = current->next;
+    }
+    
+    return 0;
 }

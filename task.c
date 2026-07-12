@@ -20,6 +20,7 @@ static task_t* fpu_owner = 0;
 static task_t* dead_tasks_head = NULL;
 
 static uint32_t task_count = 0;
+task_t* init_task = 0; // [ДЕНЬ 14] Init Task (PID 1)
 uint32_t task_get_count(void) { return task_count; }
 
 // ============================================================================
@@ -124,7 +125,16 @@ void tasking_init(void) {
     current_task = main_task_ptr;
     main_task_ptr->next = main_task_ptr;
     main_task_ptr->prev = main_task_ptr;
-    main_task_ptr->reaper_next = NULL;
+    main_task_ptr->reaper_next = NULL;    // [ДЕНЬ 14] Инициализируем поля Process Tree для main_task
+    main_task_ptr->parent = NULL;
+    main_task_ptr->children = NULL;
+    main_task_ptr->next_sibling = NULL;
+    main_task_ptr->exit_code = 0;
+    main_task_ptr->orphan_on_exit = 1; // Unix-style по умолчанию
+    main_task_ptr->monitor_children = 0;
+    
+    init_task = main_task_ptr; // main_task становится Init Task (PID 1)
+
     task_count++;
     
     task_init_fds(main_task_ptr);
@@ -214,7 +224,19 @@ task_t* task_create(const char* name, void (*entry_point)(void),
 
     for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) new_task->fd_table[j] = 0;
     task_init_fds(new_task); 
+        // [ДЕНЬ 14] Инициализируем поля Process Tree
+    new_task->parent = current_task; // Родитель = текущий процесс
+    new_task->children = NULL;
+    new_task->next_sibling = NULL;
+    new_task->exit_code = 0;
+    new_task->orphan_on_exit = 1; // Unix-style по умолчанию
+    new_task->monitor_children = 0;
     
+    // Добавляем нового ребенка в список детей родителя
+    if (current_task) {
+        new_task->next_sibling = current_task->children;
+        current_task->children = new_task;
+    }
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
     task_queue_add(new_task);
@@ -299,27 +321,96 @@ void task_yield(void) { schedule(); }
 void task_exit(void) {
     fpu_release_ownership(current_task);
     
+    // Закрываем все файловые дескрипторы
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
             sys_close(i); 
             current_task->fd_table[i] = 0; 
         }
     }
-
-    current_task->state = TASK_DEAD;
+    
+    // [ДЕНЬ 14] Process Tree: Orphan Adoption или Linked Processes
+    if (current_task->orphan_on_exit) {
+        // Unix-style: усыновляем всех детей Init Task
+        while (current_task->children != NULL) {
+            task_t* child = current_task->children;
+            current_task->children = child->next_sibling;
+            
+            child->parent = init_task;
+            child->next_sibling = init_task->children;
+            init_task->children = child;
+            
+            serial_printf("[TASK] PID %d adopted by Init Task (PID 1)\n", child->pid);
+        }
+    } else if (current_task->monitor_children) {
+        // Erlang-style: убиваем всех детей (каскадное падение)
+        task_t* child = current_task->children;
+        while (child != NULL) {
+            task_t* next = child->next_sibling;
+            if (child->state != TASK_ZOMBIE && child->state != TASK_DEAD) {
+                serial_printf("[TASK] Killing child PID %d (Supervisor Tree)\n", child->pid);
+                // Принудительно убиваем ребенка
+                child->state = TASK_ZOMBIE;
+                child->exit_code = -1;
+                
+                // Удаляем из Run Queue
+                if (child->next != child) {
+                    child->prev->next = child->next;
+                    child->next->prev = child->prev;
+                }
+                
+                // Добавляем в Reaper Queue
+                child->reaper_next = dead_tasks_head;
+                dead_tasks_head = child;
+            }
+            child = next;
+        }
+        current_task->children = NULL;
+    }
+    
+    // [ДЕНЬ 14] Удаляем себя из списка детей родителя
+    if (current_task->parent && current_task->parent->children == current_task) {
+        current_task->parent->children = current_task->next_sibling;
+    } else if (current_task->parent) {
+        task_t* sibling = current_task->parent->children;
+        while (sibling && sibling->next_sibling != current_task) {
+            sibling = sibling->next_sibling;
+        }
+        if (sibling) {
+            sibling->next_sibling = current_task->next_sibling;
+        }
+    }
+    current_task->next_sibling = NULL;
+    
+    // [ДЕНЬ 14] Переходим в Zombie state (память освобождена, PCB жив)
+    current_task->state = TASK_ZOMBIE;
+    
+    // [ДЕНЬ 14] Будим родителя, если он спит в waitpid
+    if (current_task->parent && current_task->parent->state == TASK_SLEEPING) {
+        current_task->parent->state = TASK_READY;
+        serial_printf("[TASK] Waking up parent PID %d\n", current_task->parent->pid);
+    }
+    
+    // Освобождаем User Space память (VMA, Page Tables)
+    vma_destroy_all(current_task);
+    if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
+        vmm_destroy_address_space(current_task->pdir_virt);
+        current_task->pdir_virt = NULL;
+    }
     
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
     
     task_t* dead_task = current_task; 
 
+    // Удаляем из Run Queue
     if (dead_task->next != dead_task) {
         dead_task->prev->next = dead_task->next;
         dead_task->next->prev = dead_task->prev;
     }
     
-    dead_task->reaper_next = dead_tasks_head; 
-    dead_tasks_head = dead_task;       
+    // НЕ добавляем в Reaper Queue - Zombie ждет waitpid!
+    // Reaper Queue будет использован только после waitpid
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
@@ -368,7 +459,173 @@ void task_kill_current(const char* reason) {
     schedule();
     while(1) __asm__ volatile("cli; hlt"); 
 }
+// ============================================================================
+// [ДЕНЬ 14] TASK FORK (Copy-on-Write)
+// ============================================================================
+int task_fork(struct regs* r) {
+    uint32_t stack_size = 16384;
+    uint32_t stack_virt = (uint32_t)kmalloc(stack_size);
+    if (stack_virt == 0) return -ENOMEM;
+    
+    uint32_t pcb_phys = pmm_alloc_page();
+    if (pcb_phys == 0) {
+        kfree((void*)stack_virt);
+        return -ENOMEM;
+    }
+    
+    task_t* child = (task_t*)PHYS_TO_VIRT(pcb_phys);
+    k_memset(child, 0, sizeof(task_t));
+    
+    child->pid = next_pid++;
+    child->state = TASK_READY;
+    child->kernel_stack_virt = stack_virt;
+    child->reaper_next = NULL;
+    
+    child->pdir_virt = vmm_clone_address_space(current_task->pdir_virt);
+    if (!child->pdir_virt) {
+        kfree((void*)stack_virt);
+        pmm_free_page(pcb_phys);
+        return -ENOMEM;
+    }
+    child->cr3 = VIRT_TO_PHYS((uint32_t)child->pdir_virt);
+    
+    if (vma_clone(child, current_task) < 0) {
+        vmm_destroy_address_space(child->pdir_virt);
+        kfree((void*)stack_virt);
+        pmm_free_page(pcb_phys);
+        return -ENOMEM;
+    }
+    
+    k_strncpy(child->name, current_task->name, sizeof(child->name));
+    
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        child->fd_table[i] = current_task->fd_table[i];
+    }
+    
+    k_memcpy(child->fpu_state, current_task->fpu_state, 512);
+    child->fpu_initialized = current_task->fpu_initialized;
+    
+    child->parent = current_task;
+    child->children = NULL;
+    child->next_sibling = current_task->children;
+    current_task->children = child;
+    child->exit_code = 0;
+    child->orphan_on_exit = current_task->orphan_on_exit;
+    child->monitor_children = current_task->monitor_children;
+    
+    // ========================================================================
+    // 🛡️ НАДЕЖНОЕ КОПИРОВАНИЕ KERNEL STACK (Linux-style Fork)
+    // ========================================================================
+    uint32_t* parent_stack_top = (uint32_t*)(current_task->kernel_stack_virt + stack_size);
+    uint32_t* child_stack_top = (uint32_t*)(stack_virt + stack_size);
+    
+    // 1. Копируем весь 16KB стек родителя ребенку (включая IRET frame и struct regs)
+    k_memcpy(child_stack_top - (stack_size / 4), 
+             parent_stack_top - (stack_size / 4), 
+             stack_size);
+    
+    // 2. Вычисляем точное смещение ESP родителя от вершины стека
+    uint32_t esp_offset = parent_stack_top - (uint32_t*)current_task->esp;
+    child->esp = (uint32_t)(child_stack_top - esp_offset);
+    
+    // 3. Находим копию struct regs на стеке ребенка через математику указателей
+    // r - это указатель на struct regs на стеке родителя (передан из syscall_dispatcher)
+    uint32_t regs_offset = parent_stack_top - (uint32_t*)r;
+    struct regs* child_r = (struct regs*)(child_stack_top - regs_offset);
+    
+    // 4. ОБНУЛЯЕМ EAX ДЛЯ РЕБЕНКА!
+    // Когда планировщик переключится на ребенка, он пройдет через switch_context,
+    // вернется в isr_asm.asm, сделает popa (загрузив EAX из child_r->eax) и iret.
+    child_r->eax = 0; 
+    
+    // ========================================================================
+    
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    task_queue_add(child);
+    task_count++;
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    
+    serial_printf("[TASK] Fork: PID %d -> PID %d (CoW)\n", current_task->pid, child->pid);
+    
+    return child->pid; // Родитель получает PID ребенка
+}
 
+// ============================================================================
+// [ДЕНЬ 14] TASK WAITPID
+// ============================================================================
+int task_waitpid(int pid, int* status, int options) {
+    while (1) {
+        // Ищем зомби среди детей
+        task_t* child = current_task->children;
+        task_t* zombie = NULL;
+        
+        while (child != NULL) {
+            if (child->state == TASK_ZOMBIE) {
+                if (pid == -1 || child->pid == (uint32_t)pid) {
+                    zombie = child;
+                    break;
+                }
+            }
+            child = child->next_sibling;
+        }
+        
+        if (zombie) {
+            // Нашли зомби - забираем exit_code
+            int exit_code = zombie->exit_code;
+            
+            if (status) {
+                // Zero Trust: проверяем указатель
+                if ((uint32_t)status >= KERNEL_SPACE_START) {
+                    return -EFAULT;
+                }
+                *status = exit_code;
+            }
+            
+            uint32_t zombie_pid = zombie->pid;
+            
+            // Удаляем зомби из списка детей
+            if (current_task->children == zombie) {
+                current_task->children = zombie->next_sibling;
+            } else {
+                task_t* sibling = current_task->children;
+                while (sibling && sibling->next_sibling != zombie) {
+                    sibling = sibling->next_sibling;
+                }
+                if (sibling) {
+                    sibling->next_sibling = zombie->next_sibling;
+                }
+            }
+            
+            // Переводим в TASK_DEAD и отправляем в Reaper Queue
+            zombie->state = TASK_DEAD;
+            
+            uint32_t eflags;
+            __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+            
+            zombie->reaper_next = dead_tasks_head;
+            dead_tasks_head = zombie;
+            
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            
+            serial_printf("[TASK] waitpid: Reaped PID %d (exit code: %d)\n", zombie_pid, exit_code);
+            
+            return zombie_pid;
+        }
+        
+        // Зомби не найдено
+        if (options & WNOHANG) {
+            return 0; // Неблокирующий режим - возвращаем 0
+        }
+        
+        // Блокирующий режим - усыпляем себя
+        current_task->state = TASK_SLEEPING;
+        serial_printf("[TASK] PID %d sleeping in waitpid\n", current_task->pid);
+        schedule();
+        
+        // Проснулись - проверяем снова
+    }
+}
 // ============================================================================
 // ОТЛАДКА (ps)
 // ============================================================================
@@ -395,6 +652,14 @@ void task_print_list(void) {
             case TASK_READY:   
                 state_str = "READY";   
                 state_color = VGA_COLOR_YELLOW; 
+                break;
+            case TASK_SLEEPING:
+                state_str = "SLEEPING";
+                state_color = VGA_COLOR_LIGHT_BLUE;
+                break;
+            case TASK_ZOMBIE:
+                state_str = "ZOMBIE";
+                state_color = VGA_COLOR_MAGENTA;
                 break;
             case TASK_DEAD:    
                 state_str = "DEAD";    

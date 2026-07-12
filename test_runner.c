@@ -81,18 +81,23 @@ static int spawn_process(const char* filename) {
 // ============================================================================
 // ОЖИДАНИЕ ЗАВЕРШЕНИЯ И СХОЖДЕНИЕ К ПОКОЮ (Quiescent Convergence)
 // ============================================================================
-static void wait_for_cleanup(uint32_t baseline_tasks) {
-    uint32_t timeout = 10000; 
+// ============================================================================
+// ОЖИДАНИЕ ЗАВЕРШЕНИЯ И СБОР ЗОМБИ (POSIX waitpid)
+// ============================================================================
+static int wait_for_cleanup(int pid) {
+    int status = 0;
     
-    // 1. Ждем, пока Reaper заберет все мертвые задачи
-    while (task_get_count() > baseline_tasks && timeout > 0) {
-        task_yield(); 
-        timeout--;
+    // Блокирующее ожидание конкретного ребенка (или любого, если pid == -1)
+    int reaped = task_waitpid(pid, &status, 0);
+    if (reaped < 0) {
+        serial_printf("[TEST RUNNER] waitpid failed for PID %d: %d\n", pid, reaped);
+        return -1;
     }
     
-    if (timeout == 0) {
-        serial_print("[TEST RUNNER] TIMEOUT: Task did not exit!\n");
-    }
+    // Даем Reaper'у время очистить TASK_DEAD задачи из очереди
+    for (int i = 0; i < 5; i++) task_yield();
+    
+    return status;
 }
 
 // Вспомогательная функция для "отлова" стабильного состояния кучи
@@ -118,6 +123,9 @@ static int32_t get_stable_heap_balance(void) {
 // ============================================================================
 // ЗАПУСК ОДНОГО ELF ТЕСТА
 // ============================================================================
+// ============================================================================
+// ЗАПУСК ОДНОГО ELF ТЕСТА
+// ============================================================================
 static void run_elf_test(const char* name, const char* description) {
     k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
     k_printf("[TEST] Running: %s (%s)\n", name, description);
@@ -137,8 +145,12 @@ static void run_elf_test(const char* name, const char* description) {
         return;
     }
 
-    // 3. Ожидание смерти процесса
-    wait_for_cleanup(tasks_before);
+    // 3. Ожидание смерти процесса и сбор Зомби (POSIX waitpid)
+    int exit_status = wait_for_cleanup(pid);
+    
+    k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    k_printf("[TEST] Exit status: %d\n", exit_status);
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
 
     // 4. Снапшот ПОСЛЕ (Ждем схождения к покою)
     int32_t pmm_after = pmm_check_balance();
@@ -174,6 +186,9 @@ static void stress_worker_task(void) {
     task_exit();
 }
 
+// ============================================================================
+// ОБРАБОТЧИК СТРЕСС-ТЕСТОВ (Pillar 2)
+// ============================================================================
 // ============================================================================
 // ОБРАБОТЧИК СТРЕСС-ТЕСТОВ (Pillar 2)
 // ============================================================================
@@ -216,20 +231,16 @@ void handle_stress(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
             }
         }
 
-        k_printf("[STRESS] Spawned: %u, Failed: %u. Waiting for Reaper...\n", spawned, failed);
+        k_printf("[STRESS] Spawned: %u, Failed: %u. Waiting for children...\n", spawned, failed);
 
-        uint32_t timeout = (spawned * 50) + 1000; 
-        while (task_get_count() > baseline_tasks && timeout > 0) {
-            task_yield(); 
-            timeout--;
+        // Собираем всех зомби-детей (родителем является Shell/TestRunner)
+        for (uint32_t i = 0; i < spawned; i++) {
+            int status;
+            task_waitpid(-1, &status, 0); // -1 = ждать любого ребенка
         }
-
-        if (timeout == 0) {
-            k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
-            k_print("[STRESS] TIMEOUT: Reaper didn't clean up all tasks!\n");
-        } else {
-            for(int i = 0; i < 10; i++) task_yield(); // Drain reaper
-        }
+        
+        // Даем Reaper'у время очистить память
+        for(int i = 0; i < 10; i++) task_yield();
 
         int32_t pmm_after = pmm_check_balance();
         int32_t heap_after = heap_check_balance();
@@ -251,7 +262,14 @@ void handle_stress(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
         k_print("Unknown stress command.\n");
     }
 }
-
+// ============================================================================
+// ЭКСПОРТ ДЛЯ SHELL: Запуск ELF и ожидание завершения
+// ============================================================================
+int run_elf_and_wait(const char* filename) {
+    int pid = spawn_process(filename);
+    if (pid < 0) return -1;
+    return wait_for_cleanup(pid);
+}
 // ============================================================================
 // ТОЧКА ВХОДА (Команда run_tests)
 // ============================================================================

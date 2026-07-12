@@ -28,7 +28,13 @@ typedef struct {
 // ГЛОБАЛЬНЫЕ ДАННЫЕ PMM
 // ============================================================================
 static uint8_t pmm_bitmap[PMM_MAX_PAGES / 8] __attribute__((aligned(4096)));
-
+// ============================================================================
+// [ДЕНЬ 14] REFERENCE COUNTING ARRAY (2MB в .bss)
+// ============================================================================
+// Параллельный массив для подсчета ссылок на физические страницы.
+// Используется для Copy-on-Write: при fork() страницы становятся shared,
+// и только при первой записи выделяется личная копия.
+static uint16_t pmm_refcounts[PMM_MAX_PAGES] __attribute__((aligned(4096)));
 static uint32_t total_available_pages = 0;
 static uint32_t used_pages = 0;
 static uint32_t pmm_max_page = 0; 
@@ -133,6 +139,10 @@ void pmm_init(multiboot_info_t* info) {
     
     for (uint32_t i = 0; i < sizeof(pmm_bitmap); i++) {
         pmm_bitmap[i] = 0xFF;
+    }
+    // [ДЕНЬ 14] Обнуляем массив refcounts
+    for (uint32_t i = 0; i < PMM_MAX_PAGES; i++) {
+        pmm_refcounts[i] = 0;
     }
     total_available_pages = 0;
     used_pages = 0;
@@ -248,6 +258,7 @@ uint32_t pmm_alloc_page(void) {
         bitmap_words[w] |= (1U << b);
         used_pages++;
         pmm_total_allocs++; // [ДЕНЬ 10] Accounting
+        pmm_refcounts[bit_index] = 1; // [ДЕНЬ 14] Новая страница имеет 1 ссылку
         result = bit_index * PMM_PAGE_SIZE;
         break;
     }
@@ -285,6 +296,46 @@ void pmm_free_page(uint32_t phys_addr) {
     bitmap_clear(page_index);
     if (used_pages > 0) used_pages--;
     pmm_total_frees++; // [ДЕНЬ 10] Accounting
+    pmm_refcounts[page_index] = 0; // [ДЕНЬ 14] Страница свободна
+    
+    load_eflags(flags);
+}
+// ============================================================================
+// [ДЕНЬ 14] REFERENCE COUNTING API (Copy-on-Write Support)
+// ============================================================================
+void pmm_inc_ref(uint32_t phys_addr) {
+    if (phys_addr % PMM_PAGE_SIZE != 0) return;
+    
+    uint32_t page_index = phys_addr / PMM_PAGE_SIZE;
+    if (page_index >= pmm_max_page) return;
+    
+    uint32_t flags = read_eflags();
+    disable_interrupts();
+    
+    if (pmm_refcounts[page_index] < 0xFFFF) {
+        pmm_refcounts[page_index]++;
+    }
+    
+    load_eflags(flags);
+}
+
+void pmm_dec_ref(uint32_t phys_addr) {
+    if (phys_addr % PMM_PAGE_SIZE != 0) return;
+    
+    uint32_t page_index = phys_addr / PMM_PAGE_SIZE;
+    if (page_index >= pmm_max_page) return;
+    
+    uint32_t flags = read_eflags();
+    disable_interrupts();
+    
+    if (pmm_refcounts[page_index] > 0) {
+        pmm_refcounts[page_index]--;
+        
+        // Если счетчик стал 0, страница больше никем не используется
+        if (pmm_refcounts[page_index] == 0) {
+            pmm_free_page(phys_addr);
+        }
+    }
     
     load_eflags(flags);
 }

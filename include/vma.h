@@ -52,4 +52,9 @@ uint32_t vma_find_free_area(task_t* task, uint32_t size);
 // Возвращает 0 при успехе, -ENOMEM если не хватило памяти для Split VMA.
 int vma_unmap_range(task_t* task, uint32_t start, uint32_t end);
 
+// [ДЕНЬ 14] Клонирование списка VMA при fork().
+// Создает глубокую копию всех VMA-нод для ребенка.
+// Возвращает 0 при успехе, -ENOMEM при OOM.
+int vma_clone(task_t* child_task, task_t* parent_task);
+
 #endif // VMA_H

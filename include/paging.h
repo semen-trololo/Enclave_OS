@@ -32,6 +32,14 @@ extern uint32_t boot_page_directory[];
 #define PAGE_DIRTY      0x040
 #define PAGE_PS         0x080  // Page Size Extension (4MB pages)
 #define PAGE_GLOBAL     0x100
+// ============================================================================
+// [ДЕНЬ 14] OS-SPECIFIC PAGE TABLE FLAGS
+// ============================================================================
+// 9-й бит (Available для ОС) используется для маркировки Copy-on-Write страниц.
+// Когда страница помечена как CoW, бит PAGE_WRITE снят (аппаратная защита),
+// а PAGE_COW установлен. При попытке записи возникает Page Fault, и ядро
+// выделяет личную копию страницы.
+#define PAGE_COW        0x200  // Copy-on-Write marker
 
 // ============================================================================
 // VMM API
@@ -54,5 +62,14 @@ void vmm_unmap_and_free_page_in_pd(uint32_t* pd_virt, uint32_t virt);
 
 // Изменяет флаги прав доступа в PTE без изменения физического адреса (для sys_mprotect)
 void vmm_protect_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t flags);
+
+// ============================================================================
+// [ДЕНЬ 14] ADDRESS SPACE CLONING (Copy-on-Write)
+// ============================================================================
+// Клонирует адресное пространство родителя для ребенка при fork().
+// Все User Space страницы помечаются как READ-ONLY + PAGE_COW.
+// Физические страницы НЕ копируются (только увеличивается refcount).
+// Возвращает виртуальный адрес нового Page Directory или NULL при OOM.
+uint32_t* vmm_clone_address_space(uint32_t* parent_pd_virt);
 
 #endif // PAGING_H

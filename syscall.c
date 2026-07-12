@@ -498,6 +498,42 @@ static int sys_mprotect_handler(struct regs* r) {
 
     return 0;
 }
+
+// ============================================================================
+// [ДЕНЬ 14] sys_fork: создание копии процесса (Copy-on-Write)
+// ============================================================================
+
+static int sys_fork_handler(struct regs* r) {
+    serial_printf("[SYSCALL] sys_fork: PID %d\n", current_task->pid);
+    return task_fork(r); // Передаем контекст прерывания
+}
+
+// ============================================================================
+// [ДЕНЬ 14] sys_waitpid: ожидание завершения ребенка
+// EBX = pid, ECX = status pointer, EDX = options
+// ============================================================================
+static int sys_waitpid_handler(struct regs* r) {
+    int pid = (int)r->ebx;
+    int* status = (int*)r->ecx;
+    int options = (int)r->edx;
+    
+    // Zero Trust: проверяем указатель status
+    if (status && !is_user_pointer(status, sizeof(int))) {
+        return -EFAULT;
+    }
+    
+    serial_printf("[SYSCALL] sys_waitpid: PID %d waiting for %d\n", current_task->pid, pid);
+    return task_waitpid(pid, status, options);
+}
+
+// ============================================================================
+// [ДЕНЬ 14] sys_getpid: получить PID текущего процесса
+// ============================================================================
+static int sys_getpid_handler(struct regs* r) {
+    (void)r;
+    return current_task->pid;
+}
+
 // ========================================================================
 // ✅ Диспатчер системных вызовов (вызывается из isr_asm.asm)
 // ========================================================================
@@ -527,18 +563,18 @@ static void syscall_dispatcher(struct regs* r) {
 // ✅ Инициализация: регистрация обработчиков в таблице
 // ========================================================================
 void syscall_init(void) {
-    // ✅ Designated Initializers уже заполнили таблицу NULL, 
-    //    просто перезаписываем нужные индексы
     syscall_table[SYS_EXIT]   = sys_exit_handler;
+    syscall_table[SYS_FORK]   = sys_fork_handler;      // [ДЕНЬ 14]
     syscall_table[SYS_READ]   = sys_read_handler;
     syscall_table[SYS_WRITE]  = sys_write_handler;
     syscall_table[SYS_OPEN]   = sys_open_handler;
     syscall_table[SYS_CLOSE]  = sys_close_handler;
     syscall_table[SYS_UNLINK] = sys_unlink_handler;
+    syscall_table[SYS_WAITPID] = sys_waitpid_handler;  // [ДЕНЬ 14]
     syscall_table[SYS_YIELD]  = sys_yield_handler;
     syscall_table[SYS_BRK]    = sys_brk_handler;
     syscall_table[SYS_EXEC]   = sys_exec_handler;
-    // ✅ Day 12: Memory Management Syscalls
+    syscall_table[SYS_GETPID] = sys_getpid_handler;    // [ДЕНЬ 14]
     syscall_table[SYS_MMAP]     = sys_mmap_handler;
     syscall_table[SYS_MUNMAP]   = sys_munmap_handler;
     syscall_table[SYS_MPROTECT] = sys_mprotect_handler;

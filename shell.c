@@ -19,6 +19,7 @@
 #define PMM_TEST_MAX_PAGES 16384 
 static uint32_t test_allocations[PMM_TEST_MAX_PAGES];
 
+extern int run_elf_and_wait(const char* filename);
 // ============================================================================
 // ПАРСИНГ АРГУМЕНТОВ
 // ============================================================================
@@ -56,6 +57,7 @@ static void print_help(void) {
     k_print("  clear            - Clear the screen\n");
     k_print("  uptime           - Show system uptime\n");
     k_print("  ps               - List running processes\n");
+    k_print("  run <file.elf>   - Execute ELF binary and wait for exit\n");
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     k_print("  [ File System (VFS) ]\n");
@@ -595,7 +597,27 @@ static void handle_ata(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
         k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     }
 }
-
+static void handle_run(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
+    if (argc < 2) {
+        k_print("Usage: run <path/to/file.elf>\n");
+        return;
+    }
+    
+    k_set_color(VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+    k_printf("[SHELL] Executing %s...\n", args[1]);
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+    
+    int status = run_elf_and_wait(args[1]);
+    
+    if (status < 0) {
+        k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
+        k_printf("[SHELL] Failed to run %s\n", args[1]);
+    } else {
+        k_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        k_printf("[SHELL] Process exited with status %d\n", status);
+    }
+    k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
+}
 // ============================================================================
 // ДИСПЕТЧЕР КОМАНД
 // ============================================================================
@@ -628,6 +650,9 @@ static void execute_command(char* buffer) {
     }
     else if (k_strcmp(args[0], "heap") == 0) {
         handle_heap(argc, args);
+    }
+    else if (k_strcmp(args[0], "run") == 0) {
+        handle_run(argc, args);
     }
     
     // [ Graphics ]
