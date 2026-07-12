@@ -3,6 +3,7 @@
 #define VMA_H
 
 #include <stdint.h>
+#include <stdbool.h> // Убедись, что bool подключен
 #include "task.h" // Для task_t
 
 // ============================================================================
@@ -26,10 +27,10 @@ typedef struct vma_node {
 // ============================================================================
 // VMA API
 // ============================================================================
-
 // Добавить новую VMA в список процесса.
 // Список автоматически сортируется по адресу start.
-void vma_add(task_t* task, uint32_t start, uint32_t end, uint32_t flags);
+// Возвращает: 0 при успехе, -ENOMEM при нехватке памяти (OOM).
+int vma_add(task_t* task, uint32_t start, uint32_t end, uint32_t flags);
 
 // Найти VMA, которая покрывает указанный адрес.
 // Возвращает NULL, если адрес не принадлежит ни одной VMA.
@@ -38,5 +39,17 @@ vma_node_t* vma_find(task_t* task, uint32_t addr);
 // Освободить все VMA процесса.
 // Вызывается Grim Reaper'ом при смерти задачи.
 void vma_destroy_all(task_t* task);
+
+// Проверка пересечения диапазона [start, end) с существующими VMA.
+// ignore_vma позволяет игнорировать саму себя (например, при расширении кучи).
+bool vma_intersects(task_t* task, uint32_t start, uint32_t end, vma_node_t* ignore_vma);
+
+// Поиск свободной "дырки" для mmap, начиная с USER_MMAP_START.
+// Возвращает выровненный адрес или 0, если места нет.
+uint32_t vma_find_free_area(task_t* task, uint32_t size);
+
+// Удаление/разделение VMA, попадающих в диапазон [start, end).
+// Возвращает 0 при успехе, -ENOMEM если не хватило памяти для Split VMA.
+int vma_unmap_range(task_t* task, uint32_t start, uint32_t end);
 
 #endif // VMA_H

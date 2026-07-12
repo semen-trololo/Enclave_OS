@@ -92,7 +92,7 @@ static vfs_node_t* tmpfs_create(vfs_node_t* parent, const char* name) {
     new_node->read = tmpfs_read;
     new_node->write = tmpfs_write;
 
-    serial_printf("[TMPFS] Created file: /tmp/%s\n", name);
+    //serial_printf("[TMPFS] Created file: /tmp/%s\n", name);
     return new_node;
 }
 
@@ -117,7 +117,7 @@ static int tmpfs_unlink(vfs_node_t* parent, const char* name) {
             }
             kfree(curr);
             
-            serial_printf("[TMPFS] Unlinked file: /tmp/%s\n", name);
+            //serial_printf("[TMPFS] Unlinked file: /tmp/%s\n", name);
             return 0;
         }
         prev = curr;

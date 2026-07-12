@@ -8,16 +8,14 @@
 // ============================================================================
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ (SSOT)
 // ============================================================================
-// Используем KERNEL_HEAP_VIRT и KERNEL_HEAP_SIZE из config.h
 #define HEAP_START KERNEL_HEAP_VIRT
 #define HEAP_SIZE  KERNEL_HEAP_SIZE
 #define HEAP_END   KERNEL_HEAP_END
 
 #define HEAP_PAGES (HEAP_SIZE / 4096)  
 
-// MAX_ORDER: 2^13 * 4KB = 32MB. 
 #define MAX_ORDER 13   
-#define TREE_SIZE  16384 // 2^(13 + 1) узлов
+#define TREE_SIZE  16384 
 
 #define NODE_UNUSED 0 
 #define NODE_FREE   1 
@@ -33,12 +31,11 @@ typedef struct {
 
 static uint8_t tree[TREE_SIZE];
 
-// [ДЕНЬ 10] HEAP ACCOUNTING
 static uint32_t heap_total_allocs = 0;
 static uint32_t heap_total_frees = 0;
 
 // ============================================================================
-// IRQ SAFETY HELPERS (Защита критических секций от прерываний)
+// IRQ SAFETY HELPERS
 // ============================================================================
 static inline uint32_t read_eflags(void) {
     uint32_t flags;
@@ -109,7 +106,7 @@ void* kmalloc(size_t size) {
     if (block_size < req_size) return NULL; 
     
     uint32_t flags = read_eflags();
-    disable_interrupts(); // 🛡️ Защита от Race Conditions
+    disable_interrupts(); 
 
     int node = find_free(1, MAX_ORDER, target_level);
     if (node == -1) {
@@ -137,10 +134,10 @@ void* kmalloc(size_t size) {
     uint32_t offset = block_index * block_size;
     uint32_t virt_addr = HEAP_START + offset;
     
-    heap_total_allocs++; // [ДЕНЬ 10] Accounting
-    load_eflags(flags); // Восстановление состояния прерываний
+    heap_total_allocs++; 
+    load_eflags(flags); 
     
-    // 🛡️ Lazy Write: Эта запись триггерит Page Fault -> VMM выделяет физ. страницу
+    // 🛡️ Lazy Write: Триггерит Page Fault -> VMM выделяет физ. страницу
     BlockHeader* header = (BlockHeader*)virt_addr;
     header->size = block_size;
     header->magic = HEADER_MAGIC;
@@ -157,7 +154,6 @@ void kfree(void* ptr) {
     BlockHeader* header = (BlockHeader*)((uint32_t)ptr - sizeof(BlockHeader));
     uint32_t virt_addr = (uint32_t)header;
     
-    // 🛡️ Bounds Checking: Защита от передачи невалидного указателя
     if (virt_addr < HEAP_START || virt_addr >= HEAP_END) {
         serial_printf("[HEAP] FATAL: kfree called with out-of-bounds pointer 0x%x\n", (uint32_t)ptr);
         return;
@@ -183,13 +179,12 @@ void kfree(void* ptr) {
     int curr = (1 << depth) + block_index;
     
     uint32_t flags = read_eflags();
-    disable_interrupts(); // 🛡️ Защита от Race Conditions
+    disable_interrupts(); 
     
     tree[curr] = NODE_FREE;
     header->magic = 0; 
-    heap_total_frees++; // [ДЕНЬ 10] Accounting
+    heap_total_frees++; 
     
-    // Каскадное слияние (merge) с близнецами (XOR Trick)
     while (curr > 1) {
         int buddy = curr ^ 1;      
         int parent = curr / 2;
@@ -208,12 +203,18 @@ void kfree(void* ptr) {
 }
 
 // ============================================================================
-// [ДЕНЬ 10] HEAP ACCOUNTING API
+// HEAP ACCOUNTING API
 // ============================================================================
 uint32_t heap_get_alloc_count(void) { return heap_total_allocs; }
 uint32_t heap_get_free_count(void) { return heap_total_frees; }
 int32_t heap_check_balance(void) { 
-    return (int32_t)(heap_total_allocs - heap_total_frees); 
+    uint32_t flags;
+    // 🛡️ FIX: Защищаем чтение от прерываний (PIT/Keyboard), 
+    // чтобы избежать "Torn Read" между allocs и frees.
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(flags));
+    int32_t balance = (int32_t)(heap_total_allocs - heap_total_frees);
+    __asm__ volatile("push %0; popf" : : "r"(flags));
+    return balance;
 }
 
 // ============================================================================

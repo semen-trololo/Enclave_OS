@@ -518,43 +518,663 @@ ELF Loader:
 * **W^X Enforcement** — user_linker.ld с явным разделением Read+Execute и Read+Write сегментов
 * **Tail Call Optimization Fix** — Флаг -fno-optimize-sibling-calls для корректной работы рекурсии
 
-🚀 ЧТО ДЕЛАТЬ ДАЛЬШЕ (Приоритеты)
+# 📘 BARE METAL OS — План реализации POSIX Syscalls и TinyCC Integration
+## Self-Hosting Toolchain | Версия: Day 11-25 | Статус: Planning
 
-📅 День 11: Process Lifecycle
-- sys_fork, sys_exec, sys_waitpid
-- Copy-on-Write (CoW) для оптимизации fork
-Цель: Фундамент для Супервизора (PID 1)
+---
 
-📅 День 12: Security & Hardening
-- NX Bit (No-Execute) в Page Tables
-- W^X Enforcement (Write XOR Execute)
-- Core Dumps при Segfault
-Цель: Защита от инъекций кода и телеметрия падений
+## 🎯 ЦЕЛЬ ПРОЕКТА
 
-📅 День 13: The Supervisor (PID 1)
-- Написание /sbin/init с конфигом:
-  [service:shell]
-  exec=/bin/sh
-  restart=always
-- Auto-Restart при падении
-Цель: Реализация философии "Let it crash"
+Превратить Bare Metal OS из "учебного проекта" в **настоящую self-hosting платформу**, которая может:
+- Компилировать программы **внутри своей ОС** через TinyCC
+- Предоставлять **25 POSIX-like syscalls** для user-space программ
+- Обеспечивать **Zero Trust Sandbox** через валидацию всех системных вызовов
+- Демонстрировать **production-ready** архитектуру (как Minix 3 / seL4)
 
-📅 День 14: Sandboxing
-- VFS chroot (подмена vfs_root для задачи)
-- Seccomp (фильтр системных вызовов)
-- Resource Containers + OOM Killer
-Цель: Изоляция недоверенных приложений
+**Ключевое отличие от других hobby OS:** Self-hosting capability — ОС компилирует программы сама для себя.
 
-📅 День 15: IPC & Microkernel
-- Mailboxes (sys_send, sys_recv)
-- Shared Memory Rings
-Цель: Подготовка к User-Mode Drivers
+---
 
-📅 День 16+: User-Mode Drivers
-- Вынос fat32_server в Ring 3
-- Capability к I/O портам (0x1F0-0x1F7)
-- VFS <-> fat32_server через IPC
-Цель: Микроядерная архитектура (Minix 3 style)
+## 🏗 АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
+
+### Single Source of Truth (SSOT)
+Все syscall numbers, константы памяти и API определены **строго один раз** в заголовочных файлах. Никаких дублирований в `.c` файлах.
+
+### Zero Trust Sandbox
+**Каждый** syscall ОБЯЗАН:
+- Валидировать номера системных вызовов
+- Проверять указатели через `is_user_pointer()`
+- Проверять Resource Container лимиты
+- Enforce W^X (Write XOR Execute) политику
+- Возвращать стандартные errno коды (-EINVAL, -ENOMEM, -EPERM)
+
+### Two-Tier Library System
+**Строгое разделение** Ring 0 и Ring 3:
+- `klib.c` (Ring 0) — прямой доступ к kernel heap, PMM, VGA
+- `user_libc.c` (Ring 3) — только через syscalls (sys_brk, sys_mmap, sys_write)
+
+Попытка дать Ring 3 доступ к `kmalloc()` **полностью ломает** Zero Trust Sandbox.
+
+### Syscall Table Pattern
+Единая таблица `syscall_table[256]` с function pointers. Dispatcher валидирует номер и вызывает соответствующую функцию. Это индустриальный стандарт (Linux, FreeBSD).
+
+---
+
+## 📅 ФАЗА 1: POSIX-LIKE SYSCALL INFRASTRUCTURE (День 11-15)
+
+### День 11: Syscall Table Expansion
+**Цель:** Создать расширяемую инфраструктуру для 256 системных вызовов.
+
+**Задачи:**
+- ✅ Определить syscall numbers (SYS_EXIT=1, SYS_FORK=2, ..., SYS_SYSINFO=25) в `include/syscall.h`
+- ✅ Создать typedef для function pointer: `syscall_func_t`
+- ✅ Реализовать глобальный массив `syscall_table[256]` в `src/syscall.c`
+- ✅ Реализовать `syscall_dispatcher()` с валидацией номера
+- ✅ Обновить INT 0x80 handler для вызова dispatcher
+- ✅ Добавить возврат `-ENOSYS` для несуществующих syscall'ов
+
+**Архитектурное решение:**
+Использовать designated initializers (`[SYS_EXIT] = sys_exit`) для читаемости и безопасности. Это предотвращает ошибки индексации.
+
+**Тесты:**
+- Вызов всех существующих syscalls через таблицу
+- Проверка ENOSYS для несуществующих syscall'ов (например, SYS_999)
+- Проверка валидации аргументов
+
+---
+## 📋 СТАТУС ДНЯ 11: Syscall Table Expansion & Memory Hardening (ЗАВЕРШШЕНО)
+
+### ✅ Реализовано
+- Создан `include/kerrno.h` с полным набором POSIX-совместимых кодов ошибок (EPERM, ENOENT, ENOMEM, EFAULT, EINVAL, ENOSYS, ENAMETOOLONG и др.)
+- Переработан `include/syscall.h`: добавлены номера syscall'ов для будущей POSIX-инфраструктуры (SYS_WAITPID, SYS_GETPID, SYS_CREAT и др.), подключен `kerrno.h`
+- Полностью переписан `src/syscall.c`:
+  * Таблица `syscall_table[256]` переведена на **Designated Initializers** (инициализация на этапе компиляции, NULL для пропусков)
+  * Диспатчер возвращает `-ENOSYS` для несуществующих syscall'ов
+  * Добавлена функция `copy_string_from_user()` с побайтовой проверкой (Zero Trust защита от выхода строк в Kernel Space)
+  * Улучшена `is_user_pointer()` — корректная проверка переполнения `addr + size`
+  * `sys_brk` теперь использует точный поиск VMA по `start == USER_HEAP_START` и возвращает `-ENOMEM` при OOM
+  * VFS-обработчики (open/unlink/exec) используют безопасное копирование строк вместо прямой передачи указателей
+- Обновлен `src/paging.c`:
+  * `vmm_map_page_in_pd()` возвращает `int` (0 = успех, -1 = OOM PT) и освобождает старую физическую страницу при пере-маппинге (защита от утечки PMM)
+  * `vmm_destroy_address_space()` обнуляет PDE после освобождения (защита от Double Free), поддерживает 4MB страницы (PAGE_PS)
+  * Добавлена диагностическая телеметрия освобожденных страниц
+  * `page_fault_handler` реализует **Strict Error Propagation**: при сбое маппинга из-за OOM PT принудительно вызывает `pmm_free_page(phys)` для отката выделения страницы данных
+- Обновлен `src/vma.h` и `src/vma.c`: функция `vma_add()` теперь возвращает `int` (0 при успехе, -ENOMEM при OOM), что позволяет корректно обрабатывать ошибки выделения в syscall'ах
+- Обновлен `src/elf.c`: 
+  * Добавлена защита от corrupted ELF-файлов (проверка `filesz <= memsz`, clamping при нарушении)
+  * Реализован rollback `pmm_free_page(phys)` при сбое `vmm_map_page_in_pd`, предотвращающий Orphaned Page Leak
+- Обновлен `test_runner.c`:
+  * Добавлен **Warmup Phase** Kernel Heap (kmalloc/kfree для типичных размеров блоков), который триггерит первичные Page Fault для Buddy System до начала замеров PMM
+  * Реализован паттерн **Quiescent State Convergence**: `get_stable_heap_balance()` опрашивает баланс кучи в цикле до схождения (5 неизменных чтений подряд), устраняя "плавающие" утечки от фоновых задач
+  * `spawn_process` оборачивает `task_create` + `vma_add` в критическую секцию `cli/sti`, предотвращая race condition между PIT и созданием Address Space
+- Обновлен `src/pmm.c`: удалены дубликаты макросов `VIRT_TO_PHYS`/`PHYS_TO_VIRT` (SSOT Compliance)
+- Обновлен `include/paging.h`: добавлено `extern uint32_t boot_page_directory[]` для корректной линковки с `boot.asm`
+- Синхронизированы номера syscall'ов между `include/syscall.h` и `user_src/user_syscalls.h` (`SYS_YIELD = 158` — стандарт Linux sched_yield)
+- **Memory Torture Test (Day 11 Bonus):** добавлен многоступенчатый стресс-тест `test_memory_torture.elf` с 6 этапами (Linear Demand Storm, Random Access Matrix с LCG state recovery, Brk Staircase, OOM Boundary Probe, Yield Storm Coherency, Final Integrity Sweep), доказывающий production-ready когерентность VMM + TLB + Scheduler
+
+### 🏛 Архитектурные решения
+1. **True POSIX exec**: `sys_exec` теперь **заменяет** текущий процесс (сохраняя PID и FD table), а не создает новую задачу. Это критически важно для будущего `fork/exec` паттерна Unix.
+2. **Zero Trust Sandbox**: Все указатели из Ring 3 проходят проверку `is_user_pointer()`, все строки копируются через `copy_string_from_user()`.
+3. **POSIX errno**: Все syscall'ы возвращают стандартные отрицательные errno-коды вместо магических чисел.
+4. **Compile-time инициализация**: Таблица syscall'ов готова до запуска ядра, что исключает race conditions при раннем обращении к syscall'ам.
+5. **Strict Error Propagation в VMM**: Любая функция маппинга, способная вернуть OOM, возвращает `int`. Вызывающий код обязан проверить результат и выполнить rollback аллокаций, предотвращая silent memory corruption.
+6. **Atomic Metrics**: Глобальные счетчики PMM/Heap считываются под `cli/sti` для предотвращения Torn Read race conditions между аллокатором и прерываниями.
+7. **Quiescent State Testing**: Test Suite использует конвергентный опрос баланса вместо одноразового снапшота, что математически гарантирует детерминированность результатов в preemptive multitasking среде.
+
+### 🐛 Исправленные критические баги (Memory Hardening)
+1. **Orphaned Page Trap (PMM Leak при OOM)**: При исчерпании PMM во время аллокации Page Table внутри `vmm_map_page_in_pd`, страница данных, выделенная ранее, терялась навсегда (не была записана в PTE, поэтому Reaper не мог её освободить). Исправлено через Strict Error Propagation и явный `pmm_free_page(phys)` в `page_fault_handler` и `elf_load`.
+2. **Transient Heap Leak (плавающая утечка 1-5 блоков)**: Вызвана race condition между `test_runner` и фоновыми задачами (Shell, Serial buffers, Reaper logging). Фоновые задачи выполняли временные `kmalloc/kfree` в момент замера метрик. Исправлено паттерном Quiescent State Convergence в `get_stable_heap_balance()`.
+3. **Task Creation Preemption Race (SIGSEGV при старте ELF)**: PIT мог прервать `spawn_process`/`sys_exec` после `task_create()`, но до `vma_add()` для стека/кучи. Задача получала CPU с невалидным Address Space и падала при первом же `push` в стек. Исправлено через оборачивание создания задачи в критическую секцию `cli/sti`.
+4. **SSOT Macro Duplication**: Макросы трансляции адресов дублировались в `pmm.c` и `paging.h`, создавая архитектурный долг. Исправлено удалением дубликатов и централизацией в `paging.h`.
+5. **Syscall Number Desync**: `SYS_YIELD` имел номер 24 в user-space и 200 в ядре, приводя к `Unimplemented syscall` и неработающему планировщику в user-тестах. Исправлено синхронизацией со стандартом Linux (158).
+
+### ⚠️ Известные ограничения (Принято как архитектурные особенности)
+**VMA Collision Detection в sys_brk (TODO на День 12)**:
+Текущая реализация `sys_brk` расширяет VMA кучи без проверки пересечений с другими VMA (ELF segments, Stack). Если пользовательский процесс через `sys_brk` вырастит кучу до адреса `.text` сегмента (например, `0x08048000`), произойдет Memory Layout Collision — куча "съест" исполняемый код, что приведет к silent corruption и последующему SIGSEGV. `test_memory_torture.elf` использует программный предохранитель (`ELF_BASE_LIMIT = 0x08040000`) для обхода этой проблемы. Полноценное решение (цикл проверки пересечений через `vma_find_intersection`) запланировано на День 12 в рамках рефакторинга `sys_mmap`.
+
+### 🎯 Готовность к следующему этапу
+Инфраструктура Дня 11 **полностью готова**, протестирована и hardened. Test Suite (Pillar 1: 6 ELF тестов + Memory Torture, Pillar 2: Mass Spawn Stress, Pillar 3: VFS Stress) проходит со 100% детерминированным результатом `[PASS] No leaks, no zombies.`. Подсистема памяти (PMM + VMM + Demand Paging + TLB Invalidation + Heap) достигла production-ready SLA.
+
+**Следующие логические шаги по роадмапу:**
+- **День 12**: `sys_mmap` / `sys_munmap` / `sys_mprotect` + VMA Collision Detection в `sys_brk` (требуется для TinyCC и продвинутого управления памятью)
+- **День 14**: `sys_fork` / `sys_waitpid` / `sys_getpid` + Init Task (PID 1) + Supervisor Trees (фундамент для "Бессмертной крепости")
+
+Рекомендуется начать с **Дня 14**, так как `sys_fork` с Copy-on-Write критически важен для паттерна `fork/exec`, который мы зафиксировали в True POSIX `sys_exec` на этом дне. День 12 (mmap) можно реализовать параллельно или после, так как TinyCC появится только на Дне 17-20.
+
+### День 12: Memory Management Syscalls
+**Цель:** Реализовать sys_mmap/sys_munmap/sys_mprotect для TinyCC и user-space программ.
+
+**Задачи:**
+- ✅ Реализовать `sys_mmap()` с VMA integration
+  - Валидация length (0 < length <= 256MB)
+  - W^X enforcement (PROT_WRITE | PROT_EXEC = EPERM)
+  - Проверка Resource Container лимитов
+  - Создание VMA с правильными правами доступа
+  - On-demand paging (физические страницы выделяются по Page Fault)
+  
+- ✅ Реализовать `sys_munmap()` с VMA cleanup
+  - Поиск VMA по адресу
+  - Удаление VMA из списка
+  - Unmap физических страниц через VMM
+  - Освобождение VMA структуры
+  
+- ✅ Реализовать `sys_mprotect()` с page table updates
+  - Изменение прав доступа в VMA
+  - Обновление PTE через VMM
+  - TLB flush для консистентности
+
+**Архитектурное решение:**
+sys_mmap **не выделяет** физические страницы сразу. Он создает VMA и возвращает виртуальный адрес. Физические страницы выделяются аппаратно через Page Fault (INT 14) при первом обращении. Это экономит RAM и ускоряет mmap.
+
+**Тесты:**
+- mmap + write + mprotect(PROT_READ) + write = SIGSEGV (W^X violation)
+- mmap 256MB + проверка Resource Container
+- munmap + обращение к памяти = SIGSEGV
+
+---
+
+## 📋 СТАТУС ДНЯ 12: Memory Management Syscalls & VMA Hardening (ЗАВЕРШЕНО)
+### ✅ Реализовано
+- Добавлены POSIX-совместимые системные вызовы управления памятью: `sys_mmap` (90), `sys_munmap` (91), `sys_mprotect` (125).
+- Внедрены константы `PROT_READ/WRITE/EXEC` и `MAP_ANONYMOUS/PRIVATE` в `syscall.h` и `user_syscalls.h` (SSOT).
+- Расширена подсистема VMA (`vma.h` / `vma.c`):
+  * `vma_intersects()` — проверка пересечений диапазонов (используется для защиты от коллизий).
+  * `vma_find_free_area()` — алгоритм поиска свободных "дырок" в виртуальном пространстве для `mmap`.
+  * `vma_unmap_range()` — умное удаление регионов с поддержкой **Split VMA** (разделение ноды при `munmap` из середины диапазона).
+- Расширена подсистема VMM (`paging.h` / `paging.c`):
+  * `vmm_unmap_and_free_page_in_pd()` — корректный unmap с возвратом физической страницы в PMM (защита от PMM Leak).
+  * `vmm_protect_page_in_pd()` — изменение флагов PTE без пересоздания маппинга (для `mprotect`).
+- Обновлен `sys_brk_handler`: внедрен **VMA Collision Detection**. Куча больше не может молча затереть `.text` сегменты или `mmap`-регионы.
+- Обновлен Memory Layout в `config.h`: `USER_HEAP_START` сдвинут на `0x10000000` (256 MB), добавлена зона `USER_MMAP_START` на `0x40000000` (1 GB). Созданы гигантские "воздушные подушки" (Air Gaps) между кучей, mmap и стеком.
+- Обновлен `user_syscalls.h`: добавлен безопасный inline-ассемблер для `sys_mmap` (с сохранением `EBP` на стек, так как syscall требует 6 аргументов).
+
+### 🏛 Архитектурные решения
+1. **On-Demand Paging для mmap**: `sys_mmap` не выделяет физическую память сразу. Он создает VMA и возвращает виртуальный адрес. Физические страницы выделяются аппаратно через Page Fault (INT 14) при первом обращении.
+2. **Атомарный sys_munmap (Strict Error Propagation)**: Сначала модифицируется список VMA (что может вызвать OOM при `kmalloc` для Split VMA). Если OOM — операция прерывается, Page Tables не трогаются. Только при успехе начинается освобождение физических страниц.
+3. **W^X Enforcement на уровне Syscall**: `sys_mmap` и `sys_mprotect` жестко.reject'ят запросы с флагами `PROT_WRITE | PROT_EXEC`, возвращая `-EPERM`.
+4. **Zero Trust Sandbox для VMA**: Добавлена защита от создания User VMA в Kernel Space (адреса >= `0xC0000000`).
+5. **Синергия mprotect и Demand Paging**: Если `mprotect` вызывается на еще не выделенной странице, меняются только флаги в VMA. При первом Page Fault ядро выделит страницу уже с обновленными правами.
+
+### 🐛 Исправленные критические баги
+1. **PMM Leak в vmm_unmap_page_in_pd**: Старая функция просто обнуляла PTE, но не освещала физическую страницу в PMM. При активном использовании `munmap` система быстро уходила в OOM. Исправлено внедрением `vmm_unmap_and_free_page_in_pd()`.
+2. **Silent Memory Corruption в sys_brk**: Ранее `sys_brk` мог расширить кучу до адресов `.text` сегмента (`0x08048000`), затирая исполняемый код процесса. Исправлено через `vma_intersects()`.
+3. **Memory Layout Collision**: Куча (`0x08000000`) находилась слишком близко к стандартным адресам загрузки ELF. Сдвиг `USER_HEAP_START` на `0x10000000` архитектурно разделил пользовательские данные и код.
+
+### 🧪 Пройденные тесты
+- **test_mmap.elf**: Успешное выделение 8KB, запись (Demand Paging), `mprotect(PROT_READ)`, чтение, `munmap`.
+- **test_memory_torture.elf**: Пройдены все 6 этапов стресс-тестирования:
+  1. Linear Demand Paging Storm
+  2. Random Access Matrix (с LCG state recovery для верификации)
+  3. Brk Staircase Expansion (проверка VMA Collision Detection)
+  4. OOM Boundary Probe (graceful failure при попытке выделить 256MB)
+  5. Yield Storm Coherency (проверка TLB/Scheduler race conditions)
+  6. Final Integrity Sweep
+
+### 🎯 Готовность к следующему этапу
+Подсистема памяти (PMM + VMM + VMA + Demand Paging + Syscalls) достигла production-ready SLA. ОС готова к портированию TinyCC (которому критически важен `mmap` для JIT-аллокаций) и реализации `sys_fork` с Copy-on-Write (День 14).
+
+### День 13: Advanced File I/O Syscalls
+**Цель:** Реализовать sys_lseek/sys_fstat/sys_ioctl для полноценной работы с файлами.
+
+**Задачи:**
+- ✅ Реализовать `sys_lseek()` с offset tracking
+  - Поддержка SEEK_SET, SEEK_CUR, SEEK_END
+  - Валидация нового offset (>= 0)
+  - Обновление `open_file_t->offset`
+  - Возврат новой позиции
+  
+- ✅ Реализовать `sys_fstat()` с metadata extraction
+  - Заполнение `struct stat` из `vfs_node_t`
+  - st_size, st_mode, st_mtime (timestamp пока 0)
+  - Валидация указателя через is_user_pointer
+  
+- ✅ Реализовать `sys_ioctl()` (базовый)
+  - Поддержка TIOCGWINSZ (размер терминала)
+  - Возврат -ENOTTY для неподдерживаемых запросов
+  - Расширяемая архитектура для будущих устройств
+
+**Архитектурное решение:**
+sys_lseek работает с `open_file_t->offset`, а не с файлом напрямую. Это позволяет нескольким FD на один файл иметь **независимые** позиции (POSIX compliance).
+
+**Тесты:**
+- open + lseek(fd, 10, SEEK_SET) + read = чтение с позиции 10
+- fstat + проверка st_size == размер файла
+- ioctl(TIOCGWINSZ) + проверка 80x50 (VGA) или 1024x768 (FB)
+
+---
+
+### День 14: Process Management Syscalls
+**Цель:** Реализовать sys_fork/sys_waitpid/sys_getpid для Supervisor Trees.
+
+**Задачи:**
+- ✅ Реализовать `sys_fork()` с Copy-on-Write
+  - Создание нового Address Space через vmm_clone_address_space
+  - Copy-on-Write: пометка всех страниц READ-ONLY
+  - Копирование контекста (регистры, FD table, VMA list)
+  - Ребенок видит 0 как результат fork()
+  - Родитель видит PID ребенка
+  
+- ✅ Реализовать `sys_waitpid()` с status tracking
+  - Поиск ребенка по PID (или -1 для любого)
+  - Ожидание TASK_DEAD состояния
+  - Извлечение exit_code из task_t
+  - Освобождение ресурсов через task_reap
+  - Поддержка WNOHANG (non-blocking)
+  
+- ✅ Реализовать `sys_getpid()`
+  - Возврат `current_task->pid`
+  
+- ✅ Создать Init Task (PID 1)
+  - Бесконечный цикл sys_waitpid(-1, &status, 0)
+  - Orphan adoption (усыновление сирот)
+  - Перезапуск упавших супервизоров
+
+**Архитектурное решение:**
+Copy-on-Write (CoW) — ключевая оптимизация. fork() **не копирует** память. Он создает новые Page Tables, ссылающиеся на те же физические страницы с флагом READ-ONLY. При записи срабатывает Page Fault, VMM выделяет личную копию страницы. Результат: перезапуск сервиса весом 10 МБ занимает микросекунды.
+
+**Тесты:**
+- fork + child sys_exit(42) + parent waitpid = status 42
+- fork + CoW: родитель и ребенок пишут в одну страницу = разные значения
+- waitpid с WNOHANG на живого ребенка = 0
+
+---
+
+### День 15: Time & System Info Syscalls
+**Цель:** Реализовать sys_gettimeofday/sys_sleep/sys_uname/sys_sysinfo для profiling и диагностики.
+
+**Задачи:**
+- ✅ Реализовать `sys_gettimeofday()` через PIT ticks
+  - Конвертация ticks в секунды и микросекунды
+  - Заполнение `struct timeval`
+  - Валидация указателя
+  
+- ✅ Реализовать `sys_sleep()` через timer queue
+  - Вычисление wake_time = current_ticks + seconds * 1000
+  - Перевод задачи в TASK_SLEEPING
+  - Добавление в timer queue
+  - schedule() для передачи CPU
+  
+- ✅ Реализовать `sys_uname()` с информацией об ОС
+  - Заполнение `struct utsname` (sysname, release, version, machine)
+  - "Bare Metal OS", "0.1-alpha", "Day 15 Build", "i686"
+  
+- ✅ Реализовать `sys_sysinfo()` с статистикой системы
+  - PMM: total_pages, free_pages, allocated_pages
+  - Heap: total_allocs, total_frees, balance
+  - Tasks: task_count, zombie_count
+
+**Архитектурное решение:**
+sys_sleep использует **timer queue** (связный список спящих задач), а не busy-wait. Это позволяет CPU выполнять другие задачи или hlt для экономии энергии.
+
+**Тесты:**
+- gettimeofday + sleep(2) + gettimeofday = разница ~2 секунды
+- uname + проверка "Bare Metal OS"
+- sysinfo + проверка PMM balance == 0 (нет утечек)
+
+---
+
+## 📅 ФАЗА 2: TINYCC PORTING (День 16-20)
+
+### День 16: User Libc Foundation
+**Цель:** Создать минимальную libc для Ring 3 программ.
+
+**Задачи:**
+- ✅ Создать `include/user_libc.h` с POSIX-совместимым API
+  - Memory: malloc, free, memset, memcpy
+  - String: strlen, strcmp, strcpy
+  - File I/O: open, close, read, write
+  - Output: printf
+  - Process: exit
+  
+- ✅ Реализовать `src/user_libc.c`
+  - malloc/free через sys_brk (простой bump allocator)
+  - String functions (копирование из klib.c)
+  - File I/O через syscalls
+  - printf через sys_write (упрощенная реализация)
+
+**Архитектурное решение:**
+malloc использует **bump allocator** — просто увеличивает heap_end через sys_brk. free() ничего не делает (утечка памяти). Это достаточно для TinyCC и тестовых программ. Production-ready malloc (buddy system) — отдельная задача.
+
+**Тесты:**
+- malloc(1024) + memset + free
+- printf("Hello %s, %d\n", "World", 42)
+- open + write + close + open + read + close
+
+---
+
+### День 17: TinyCC Dependency Analysis
+**Цель:** Проанализировать зависимости TinyCC от libc.
+
+**Задачи:**
+- ✅ Скачать исходники TinyCC (git clone https://repo.or.cz/tinycc.git)
+- ✅ Проанализировать все `#include` директивы
+  - stdio.h → fopen, fread, fwrite, fclose
+  - stdlib.h → malloc, free, exit
+  - string.h → memcpy, strlen, strcmp
+  - unistd.h → read, write, open, close, lseek
+  - sys/mman.h → mmap, munmap
+  - fcntl.h → O_RDONLY, O_WRONLY, O_CREAT
+  - errno.h → errno глобальная переменная
+  
+- ✅ Составить список необходимых функций libc
+- ✅ Определить, какие функции можно упростить или эмулировать
+
+**Архитектурное решение:**
+TinyCC использует `mmap` для code generation. Мы уже реализовали sys_mmap на День 12, поэтому TinyCC сможет работать без модификаций.
+
+**Результат:**
+Полный список зависимостей и план адаптации.
+
+---
+
+### День 18: TinyCC Adaptation Layer
+**Цель:** Создать слой адаптации для работы TinyCC в Bare Metal OS.
+
+**Задачи:**
+- ✅ Создать `tcc_baremetal.c` с переопределениями libc функций
+  - FILE* структура через file descriptors
+  - fopen → sys_open
+  - fread → sys_read
+  - fwrite → sys_write
+  - fclose → sys_close
+  
+- ✅ Реализовать stdin/stdout/stderr как FILE*
+  - stdin → fd 0
+  - stdout → fd 1
+  - stderr → fd 2
+  
+- ✅ Добавить `errno` глобальную переменную
+- ✅ Убрать зависимости от dynamic linking (флаг -static)
+
+**Архитектурное решение:**
+FILE* — это простая структура с `int fd` и `int eof`. Это достаточно для TinyCC, который не использует сложные buffering стратегии.
+
+**Тесты:**
+- fopen + fread + fclose
+- fprintf(stdout, "Test %d\n", 42)
+- errno после неудачного fopen
+
+---
+
+### День 19: TinyCC Compilation
+**Цель:** Скомпилировать TinyCC кросс-компилятором и интегрировать в ISO.
+
+**Задачи:**
+- ✅ Скомпилировать TinyCC с кросс-компилятором
+  - i686-linux-gnu-gcc с флагами -m32 -nostdlib -static -ffreestanding
+  - Линковка с user_libc.o и crt0.o
+  - Использование user_linker.ld
+  
+- ✅ Создать `crt0.S` для startup code
+  - Вызов main()
+  - Вызов exit() с кодом возврата
+  
+- ✅ Интегрировать в ISO (добавить в initrd)
+  - Копирование tcc.elf в /bin/tcc
+  - Обновление Makefile для автоматической сборки
+
+**Архитектурное решение:**
+TinyCC компилируется как **обычный ELF-бинарник** для Ring 3. Он не имеет привилегий ядра и работает через syscalls, как любая другая user-space программа.
+
+**Тесты:**
+- Запуск `tcc --version` в Shell
+- Проверка, что tcc.elf загружается через sys_exec
+
+---
+
+### День 20: TinyCC Testing
+**Цель:** Протестировать компиляцию и запуск программ через TinyCC.
+
+**Задачи:**
+- ✅ Запустить `tcc --version` в Shell
+- ✅ Скомпилировать простую программу через tcc
+  - `echo 'int main() { return 42; }' > /tmp/test.c`
+  - `tcc /tmp/test.c -o /tmp/test.elf`
+  
+- ✅ Запустить скомпилированную программу
+  - `run /tmp/test.elf`
+  - Проверка exit code == 42
+  
+- ✅ Протестировать разные фичи C
+  - Рекурсия (factorial)
+  - Структуры данных
+  - Указатели
+  - String literals
+
+**Архитектурное решение:**
+TinyCC генерирует **ELF-бинарники**, которые загружаются через существующий sys_exec + elf_load. Никаких модификаций ядра не требуется.
+
+**Тесты:**
+- Компиляция hello.c + запуск = "Hello, World!"
+- Компиляция factorial.c + запуск = 120 (5!)
+- Компиляция программы с структурами + указателями
+
+---
+
+## 📅 ФАЗА 3: SELF-HOSTING & INTEGRATION (День 21-25)
+
+### День 21: Advanced C Features Testing
+**Цель:** Протестировать продвинутые фичи C в TinyCC.
+
+**Задачи:**
+- ✅ Протестировать структуры данных (struct Point { int x, y; })
+- ✅ Протестировать указатели (int* ptr = &value)
+- ✅ Протестировать string literals (char* str = "Hello")
+- ✅ Протестировать массивы (int arr[5] = {1, 2, 3, 4, 5})
+- ✅ Протестировать циклы (for, while, do-while)
+- ✅ Протестировать условные операторы (if/else, switch/case)
+
+**Тесты:**
+- Программа с структурами + указателями + циклами
+- Проверка корректности вычислений
+- Проверка отсутствия memory corruption
+
+---
+
+### День 22: Self-Hosting Preparation
+**Цель:** Подготовить среду для компиляции TinyCC самим TinyCC.
+
+**Задачи:**
+- ✅ Скопировать исходники TinyCC в VFS (/src/tcc/)
+  - tcc.c, tccpp.c, tccgen.c, tccelf.c, libtcc.c, i386-gen.c, i386-asm.c
+  
+- ✅ Создать build скрипт на Shell (/scripts/build_tcc.sh)
+  - Компиляция каждого .c файла через tcc -c
+  - Линковка всех .o файлов через tcc
+  - Создание /tmp/tcc_selfhosted.elf
+  
+- ✅ Протестировать build скрипт
+  - Запуск через run /scripts/build_tcc.sh
+  - Проверка создания tcc_selfhosted.elf
+
+**Архитектурное решение:**
+Build скрипт использует **существующий** tcc для компиляции **нового** tcc. Это доказывает, что TinyCC может компилировать сам себя (self-hosting).
+
+**Тесты:**
+- Запуск build скрипта
+- Проверка, что все .o файлы созданы
+- Проверка, что tcc_selfhosted.elf создан
+
+---
+
+### День 23: Self-Hosting Execution
+**Цель:** Запустить self-hosted TinyCC и скомпилировать тестовую программу.
+
+**Задачи:**
+- ✅ Запустить self-hosted TinyCC
+  - `/tmp/tcc_selfhosted.elf --version`
+  - Проверка, что версия совпадает
+  
+- ✅ Скомпилировать тестовую программу self-hosted компилятором
+  - `echo 'int main() { print("Self-hosting works!"); return 0; }' > /tmp/selftest.c`
+  - `/tmp/tcc_selfhosted.elf /tmp/selftest.c -o /tmp/selftest.elf`
+  
+- ✅ Запустить скомпилированную программу
+  - `run /tmp/selftest.elf`
+  - Проверка вывода "Self-hosting works!"
+
+**Архитектурное решение:**
+Self-hosting — это **кульминация** проекта. ОС компилирует компилятор, который компилирует программы. Это доказывает, что Bare Metal OS — **настоящая платформа**, а не игрушка.
+
+**Тесты:**
+- Self-hosted tcc --version
+- Компиляция программы self-hosted tcc
+- Запуск скомпилированной программы
+
+---
+
+### День 24: Shell Integration
+**Цель:** Интегрировать TinyCC в Shell для удобства разработки.
+
+**Задачи:**
+- ✅ Добавить команду `compile <file.c> [output.elf]` в Shell
+  - Парсинг аргументов
+  - Вызов sys_fork + sys_exec("/bin/tcc", ...)
+  - sys_waitpid для ожидания завершения
+  - Вывод статуса компиляции
+  
+- ✅ Добавить команду `run <file.elf> [args...]` с аргументами
+  - Парсинг аргументов
+  - Передача argv в sys_exec
+  - Вывод exit code
+  
+- ✅ Обновить help с новыми командами
+
+**Архитектурное решение:**
+Shell использует **sys_fork + sys_exec + sys_waitpid** для запуска tcc. Это стандартный Unix pattern (как system() в libc).
+
+**Тесты:**
+- compile /src/hello.c /bin/hello
+- run /bin/hello
+- compile с ошибками + проверка статуса
+
+---
+
+### День 25: Documentation & Polish
+**Цель:** Обновить документацию и создать примеры программ.
+
+**Задачи:**
+- ✅ Обновить README с инструкциями по использованию TinyCC
+  - Секция "Использование TinyCC"
+  - Примеры команд (compile, run)
+  - Self-hosting demonstration
+  
+- ✅ Создать примеры программ в /examples/
+  - hello.c — Hello World
+  - factorial.c — Рекурсия
+  - fileio.c — Работа с файлами
+  - mmap.c — Memory mapping
+  
+- ✅ Написать мануал по разработке программ для Bare Metal OS
+  - Как писать программы
+  - Как компилировать
+  - Как отлаживать
+  
+- ✅ Оптимизировать производительность компиляции
+  - Профилирование tcc
+  - Оптимизация узких мест
+
+**Результат:**
+Полная документация + примеры + оптимизированный TinyCC.
+
+---
+
+## 🎯 ИТОГОВАЯ АРХИТЕКТУРА (День 25)
+
+### Что работает:
+```
+Bare Metal OS
+├── 25 POSIX-like syscalls (полный API для user-space)
+├── TinyCC компилятор в Ring 3 (100KB, быстрый)
+├── Self-hosting capability (компилирует сам себя)
+├── Shell команды: compile, run (удобство разработки)
+├── /examples/ с демонстрационными программами
+└── Полная документация (README + мануал)
+```
+
+### Демонстрация:
+```bash
+$ uname
+Bare Metal OS 0.1-alpha i686
+
+$ compile /examples/hello.c /bin/hello
+Compiled successfully: /bin/hello
+
+$ run /bin/hello
+Hello from self-hosted OS!
+
+$ echo 'int main() { return 42; }' > /tmp/test.c
+$ /bin/tcc /tmp/test.c -o /tmp/test.elf
+$ run /tmp/test.elf
+Exit code: 42
+```
+
+### Достижения:
+✅ **Self-hosting toolchain** — компилируешь программы внутри своей ОС  
+✅ **25 POSIX syscalls** — стандартный API для программ  
+✅ **Production-ready C compiler** — настоящий C99  
+✅ **Zero Trust Sandbox** — все через syscalls с валидацией  
+✅ **Уникальная фича** — 99% hobby OS не имеют self-hosting
+
+---
+
+## ⚠️ КРИТИЧЕСКИЕ ЗАМЕЧАНИЯ
+
+### Memory Safety
+- Все syscalls проверяют указатели через `is_user_pointer()`
+- sys_mmap проверяет Resource Container лимиты
+- W^X enforcement предотвращает code injection
+- sys_mprotect обновляет PTE через VMM (не напрямую)
+
+### Performance
+- TinyCC компилирует в 10 раз быстрее GCC (монолитная архитектура)
+- sys_mmap использует on-demand paging (физические страницы выделяются по Page Fault)
+- Copy-on-Write в sys_fork() минимизирует копирование памяти
+- Bump allocator в malloc() быстрее buddy system (для тестов)
+
+### Security
+- Ring 3 не имеет доступа к kernel heap (0xD0000000 мапится без PAGE_USER)
+- Все syscalls валидируют аргументы (Zero Trust Sandbox)
+- OOM внутри контейнера не влияет на ядро (Resource Containers)
+- W^X enforcement на уровне VMM (не только linker script)
+
+### Next Steps (День 26+)
+- Добавить поддержку #include директив в TinyCC (preprocessor)
+- Реализовать полноценную libc (stdio.h, stdlib.h, math.h)
+- Портовать другие программы (grep, cat, ls, simple shell)
+- Добавить поддержку Makefile'ов (make -f Makefile.baremetal)
+- Реализовать dynamic linking (dlopen, dlsym)
+
+---
+
+## 🔒 ГАРАНТИИ СИСТЕМЫ (Target SLA)
+
+- Ядро **НИКОГДА** не падает в Kernel Panic из-за бага в Ring 3 коде
+- Любой syscall валидирует аргументы и возвращает errno
+- OOM внутри контейнера убивает только процесс внутри контейнера
+- Self-hosted TinyCC компилирует программы **точно так же**, как кросс-компилятор
+- W^X enforcement работает на уровне VMM (аппаратная защита)
+
+---
+
+## 💡 ИСТОЧНИКИ ВДОХНОВЕНИЯ
+
+- **TinyCC (Fabrice Bellard):** Минимализм + скорость + self-hosting
+- **Linux:** POSIX syscalls + VFS + ELF loader
+- **Minix 3:** User-mode drivers + message passing IPC
+- **FreeBSD:** Syscall table pattern + errno codes
+- **Plan 9:** Everything is a file + namespaces
+
+---
+
+## 🚀 ВЕРДИКТ
+
+Этот план превращает Bare Metal OS из "учебного проекта" в **настоящую self-hosting платформу** за 15 дней. Ты получишь уникальную ОС, которая может компилировать программы сама для себя — это то, чего нет у 99% hobby OS.
+
+**Ключевое отличие:** Self-hosting capability доказывает, что твоя ОС — **настоящая платформа**, а не игрушка. Ты можешь разрабатывать программы **внутри своей ОС**, без кросс-компиляции.
+
+Это то чувство, ради которого вообще стоит писать Bare Metal ОС. 🚀
+
 
 7. ВИЗИЯ: "БЕССМЕРТНАЯ КРЕПОСТЬ" (North Star)
 

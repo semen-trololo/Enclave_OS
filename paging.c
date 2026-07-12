@@ -18,6 +18,9 @@ extern uint8_t boot_stack_top[];
 extern uint8_t _kernel_start[];
 extern uint8_t _kernel_end[];
 
+// ============================================================================
+// PAGE FAULT HANDLER (INT 14)
+// ============================================================================
 void page_fault_handler(struct regs* r) {
     uint32_t faulting_address;
     __asm__ volatile("mov %%cr2, %0" : "=r"(faulting_address));
@@ -28,10 +31,10 @@ void page_fault_handler(struct regs* r) {
     int reserved  = r->err_code & 0x8; 
     int id        = r->err_code & 0x10;
     
+    // 1. NULL Pointer Guard
     if (faulting_address < 0x1000) {
         if (us) {
-            serial_printf("[PF] SIGSEGV: NULL Pointer Dereference in PID %d\n", 
-                          current_task->pid);
+            serial_printf("[PF] SIGSEGV: NULL Pointer Dereference in PID %d\n", current_task->pid);
             task_kill_current("NULL Pointer Dereference");
         } else {
             serial_print("\n[PF] === FATAL: Kernel NULL Pointer Dereference ===\n");
@@ -40,12 +43,14 @@ void page_fault_handler(struct regs* r) {
         }
     }
     
+    // 2. Kernel Space Protection
     if (faulting_address >= KERNEL_SPACE_START && us) {
         serial_printf("[PF] SIGSEGV: Ring 3 attempted access to Kernel Space (0x%x) in PID %d\n", 
                       faulting_address, current_task->pid);
         task_kill_current("Attempted access to Kernel Space");
     }
     
+    // 3. Kernel Heap Lazy Allocation (Ring 0 only)
     if (!us) {
         if (!present && !reserved && faulting_address >= KERNEL_HEAP_VIRT && 
             faulting_address < KERNEL_HEAP_END) {
@@ -54,9 +59,8 @@ void page_fault_handler(struct regs* r) {
                 k_memset((void*)PHYS_TO_VIRT(phys), 0, 4096); 
                 uint32_t virt_page = faulting_address & 0xFFFFF000;
                 
+                // Kernel mapping (boot_page_directory)
                 vmm_map_page(virt_page, phys, PAGE_PRESENT | PAGE_WRITE);
-                
-                serial_printf("[PF] Lazy alloc: Virt 0x%x -> Phys 0x%x\n", virt_page, phys);
                 return;
             } else {
                 serial_print("\n[PF] === FATAL: Kernel OOM ===\n");
@@ -71,6 +75,7 @@ void page_fault_handler(struct regs* r) {
         while(1) { __asm__ volatile("cli; hlt"); }
     }
     
+    // 4. User Space Demand Paging (Zero Trust Sandbox)
     vma_node_t* vma = vma_find(current_task, faulting_address);
     
     if (!vma) {
@@ -86,10 +91,8 @@ void page_fault_handler(struct regs* r) {
     }
     
     uint32_t phys = pmm_alloc_page();
-    
     if (phys == 0) {
-        serial_printf("[PF] OOM Kill: Physical memory exhausted in PID %d\n", 
-                      current_task->pid);
+        serial_printf("[PF] OOM Kill: Physical memory exhausted in PID %d\n", current_task->pid);
         task_kill_current("Out of Memory (OOM Kill)");
     }
     
@@ -98,12 +101,22 @@ void page_fault_handler(struct regs* r) {
     
     k_memset((void*)PHYS_TO_VIRT(phys), 0, 4096);
     uint32_t virt_page = faulting_address & 0xFFFFF000;
-    vmm_map_page_in_pd(current_task->pdir_virt, virt_page, phys, flags);
+    
+    // 🛡️ FIX: Strict Error Propagation
+    // Если VMM не смог выделить Page Table (OOM), мы ОБЯЗАНЫ освободить 
+    // выделенную страницу данных, иначе она навсегда потеряется в PMM (Orphaned Page).
+    if (vmm_map_page_in_pd(current_task->pdir_virt, virt_page, phys, flags) != 0) {
+        pmm_free_page(phys); // Rollback PMM allocation!
+        task_kill_current("Out of Memory (VMM PT Alloc Failed)");
+    }
     
     serial_printf("[PF] Demand paging: Virt 0x%x -> Phys 0x%x (PID %d)\n", 
                   virt_page, phys, current_task->pid);
 }
 
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
 void paging_init(void) {
     serial_print("[VMM] Reserving kernel structures in PMM...\n");
     pmm_reserve_region(0x00100000, 0x01000000);
@@ -142,7 +155,36 @@ void paging_init(void) {
     serial_print("[VMM] CR3 reloaded. Paging active.\n");
 }
 
-void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_t flags) {
+// ============================================================================
+// KERNEL SPACE MAPPING (boot_page_directory)
+// ============================================================================
+void vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
+    uint32_t dir_index = virt >> 22;
+    uint32_t table_index = (virt >> 12) & 0x3FF;
+
+    uint32_t pde = boot_page_directory[dir_index];
+
+    if (!(pde & PAGE_PRESENT)) {
+        uint32_t new_pt_phys = pmm_alloc_page();
+        if (new_pt_phys == 0) {
+            serial_print("[VMM] FATAL OOM in vmm_map_page (Kernel)!\n");
+            while(1) __asm__("cli; hlt");
+        }
+        k_memset((void*)PHYS_TO_VIRT(new_pt_phys), 0, 4096); 
+        boot_page_directory[dir_index] = new_pt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+    }
+
+    uint32_t pt_phys = boot_page_directory[dir_index] & 0xFFFFF000; 
+    uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys); 
+    pt[table_index] = phys | flags;
+
+    __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+}
+
+// ============================================================================
+// USER SPACE MAPPING (Custom Page Directory)
+// ============================================================================
+int vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t dir_index = virt >> 22;
     uint32_t table_index = (virt >> 12) & 0x3FF;
 
@@ -156,8 +198,8 @@ void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_
     if (!(pde & PAGE_PRESENT)) {
         uint32_t new_pt_phys = pmm_alloc_page();
         if (new_pt_phys == 0) {
-            serial_print("[VMM] OOM in vmm_map_page_in_pd!\n");
-            return; 
+            serial_print("[VMM] OOM in vmm_map_page_in_pd (PT alloc failed)!\n");
+            return -1; // 🛡️ FIX: Возвращаем ошибку, а не делаем silent return
         }
         k_memset((void*)PHYS_TO_VIRT(new_pt_phys), 0, 4096); 
         pd_virt[dir_index] = new_pt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
@@ -166,17 +208,27 @@ void vmm_map_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t phys, uint32_
 
     uint32_t pt_phys = pd_virt[dir_index] & 0xFFFFF000; 
     uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys); 
+    
+    // Защита от утечки PMM при пере-маппинге (если PTE уже был занят)
+    if (pt[table_index] & PAGE_PRESENT) {
+        uint32_t old_phys = pt[table_index] & 0xFFFFF000;
+        pmm_free_page(old_phys);
+    }
+
     pt[table_index] = phys | flags;
 
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    return 0; // Успех
 }
 
+// ============================================================================
+// UNMAPPING
+// ============================================================================
 void vmm_unmap_page_in_pd(uint32_t* pd_virt, uint32_t virt) {
     uint32_t dir_index = virt >> 22;
     uint32_t table_index = (virt >> 12) & 0x3FF;
 
     uint32_t pde = pd_virt[dir_index];
-    
     if (!(pde & PAGE_PRESENT)) return; 
 
     uint32_t pt_phys = pde & 0xFFFFF000;
@@ -188,6 +240,45 @@ void vmm_unmap_page_in_pd(uint32_t* pd_virt, uint32_t virt) {
     }
 }
 
+void vmm_unmap_and_free_page_in_pd(uint32_t* pd_virt, uint32_t virt) {
+    uint32_t dir_index = virt >> 22;
+    uint32_t table_index = (virt >> 12) & 0x3FF;
+
+    uint32_t pde = pd_virt[dir_index];
+    if (!(pde & PAGE_PRESENT)) return; 
+
+    uint32_t pt_phys = pde & 0xFFFFF000;
+    uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
+
+    if (pt[table_index] & PAGE_PRESENT) {
+        uint32_t phys = pt[table_index] & 0xFFFFF000;
+        pmm_free_page(phys); // ✅ Возвращаем страницу в PMM!
+        pt[table_index] = 0; 
+        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    }
+}
+
+void vmm_protect_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t flags) {
+    uint32_t dir_index = virt >> 22;
+    uint32_t table_index = (virt >> 12) & 0x3FF;
+
+    uint32_t pde = pd_virt[dir_index];
+    if (!(pde & PAGE_PRESENT)) return; 
+
+    uint32_t pt_phys = pde & 0xFFFFF000;
+    uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
+
+    if (pt[table_index] & PAGE_PRESENT) {
+        uint32_t phys = pt[table_index] & 0xFFFFF000;
+        // Сохраняем физический адрес, меняем только флаги
+        pt[table_index] = phys | flags; 
+        __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    }
+}
+
+// ============================================================================
+// ADDRESS SPACE MANAGEMENT
+// ============================================================================
 uint32_t* vmm_create_address_space(void) {
     uint32_t phys_pd = pmm_alloc_page();
     if (phys_pd == 0) return 0;
@@ -195,11 +286,11 @@ uint32_t* vmm_create_address_space(void) {
     uint32_t* virt_pd = (uint32_t*)PHYS_TO_VIRT(phys_pd);
     k_memset(virt_pd, 0, 4096);
     
+    // Clone Kernel Space (768-1023)
     for (int i = 768; i < 1024; i++) {
         virt_pd[i] = boot_page_directory[i];
     }
     
-    serial_print("[VMM] Created new Address Space.\n");
     return virt_pd;
 }
 
@@ -210,21 +301,32 @@ void vmm_switch_pdir(uint32_t phys_pd) {
 void vmm_destroy_address_space(uint32_t* pdir_virt) {
     if (!pdir_virt || pdir_virt == boot_page_directory) return;
     
+    // Iterate User Space PDEs (0 - 767)
     for (uint32_t i = 0; i < 768; i++) {
         if (pdir_virt[i] & PAGE_PRESENT) {
-            uint32_t pt_phys = pdir_virt[i] & 0xFFFFF000;
-            uint32_t* pt_virt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
-            
-            for (uint32_t j = 0; j < 1024; j++) {
-                if (pt_virt[j] & PAGE_PRESENT) {
-                    uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
-                    pmm_free_page(page_phys);
+            if (pdir_virt[i] & PAGE_PS) {
+                // 4MB Page
+                uint32_t page_phys = pdir_virt[i] & 0xFFC00000;
+                for(uint32_t p = 0; p < 1024; p++) {
+                    pmm_free_page(page_phys + (p * 4096));
                 }
+            } else {
+                // 4KB Pages
+                uint32_t pt_phys = pdir_virt[i] & 0xFFFFF000;
+                uint32_t* pt_virt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
+                
+                for (uint32_t j = 0; j < 1024; j++) {
+                    if (pt_virt[j] & PAGE_PRESENT) {
+                        uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
+                        pmm_free_page(page_phys);
+                    }
+                }
+                pmm_free_page(pt_phys); // Free Page Table
             }
-            pmm_free_page(pt_phys);
+            pdir_virt[i] = 0; // 🛡️ Prevent Double Free
         }
     }
     
     uint32_t pdir_phys = VIRT_TO_PHYS((uint32_t)pdir_virt);
-    pmm_free_page(pdir_phys);
+    pmm_free_page(pdir_phys); // Free Page Directory
 }

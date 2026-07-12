@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "serial.h"
+#include "paging.h"
 
 // ============================================================================
 // МАКРОСЫ ДЛЯ РАБОТЫ С HIGHER HALF
