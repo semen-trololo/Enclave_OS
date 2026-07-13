@@ -7,7 +7,6 @@
 
 // ============================================================================
 // POSIX mman.h CONSTANTS (Day 12)
-// Эти константы нужны для sys_mmap, sys_munmap, sys_mprotect
 // ============================================================================
 #define PROT_READ       0x1
 #define PROT_WRITE      0x2
@@ -19,6 +18,56 @@
 #define MAP_FIXED       0x10
 #define MAP_ANONYMOUS   0x20
 
+// ============================================================================
+// [ДЕНЬ 13] POSIX fcntl.h CONSTANTS (lseek)
+// ============================================================================
+#define SEEK_SET        0   // Установить offset = offset
+#define SEEK_CUR        1   // Установить offset = current + offset
+#define SEEK_END        2   // Установить offset = file_size + offset
+
+// ============================================================================
+// [ДЕНЬ 13] POSIX ioctl CONSTANTS
+// ============================================================================
+#define TIOCGWINSZ      0x5413  // Get Window Size (размер терминала)
+
+// ============================================================================
+// [ДЕНЬ 13] POSIX sys/stat.h STRUCTURES
+// ============================================================================
+// Структура для sys_fstat (упрощенная версия POSIX stat)
+typedef struct {
+    uint32_t st_dev;      // Device ID (пока 0)
+    uint32_t st_ino;      // Inode number (пока 0)
+    uint32_t st_mode;     // File mode (тип + права доступа)
+    uint32_t st_nlink;    // Number of hard links
+    uint32_t st_uid;      // User ID (пока 0)
+    uint32_t st_gid;      // Group ID (пока 0)
+    uint32_t st_rdev;     // Device ID (для special files)
+    uint32_t st_size;     // Total size in bytes
+    uint32_t st_blksize;  // Block size (4096)
+    uint32_t st_blocks;   // Number of 512B blocks allocated
+    uint32_t st_atime;    // Time of last access
+    uint32_t st_mtime;    // Time of last modification
+    uint32_t st_ctime;    // Time of last status change
+} stat_t;
+
+// POSIX file mode bits
+#define S_IFMT      0170000  // File type mask
+#define S_IFREG     0100000  // Regular file
+#define S_IFDIR     0040000  // Directory
+#define S_IFCHR     0020000  // Character device
+#define S_IFBLK     0060000  // Block device
+
+// ============================================================================
+// [ДЕНЬ 13] POSIX sys/ioctl.h STRUCTURES
+// ============================================================================
+// Структура для TIOCGWINSZ (размер окна терминала)
+typedef struct {
+    uint16_t ws_row;    // Rows (in characters)
+    uint16_t ws_col;    // Columns (in characters)
+    uint16_t ws_xpixel; // Horizontal size (pixels) - unused
+    uint16_t ws_ypixel; // Vertical size (pixels) - unused
+} winsize_t;
+
 // ========================================================================
 // Номера системных вызовов (Linux x86 ABI compatible)
 // ========================================================================
@@ -28,7 +77,7 @@
 #define SYS_WRITE     4
 #define SYS_OPEN      5
 #define SYS_CLOSE     6
-#define SYS_WAITPID   7    // ✅ Зарезервировано для Дня 14
+#define SYS_WAITPID   7    // ✅ День 14
 #define SYS_CREAT     8    // ✅ Зарезервировано
 #define SYS_LINK      9
 #define SYS_UNLINK    10
@@ -37,10 +86,13 @@
 #define SYS_TIME      13
 #define SYS_MKNOD     14
 #define SYS_CHMOD     15
+#define SYS_LSEEK     19   // ✅ [ДЕНЬ 13]
+#define SYS_FSTAT     28   // ✅ [ДЕНЬ 13]
 #define SYS_BRK       45
+#define SYS_IOCTL     54   // ✅ [ДЕНЬ 13]
 #define SYS_MMAP      90
 #define SYS_MUNMAP    91
-#define SYS_GETPID    122  // ✅ Зарезервировано для Дня 14
+#define SYS_GETPID    122  // ✅ День 14
 #define SYS_MPROTECT  125
 #define SYS_YIELD     158  // Custom: добровольный yield
 
