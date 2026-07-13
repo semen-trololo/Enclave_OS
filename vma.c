@@ -3,8 +3,9 @@
 #include "heap.h"
 #include "klib.h"
 #include "serial.h"
+#include "config.h" // ✅ SSOT: Макросы границ памяти (USER_MMAP_START, KERNEL_SPACE_START)
+#include "kerrno.h" // ✅ POSIX errno
 #include <stdbool.h>
-#include "kerrno.h"
 
 bool vma_intersects(task_t* task, uint32_t start, uint32_t end, vma_node_t* ignore_vma) {
     if (!task) return false;
@@ -61,7 +62,7 @@ uint32_t vma_find_free_area(task_t* task, uint32_t size) {
 }
 
 int vma_unmap_range(task_t* task, uint32_t start, uint32_t end) {
-    if (!task) return -1;
+    if (!task) return -EINVAL;
     
     vma_node_t** curr_ptr = &task->vma_head;
     vma_node_t* curr = task->vma_head;
@@ -104,7 +105,7 @@ int vma_unmap_range(task_t* task, uint32_t start, uint32_t end) {
             vma_node_t* new_node = (vma_node_t*)kmalloc(sizeof(vma_node_t));
             if (!new_node) {
                 serial_print("[VMA] FATAL: OOM splitting VMA in munmap!\n");
-                return -12; // -ENOMEM. Строгий отказ, атомарность сохранена.
+                return -ENOMEM; // ✅ FIX: Строгий отказ, атомарность сохранена.
             }
             
             new_node->start = end;
@@ -131,18 +132,18 @@ int vma_unmap_range(task_t* task, uint32_t start, uint32_t end) {
 // ДОБАВЛЕНИЕ VMA (Сортированный связный список)
 // ============================================================================
 int vma_add(task_t* task, uint32_t start, uint32_t end, uint32_t flags) {
-    if (!task) return -1; // -EINVAL (базовая проверка)
+    if (!task) return -EINVAL; // ✅ FIX
     // ✅ Zero Trust: Запрещаем создавать User VMA в Kernel Space
     if (start >= KERNEL_SPACE_START || end > KERNEL_SPACE_START) {
         serial_printf("[VMA] FATAL: Attempt to create VMA in Kernel Space (0x%x - 0x%x)!\n", start, end);
-        return -1; // -EINVAL
+        return -EINVAL; // ✅ FIX
     }
 
     // Выделяем память под новую ноду
     vma_node_t* new_node = (vma_node_t*)kmalloc(sizeof(vma_node_t));
     if (!new_node) {
         serial_print("[VMA] FATAL: OOM allocating VMA node!\n");
-        return -12; // -ENOMEM (Возвращаем ошибку ядру!)
+        return -ENOMEM; // ✅ FIX
     }
 
     new_node->start = start & 0xFFFFF000; // Page-align down
@@ -170,6 +171,7 @@ int vma_add(task_t* task, uint32_t start, uint32_t end, uint32_t flags) {
                   
     return 0; // Успех
 }
+
 // ============================================================================
 // ПОИСК VMA (Линейный поиск по сортированному списку)
 // ============================================================================
@@ -209,6 +211,10 @@ void vma_destroy_all(task_t* task) {
 
     task->vma_head = NULL;
 }
+
+// ============================================================================
+// [ДЕНЬ 14] КЛОНИРОВАНИЕ VMA (Copy-on-Write)
+// ============================================================================
 int vma_clone(task_t* child_task, task_t* parent_task) {
     child_task->vma_head = NULL;
     

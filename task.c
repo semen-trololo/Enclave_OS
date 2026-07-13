@@ -12,6 +12,7 @@
 #include <stdbool.h>
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
+extern void ret_from_fork(void); // ✅ ASM-трамплин из context_switch.asm
 
 task_t* current_task = 0;
 uint32_t next_pid = 1;
@@ -34,7 +35,7 @@ void task_entry_trampoline(void (*entry_point)(void), bool is_user_mode, uint32_
         enter_usermode((uint32_t)entry_point, user_esp);
     } else {
         entry_point();
-        task_exit();
+        task_exit(0);
     }
 }
 
@@ -262,7 +263,6 @@ void schedule(void) {
     task_t* old_task = current_task;
     task_t* new_task = current_task->next;
     
-    // ✅ ИСПРАВЛЕНО: Пропускаем задачи, которые не готовы к выполнению
     while (new_task != old_task && 
            (new_task->state == TASK_SLEEPING || 
             new_task->state == TASK_ZOMBIE || 
@@ -271,9 +271,7 @@ void schedule(void) {
     }
     
     if (old_task == new_task) {
-        // В очереди только одна задача (или вообще нет готовых)
         if (old_task->state != TASK_RUNNING) {
-            // Нет готовых задач! Отдаем CPU железу до следующего прерывания (Idle)
             __asm__ volatile("sti; hlt; cli");
         }
         __asm__ volatile("push %0; popf" : : "r"(eflags));
@@ -292,7 +290,6 @@ void schedule(void) {
     
     // --- ЗДЕСЬ ПРОДОЛЖАЕТ ВЫПОЛНЕНИЕ УЖЕ НОВАЯ ЗАДАЧА ---
 
-    // 🛡️ REAPER MECHANISM: Зачистка ВСЕХ задач из очереди мертвых
     if (dead_tasks_head != NULL) {
         uint32_t reap_flags;
         __asm__ volatile("pushf; pop %0; cli" : "=r"(reap_flags));
@@ -326,7 +323,7 @@ void task_yield(void) { schedule(); }
 // ============================================================================
 // ЗАВЕРШЕНИЕ ЗАДАЧИ (Normal Exit)
 // ============================================================================
-void task_exit(void) {
+void task_exit(int exit_code) {
     fpu_release_ownership(current_task);
     
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
@@ -370,7 +367,7 @@ void task_exit(void) {
     }
     
     current_task->state = TASK_ZOMBIE;
-    current_task->exit_code = 0;
+    current_task->exit_code = exit_code;
     
     if (current_task->parent && current_task->parent->state == TASK_SLEEPING) {
         current_task->parent->state = TASK_READY;
@@ -443,8 +440,10 @@ void task_kill_current(const char* reason) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14] TASK FORK (Copy-on-Write)
+// [ДЕНЬ 14] TASK FORK (Copy-on-Write) - PRODUCTION READY
 // ============================================================================
+extern void ret_from_fork(void);
+
 int task_fork(struct regs* r) {
     uint32_t stack_size = 16384;
     uint32_t stack_virt = (uint32_t)kmalloc(stack_size);
@@ -498,23 +497,30 @@ int task_fork(struct regs* r) {
     child->monitor_children = current_task->monitor_children;
     
     // ========================================================================
-    // 🛡️ НАДЕЖНОЕ КОПИРОВАНИЕ KERNEL STACK (Linux-style Fork)
+    // 🛡️ BULLETPROOF KERNEL STACK COPYING & FORGING
     // ========================================================================
-    uint32_t* parent_stack_top = (uint32_t*)(current_task->kernel_stack_virt + stack_size);
-    uint32_t* child_stack_top = (uint32_t*)(stack_virt + stack_size);
+    k_memcpy((void*)(stack_virt), (void*)(current_task->kernel_stack_virt), stack_size);
     
-    k_memcpy(child_stack_top - (stack_size / 4), 
-             parent_stack_top - (stack_size / 4), 
-             stack_size);
+    uint32_t offset_from_base = (uint32_t)r - current_task->kernel_stack_virt;
+    struct regs* original_child_r = (struct regs*)(stack_virt + offset_from_base);
     
-    uint32_t esp_offset = parent_stack_top - (uint32_t*)current_task->esp;
-    child->esp = (uint32_t)(child_stack_top - esp_offset);
+    // Сдвигаем ISR frame вниз на 32 байта, освобождая место для фейкового фрейма
+    uint32_t shift = 32;
+    struct regs* child_r = (struct regs*)((uint32_t)original_child_r - shift);
+    k_memcpy(child_r, original_child_r, sizeof(struct regs));
     
-    uint32_t regs_offset = parent_stack_top - (uint32_t*)r;
-    struct regs* child_r = (struct regs*)(child_stack_top - regs_offset);
+    child_r->eax = 0; // POSIX: ребенок видит 0
     
-    child_r->eax = 0; 
+    uint32_t* child_stack_top = (uint32_t*)child_r;
     
+    *(--child_stack_top) = (uint32_t)child_r;
+    *(--child_stack_top) = (uint32_t)ret_from_fork;
+    *(--child_stack_top) = 0; // EBX
+    *(--child_stack_top) = 0; // ESI
+    *(--child_stack_top) = 0; // EDI
+    *(--child_stack_top) = 0; // EBP
+    
+    child->esp = (uint32_t)child_stack_top;
     // ========================================================================
     
     uint32_t eflags;
@@ -550,9 +556,6 @@ int task_waitpid(int pid, int* status, int options) {
             int exit_code = zombie->exit_code;
             
             if (status) {
-                if ((uint32_t)status >= KERNEL_SPACE_START) {
-                    return -EFAULT;
-                }
                 *status = exit_code;
             }
             
@@ -590,7 +593,7 @@ int task_waitpid(int pid, int* status, int options) {
         }
         
         current_task->state = TASK_SLEEPING;
-        current_task->sleep_until = 0; // ✅ [ДЕНЬ 15] Event-based sleep (не будить по таймеру)
+        current_task->sleep_until = 0;
         serial_printf("[TASK] PID %d sleeping in waitpid\n", current_task->pid);
         schedule();
     }

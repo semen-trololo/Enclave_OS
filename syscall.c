@@ -13,6 +13,7 @@
 #include "elf.h"
 #include "paging.h"
 #include "timer.h"
+#include "framebuffer.h" // ✅ Для fb_is_available()
 
 // ========================================================================
 // Тип для функций-обработчиков системных вызовов
@@ -94,7 +95,7 @@ static int sys_exit_handler(struct regs* r) {
     (void)r;
     uint32_t exit_code = r->ebx;
     serial_printf("[SYSCALL] PID %d exiting with code %u\n", current_task->pid, exit_code);
-    task_exit(); 
+    task_exit(exit_code); // ✅ FIX: Передаем код выхода для waitpid
     return 0;
 }
 
@@ -397,8 +398,7 @@ static int sys_ioctl_handler(struct regs* r) {
             }
             
             winsize_t ws;
-            extern int fb_is_active;
-            if (fb_is_active) {
+            if (fb_is_available()) {
                 ws.ws_row = 48;
                 ws.ws_col = 128;
                 ws.ws_xpixel = 1024;
@@ -425,7 +425,7 @@ static int sys_ioctl_handler(struct regs* r) {
 }
 
 // ========================================================================
-// sys_exec: ЗАМЕНА текущего процесса
+// sys_exec: ЗАМЕНА текущего процесса (POSIX execve semantics)
 // ========================================================================
 static int sys_exec_handler(struct regs* r) {
     const char* user_filename = (const char*)r->ebx;
@@ -469,6 +469,7 @@ static int sys_exec_handler(struct regs* r) {
         return -ENOEXEC;
     }
     
+    // Сохраняем идентичность процесса (PID, имя, FD table)
     uint32_t saved_pid = current_task->pid;
     char saved_name[32];
     k_strncpy(saved_name, current_task->name, sizeof(saved_name));
@@ -478,6 +479,7 @@ static int sys_exec_handler(struct regs* r) {
         saved_fds[i] = current_task->fd_table[i];
     }
     
+    // Уничтожаем старое адресное пространство и VMA
     if (current_task->vma_head) {
         vma_destroy_all(current_task);
     }
@@ -486,11 +488,17 @@ static int sys_exec_handler(struct regs* r) {
         vmm_destroy_address_space(current_task->pdir_virt);
     }
     
+    // ✅ FIX 1: Устанавливаем новое адресное пространство
     current_task->pdir_virt = new_pdir_virt;
     current_task->cr3 = VIRT_TO_PHYS(new_pdir_virt);
     
+    // ✅ FIX 2: КРИТИЧНО! Загружаем новый CR3 в процессор (инвалидация TLB)
+    // Без этого MMU будет использовать старый Page Directory при возврате в Ring 3
+    vmm_switch_pdir(current_task->cr3);
+    
     current_task->vma_head = temp_task.vma_head;
     
+    // Восстанавливаем идентичность
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         current_task->fd_table[i] = saved_fds[i];
     }
@@ -498,6 +506,15 @@ static int sys_exec_handler(struct regs* r) {
     current_task->pid = saved_pid;
     k_strncpy(current_task->name, saved_name, sizeof(current_task->name));
     
+    // ✅ FIX 3: Сбрасываем FPU state (защита от утечки контекста)
+    // Новый процесс должен начать с чистого FPU (fninit при первом #NM)
+    fpu_release_ownership(current_task);
+    current_task->fpu_initialized = 0;
+    
+    // ✅ FIX 4: Сбрасываем таймер сна (если процесс был в sys_sleep)
+    current_task->sleep_until = 0;
+    
+    // Создаем VMA для стека и кучи
     uint32_t stack_top = USER_STACK_VIRT_TOP;
     uint32_t stack_bottom = stack_top - USER_STACK_SIZE;
     
@@ -510,9 +527,10 @@ static int sys_exec_handler(struct regs* r) {
     serial_printf("[SYSCALL] sys_exec: PID %d replaced with '%s' at 0x%x\n", 
                   current_task->pid, current_task->name, entry_point);
     
+    // Модифицируем ISR Frame для возврата в Ring 3
     r->eip = entry_point;
     r->esp = stack_top;
-    r->eax = 0;
+    r->eax = 0; // POSIX: exec не возвращает значение при успехе
     
     return 0;
 }

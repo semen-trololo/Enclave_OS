@@ -332,6 +332,19 @@ void pmm_dec_ref(uint32_t phys_addr) {
     
     load_eflags(flags);
 }
+// ============================================================================
+// [ДЕНЬ 14] REFERENCE COUNTING GETTER
+// ============================================================================
+uint16_t pmm_get_refcount(uint32_t phys_addr) {
+    if (phys_addr % PMM_PAGE_SIZE != 0) return 0;
+    
+    uint32_t page_index = phys_addr / PMM_PAGE_SIZE;
+    if (page_index >= pmm_max_page) return 0;
+    
+    // Чтение uint16_t атомарно на x86, cli/sti здесь не строго обязательны,
+    // но для консистентности с остальным PMM можно оставить как есть.
+    return pmm_refcounts[page_index];
+}
 
 // ============================================================================
 // СТАТИСТИКА

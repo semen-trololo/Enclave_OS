@@ -91,9 +91,10 @@ void page_fault_handler(struct regs* r) {
     }
     
     // 4. [ДЕНЬ 14] Copy-on-Write Page Fault
-    if (rw && !present) {
-    // Это не CoW, а обычный demand paging
-    } else if (rw && present) {
+    // Если была операция записи (rw=1) и страница УЖЕ присутствует (present=1),
+    // но мы все равно получили Page Fault — это нарушение прав доступа.
+    // В нашей архитектуре это означает срабатывание механизма Copy-on-Write (PAGE_COW).
+    if (rw && present) {
         uint32_t dir_index = faulting_address >> 22;
         uint32_t table_index = (faulting_address >> 12) & 0x3FF;
     
@@ -109,52 +110,50 @@ void page_fault_handler(struct regs* r) {
                 uint32_t flags = read_eflags();
                 disable_interrupts();
             
-            // ✅ ОПТИМИЗАЦИЯ: Проверяем refcount
-            // Если refcount == 1, мы единственные владельцы - просто возвращаем PAGE_WRITE
-                extern uint16_t pmm_refcounts[]; // Из pmm.c
-                uint32_t page_index = old_phys / 4096;
+                // ✅ ОПТИМИЗАЦИЯ: Проверяем refcount через API PMM (Layering Compliance)
+                if (pmm_get_refcount(old_phys) == 1) {
+                    // Единственный владелец - снимаем CoW, возвращаем WRITE
+                    uint32_t new_flags = (pte & 0xFFF) & ~PAGE_COW;
+                    new_flags |= PAGE_WRITE;
+                    pt[table_index] = old_phys | new_flags;
+                    
+                    __asm__ volatile("invlpg (%0)" : : "r"(faulting_address) : "memory");
+                    load_eflags(flags);
+                    
+                    serial_printf("[PF] CoW Optimization: Virt 0x%x restored WRITE (PID %d)\n", 
+                                  faulting_address & 0xFFFFF000, current_task->pid);
+                    return;
+                }
             
-            if (pmm_refcounts[page_index] == 1) {
-                // Единственный владелец - снимаем CoW, возвращаем WRITE
+                // Refcount > 1 - выделяем новую страницу и копируем
+                uint32_t new_phys = pmm_alloc_page();
+                if (new_phys == 0) {
+                    load_eflags(flags);
+                    serial_printf("[PF] OOM Kill: CoW allocation failed in PID %d\n", current_task->pid);
+                    task_kill_current("Out of Memory (CoW Failed)");
+                }
+            
+                k_memcpy((void*)PHYS_TO_VIRT(new_phys), (void*)PHYS_TO_VIRT(old_phys), 4096);
+                pmm_dec_ref(old_phys);
+            
                 uint32_t new_flags = (pte & 0xFFF) & ~PAGE_COW;
                 new_flags |= PAGE_WRITE;
-                pt[table_index] = old_phys | new_flags;
-                
+            
+                pt[table_index] = new_phys | new_flags;
                 __asm__ volatile("invlpg (%0)" : : "r"(faulting_address) : "memory");
+            
                 load_eflags(flags);
-                
-                serial_printf("[PF] CoW Optimization: Virt 0x%x restored WRITE (PID %d)\n", 
-                              faulting_address & 0xFFFFF000, current_task->pid);
+            
+                serial_printf("[PF] CoW: Virt 0x%x -> New Phys 0x%x (PID %d)\n", 
+                              faulting_address & 0xFFFFF000, new_phys, current_task->pid);
                 return;
-            }
-            
-            // Refcount > 1 - выделяем новую страницу и копируем
-            uint32_t new_phys = pmm_alloc_page();
-            if (new_phys == 0) {
-                load_eflags(flags);
-                serial_printf("[PF] OOM Kill: CoW allocation failed in PID %d\n", current_task->pid);
-                task_kill_current("Out of Memory (CoW Failed)");
-            }
-            
-            k_memcpy((void*)PHYS_TO_VIRT(new_phys), (void*)PHYS_TO_VIRT(old_phys), 4096);
-            pmm_dec_ref(old_phys);
-            
-            uint32_t new_flags = (pte & 0xFFF) & ~PAGE_COW;
-            new_flags |= PAGE_WRITE;
-            
-            pt[table_index] = new_phys | new_flags;
-            __asm__ volatile("invlpg (%0)" : : "r"(faulting_address) : "memory");
-            
-            load_eflags(flags);
-            
-            serial_printf("[PF] CoW: Virt 0x%x -> New Phys 0x%x (PID %d)\n", 
-                          faulting_address & 0xFFFFF000, new_phys, current_task->pid);
-            return;
             }
         }
     }
     
     // 5. User Space Demand Paging (Zero Trust Sandbox)
+    // Сюда мы попадаем, если страница отсутствует (present=0) или было чтение (rw=0).
+    // Это стандартный On-Demand Paging.
     vma_node_t* vma = vma_find(current_task, faulting_address);
     
     if (!vma) {
@@ -234,11 +233,16 @@ void paging_init(void) {
 // ============================================================================
 // KERNEL SPACE MAPPING (boot_page_directory)
 // ============================================================================
+// ============================================================================
+// KERNEL SPACE MAPPING (boot_page_directory)
+// ============================================================================
 void vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t dir_index = virt >> 22;
     uint32_t table_index = (virt >> 12) & 0x3FF;
 
-    uint32_t pde = boot_page_directory[dir_index];
+    // ✅ FIX: Гарантированно используем виртуальный адрес Higher Half
+    uint32_t* virt_boot_pd = (uint32_t*)PHYS_TO_VIRT((uint32_t)boot_page_directory);
+    uint32_t pde = virt_boot_pd[dir_index];
 
     if (!(pde & PAGE_PRESENT)) {
         uint32_t new_pt_phys = pmm_alloc_page();
@@ -247,10 +251,10 @@ void vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
             while(1) __asm__("cli; hlt");
         }
         k_memset((void*)PHYS_TO_VIRT(new_pt_phys), 0, 4096); 
-        boot_page_directory[dir_index] = new_pt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        virt_boot_pd[dir_index] = new_pt_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
     }
 
-    uint32_t pt_phys = boot_page_directory[dir_index] & 0xFFFFF000; 
+    uint32_t pt_phys = virt_boot_pd[dir_index] & 0xFFFFF000; 
     uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys); 
     pt[table_index] = phys | flags;
 
@@ -352,9 +356,6 @@ void vmm_protect_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t flags) {
     }
 }
 
-// ============================================================================
-// ADDRESS SPACE MANAGEMENT
-// ============================================================================
 uint32_t* vmm_create_address_space(void) {
     uint32_t phys_pd = pmm_alloc_page();
     if (phys_pd == 0) return 0;
@@ -362,9 +363,13 @@ uint32_t* vmm_create_address_space(void) {
     uint32_t* virt_pd = (uint32_t*)PHYS_TO_VIRT(phys_pd);
     k_memset(virt_pd, 0, 4096);
     
+    // ✅ FIX: boot_page_directory может иметь физический адрес в линкере.
+    // Обязательно приводим его к виртуальному адресу Higher Half перед чтением.
+    uint32_t* virt_boot_pd = (uint32_t*)PHYS_TO_VIRT((uint32_t)boot_page_directory);
+    
     // Clone Kernel Space (768-1023)
     for (int i = 768; i < 1024; i++) {
-        virt_pd[i] = boot_page_directory[i];
+        virt_pd[i] = virt_boot_pd[i];
     }
     
     return virt_pd;
@@ -373,31 +378,36 @@ uint32_t* vmm_create_address_space(void) {
 void vmm_switch_pdir(uint32_t phys_pd) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(phys_pd) : "memory");
 }
+
 // ============================================================================
 // [ДЕНЬ 14] ADDRESS SPACE CLONING (Copy-on-Write Implementation)
 // ============================================================================
-
 uint32_t* vmm_clone_address_space(uint32_t* parent_pd_virt) {
+    if (!parent_pd_virt) return NULL;
+    
     uint32_t phys_pd = pmm_alloc_page();
-    if (phys_pd == 0) return 0;
+    if (phys_pd == 0) return NULL;
     
     uint32_t* child_pd_virt = (uint32_t*)PHYS_TO_VIRT(phys_pd);
     k_memset(child_pd_virt, 0, 4096);
     
-    // Клонируем Kernel Space (768-1023)
+    // ✅ FIX: boot_page_directory может иметь физический адрес в линкере.
+    // Обязательно приводим его к виртуальному адресу Higher Half перед чтением.
+    uint32_t* virt_boot_pd = (uint32_t*)PHYS_TO_VIRT((uint32_t)boot_page_directory);
+    
+    // Клонируем Kernel Space (768-1023) из глобального boot_page_directory
     for (int i = 768; i < 1024; i++) {
-        child_pd_virt[i] = boot_page_directory[i];
+        child_pd_virt[i] = virt_boot_pd[i];
     }
     
-    // Клонируем User Space (0-767) с Copy-on-Write
+    // Клонируем User Space (0-767) с Copy-on-Write из parent_pd_virt
     for (uint32_t i = 0; i < 768; i++) {
         uint32_t pde = parent_pd_virt[i];
         if (!(pde & PAGE_PRESENT)) continue;
         
         if (pde & PAGE_PS) {
-            // ✅ ИСПРАВЛЕНО: 4MB страница - НЕ поддерживаем CoW для 4MB страниц
-            // Просто копируем PDE как есть (без увеличения refcount)
-            // 4MB страницы в User Space - редкость, можно позволить роскошь копирования
+            // 4MB страница — НЕ поддерживаем CoW для 4MB страниц (редкость в User Space)
+            // Просто копируем PDE как есть (без увеличения refcount для простоты)
             child_pd_virt[i] = pde;
             // Увеличиваем refcount для ВСЕХ 1024 4KB страниц внутри 4MB региона
             uint32_t phys = pde & 0xFFC00000;
@@ -405,11 +415,11 @@ uint32_t* vmm_clone_address_space(uint32_t* parent_pd_virt) {
                 pmm_inc_ref(phys + (p * 4096));
             }
         } else {
-            // 4KB страницы - создаем новую Page Table
+            // 4KB страницы — создаем новую Page Table для ребенка
             uint32_t pt_phys = pmm_alloc_page();
             if (pt_phys == 0) {
                 vmm_destroy_address_space(child_pd_virt);
-                return 0;
+                return NULL;
             }
             
             uint32_t parent_pt_phys = pde & 0xFFFFF000;
@@ -443,10 +453,14 @@ uint32_t* vmm_clone_address_space(uint32_t* parent_pd_virt) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(parent_pd_phys) : "memory");
     
     return child_pd_virt;
-}
+} // ✅ Закрывающая скобка функции
 
 void vmm_destroy_address_space(uint32_t* pdir_virt) {
-    if (!pdir_virt || pdir_virt == boot_page_directory) return;
+    if (!pdir_virt) return;
+    
+    // ✅ FIX: Сравниваем виртуальные адреса, чтобы случайно не уничтожить boot_page_directory
+    uint32_t* virt_boot_pd = (uint32_t*)PHYS_TO_VIRT((uint32_t)boot_page_directory);
+    if (pdir_virt == virt_boot_pd) return;
     
     // Iterate User Space PDEs (0 - 767)
     for (uint32_t i = 0; i < 768; i++) {
@@ -465,7 +479,7 @@ void vmm_destroy_address_space(uint32_t* pdir_virt) {
                 for (uint32_t j = 0; j < 1024; j++) {
                     if (pt_virt[j] & PAGE_PRESENT) {
                         uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
-                        pmm_free_page(page_phys);
+                        pmm_dec_ref(page_phys); // ✅ FIX: Корректная работа с Copy-on-Write refcounts
                     }
                 }
                 pmm_free_page(pt_phys); // Free Page Table

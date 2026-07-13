@@ -5,7 +5,12 @@
 #include <stdbool.h>
 #include "idt.h"
 #include "vfs.h"
-#include "vma.h"
+
+// ============================================================================
+// FORWARD DECLARATIONS (Разрыв циклической зависимости с vma.h)
+// ============================================================================
+struct vma_node;
+typedef struct vma_node vma_node_t;
 
 // ============================================================================
 // TASK STATES
@@ -75,7 +80,7 @@ extern task_t* init_task;
 void tasking_init(void);
 task_t* task_create(const char* name, void (*entry_point)(void), 
                     bool is_user_mode, uint32_t user_esp, uint32_t* custom_pdir);
-void task_exit(void);
+void task_exit(int exit_code);
 void task_yield(void);
 void schedule(void);
 void task_kill_current(const char* reason);
