@@ -68,6 +68,38 @@ typedef struct {
     uint16_t ws_ypixel; // Vertical size (pixels) - unused
 } winsize_t;
 
+// ============================================================================
+// [ДЕНЬ 15] POSIX TIME & SYSTEM INFO STRUCTURES
+// ============================================================================
+typedef struct {
+    uint32_t tv_sec;
+    uint32_t tv_usec;
+} timeval_t;
+
+#define UTSNAME_LENGTH 65
+typedef struct {
+    char sysname[UTSNAME_LENGTH];
+    char nodename[UTSNAME_LENGTH];
+    char release[UTSNAME_LENGTH];
+    char version[UTSNAME_LENGTH];
+    char machine[UTSNAME_LENGTH];
+} utsname_t;
+
+typedef struct {
+    uint32_t uptime;
+    uint32_t totalram;
+    uint32_t freeram;
+    uint32_t sharedram;
+    uint32_t bufferram;
+    uint32_t totalswap;
+    uint32_t freeswap;
+    uint16_t procs;
+    uint16_t pad;
+    uint32_t totalhigh;
+    uint32_t freehigh;
+    uint32_t mem_unit;
+} sysinfo_t;
+
 // ========================================================================
 // Номера системных вызовов (Linux x86 ABI compatible)
 // ========================================================================
@@ -90,11 +122,15 @@ typedef struct {
 #define SYS_FSTAT     28   // ✅ [ДЕНЬ 13]
 #define SYS_BRK       45
 #define SYS_IOCTL     54   // ✅ [ДЕНЬ 13]
+#define SYS_UNAME     63   // ✅ [ДЕНЬ 15]
+#define SYS_GETTIMEOFDAY 78  // ✅ [ДЕНЬ 15]
 #define SYS_MMAP      90
 #define SYS_MUNMAP    91
+#define SYS_SYSINFO   116  // ✅ [ДЕНЬ 15]
 #define SYS_GETPID    122  // ✅ День 14
 #define SYS_MPROTECT  125
 #define SYS_YIELD     158  // Custom: добровольный yield
+#define SYS_SLEEP     230  // ✅ [ДЕНЬ 15] Custom: sleep в миллисекундах
 
 // ========================================================================
 // Инициализация таблицы системных вызовов
