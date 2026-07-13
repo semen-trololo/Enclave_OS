@@ -36,6 +36,72 @@
 #define SYS_MPROTECT 125
 #define SYS_YIELD    158   // 🛡️ FIX: Синхронизировано с Linux sched_yield
 
+// ============================================================================
+// [ДЕНЬ 13] SEEK CONSTANTS (SSOT sync)
+// ============================================================================
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+// ============================================================================
+// [ДЕНЬ 13] sys_lseek wrapper
+// EBX = fd, ECX = offset, EDX = whence
+// ============================================================================
+static inline int sys_lseek(int fd, int offset, int whence) {
+    int result;
+    __asm__ volatile(
+        "mov $19, %%eax\n"       // SYS_LSEEK
+        "mov %1, %%ebx\n"        // fd
+        "mov %2, %%ecx\n"        // offset
+        "mov %3, %%edx\n"        // whence
+        "int $0x80\n"
+        "mov %%eax, %0"
+        : "=r"(result)
+        : "r"(fd), "r"(offset), "r"(whence)
+        : "eax", "ebx", "ecx", "edx", "memory"
+    );
+    return result;
+}
+
+// ============================================================================
+// [ДЕНЬ 13] sys_fstat wrapper
+// EBX = fd, ECX = pointer to stat_t
+// ============================================================================
+static inline int sys_fstat(int fd, void* stat_buf) {
+    int result;
+    __asm__ volatile(
+        "mov $28, %%eax\n"       // SYS_FSTAT
+        "mov %1, %%ebx\n"        // fd
+        "mov %2, %%ecx\n"        // stat buffer
+        "int $0x80\n"
+        "mov %%eax, %0"
+        : "=r"(result)
+        : "r"(fd), "r"(stat_buf)
+        : "eax", "ebx", "ecx", "memory"
+    );
+    return result;
+}
+
+// ============================================================================
+// [ДЕНЬ 13] sys_ioctl wrapper
+// EBX = fd, ECX = request, EDX = argp
+// ============================================================================
+static inline int sys_ioctl(int fd, unsigned int request, void* argp) {
+    int result;
+    __asm__ volatile(
+        "mov $54, %%eax\n"       // SYS_IOCTL
+        "mov %1, %%ebx\n"        // fd
+        "mov %2, %%ecx\n"        // request
+        "mov %3, %%edx\n"        // argp
+        "int $0x80\n"
+        "mov %%eax, %0"
+        : "=r"(result)
+        : "r"(fd), "r"(request), "r"(argp)
+        : "eax", "ebx", "ecx", "edx", "memory"
+    );
+    return result;
+}
+
 // ========================================================================
 // Универсальный макрос для syscall (до 3 аргументов)
 // ========================================================================
