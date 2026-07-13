@@ -36,7 +36,7 @@ static void pit_handler(struct regs* r) {
     wake_sleepers(); // ✅ Пробуждаем спящих перед планированием
 
     // Квантование времени: переключаем задачи каждые 20 миллисекунд (50 Гц)
-    if (tick_count % 20 == 0) {
+    if (tick_count % 10 == 0) {
         schedule();
     }
 }
