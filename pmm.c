@@ -8,13 +8,6 @@
 #include "paging.h"
 
 // ============================================================================
-// МАКРОСЫ ДЛЯ РАБОТЫ С HIGHER HALF
-// ============================================================================
-// Используем KERNEL_SPACE_START из config.h вместо хардкода 0xC0000000
-#define VIRT_TO_PHYS(addr) (((uint32_t)(addr) >= KERNEL_SPACE_START) ? ((uint32_t)(addr) - KERNEL_SPACE_START) : (uint32_t)(addr))
-#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_SPACE_START)
-
-// ============================================================================
 // СТРУКТУРА MULTIBOOT MODULE
 // ============================================================================
 typedef struct {
