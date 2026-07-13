@@ -564,25 +564,6 @@ ELF Loader:
 
 ## 📅 ФАЗА 1: POSIX-LIKE SYSCALL INFRASTRUCTURE (День 11-15)
 
-### День 11: Syscall Table Expansion
-**Цель:** Создать расширяемую инфраструктуру для 256 системных вызовов.
-
-**Задачи:**
-- ✅ Определить syscall numbers (SYS_EXIT=1, SYS_FORK=2, ..., SYS_SYSINFO=25) в `include/syscall.h`
-- ✅ Создать typedef для function pointer: `syscall_func_t`
-- ✅ Реализовать глобальный массив `syscall_table[256]` в `src/syscall.c`
-- ✅ Реализовать `syscall_dispatcher()` с валидацией номера
-- ✅ Обновить INT 0x80 handler для вызова dispatcher
-- ✅ Добавить возврат `-ENOSYS` для несуществующих syscall'ов
-
-**Архитектурное решение:**
-Использовать designated initializers (`[SYS_EXIT] = sys_exit`) для читаемости и безопасности. Это предотвращает ошибки индексации.
-
-**Тесты:**
-- Вызов всех существующих syscalls через таблицу
-- Проверка ENOSYS для несуществующих syscall'ов (например, SYS_999)
-- Проверка валидации аргументов
-
 ---
 ## 📋 СТАТУС ДНЯ 11: Syscall Table Expansion & Memory Hardening (ЗАВЕРШШЕНО)
 
@@ -643,35 +624,6 @@ ELF Loader:
 
 Рекомендуется начать с **Дня 14**, так как `sys_fork` с Copy-on-Write критически важен для паттерна `fork/exec`, который мы зафиксировали в True POSIX `sys_exec` на этом дне. День 12 (mmap) можно реализовать параллельно или после, так как TinyCC появится только на Дне 17-20.
 
-### День 12: Memory Management Syscalls
-**Цель:** Реализовать sys_mmap/sys_munmap/sys_mprotect для TinyCC и user-space программ.
-
-**Задачи:**
-- ✅ Реализовать `sys_mmap()` с VMA integration
-  - Валидация length (0 < length <= 256MB)
-  - W^X enforcement (PROT_WRITE | PROT_EXEC = EPERM)
-  - Проверка Resource Container лимитов
-  - Создание VMA с правильными правами доступа
-  - On-demand paging (физические страницы выделяются по Page Fault)
-  
-- ✅ Реализовать `sys_munmap()` с VMA cleanup
-  - Поиск VMA по адресу
-  - Удаление VMA из списка
-  - Unmap физических страниц через VMM
-  - Освобождение VMA структуры
-  
-- ✅ Реализовать `sys_mprotect()` с page table updates
-  - Изменение прав доступа в VMA
-  - Обновление PTE через VMM
-  - TLB flush для консистентности
-
-**Архитектурное решение:**
-sys_mmap **не выделяет** физические страницы сразу. Он создает VMA и возвращает виртуальный адрес. Физические страницы выделяются аппаратно через Page Fault (INT 14) при первом обращении. Это экономит RAM и ускоряет mmap.
-
-**Тесты:**
-- mmap + write + mprotect(PROT_READ) + write = SIGSEGV (W^X violation)
-- mmap 256MB + проверка Resource Container
-- munmap + обращение к памяти = SIGSEGV
 
 ---
 
@@ -865,6 +817,14 @@ sys_sleep использует **timer queue** (связный список сп
 - gettimeofday + sleep(2) + gettimeofday = разница ~2 секунды
 - uname + проверка "Bare Metal OS"
 - sysinfo + проверка PMM balance == 0 (нет утечек)
+
+🎯 Итог Дня 15
+Теперь у тебя:
+✅ Исправленный планировщик с пропуском спящих задач и Idle HLT
+✅ Timer Queue для sys_sleep (через поле sleep_until)
+✅ 4 новых syscall: gettimeofday, sleep, uname, sysinfo
+✅ Zero Trust сохранен во всех новых функциях
+✅ Энергосбережение через sti; hlt; cli когда нет готовых задач
 
 ---
 
