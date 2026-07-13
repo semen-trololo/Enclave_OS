@@ -38,7 +38,10 @@ static syscall_func_t syscall_table[MAX_SYSCALLS] = {
     [SYS_YIELD]  = NULL,
     [SYS_BRK]    = NULL,
     [SYS_EXEC]   = NULL,
-    // Все остальные 247 элементов = NULL автоматически
+    [SYS_LSEEK]  = NULL,    // ✅ [ДЕНЬ 13]
+    [SYS_FSTAT]  = NULL,    // ✅ [ДЕНЬ 13]
+    [SYS_IOCTL]  = NULL,    // ✅ [ДЕНЬ 13]
+    // Все остальные 244 элемента = NULL автоматически
 };
 
 // ========================================================================
@@ -258,6 +261,205 @@ static int sys_open_handler(struct regs* r) {
 static int sys_close_handler(struct regs* r) {
     int fd = (int)r->ebx;
     return sys_close(fd);
+}
+
+// ========================================================================
+// [ДЕНЬ 13] sys_lseek: перемещение позиции чтения/записи в файле
+// EBX = fd, ECX = offset, EDX = whence (SEEK_SET/CUR/END)
+// ========================================================================
+static int sys_lseek_handler(struct regs* r) {
+    int fd = (int)r->ebx;
+    int32_t offset = (int32_t)r->ecx;
+    int whence = (int)r->edx;
+    
+    // Zero Trust: валидация файлового дескриптора
+    if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) {
+        serial_printf("[SYSCALL] sys_lseek: Invalid fd %d\n", fd);
+        return -EBADF;
+    }
+    
+    struct open_file* file = current_task->fd_table[fd];
+    if (!file) {
+        serial_printf("[SYSCALL] sys_lseek: fd %d not open in PID %d\n", fd, current_task->pid);
+        return -EBADF;
+    }
+    
+    if (!file->node) {
+        serial_printf("[SYSCALL] sys_lseek: fd %d has NULL vfs_node\n", fd);
+        return -EBADF;
+    }
+    
+    // Вычисление новой позиции
+    int32_t new_offset;
+    uint32_t file_size = file->node->size;
+    
+    switch (whence) {
+        case SEEK_SET:
+            new_offset = offset;
+            break;
+        case SEEK_CUR:
+            new_offset = (int32_t)file->offset + offset;
+            break;
+        case SEEK_END:
+            new_offset = (int32_t)file_size + offset;
+            break;
+        default:
+            serial_printf("[SYSCALL] sys_lseek: Invalid whence %d\n", whence);
+            return -EINVAL;
+    }
+    
+    // POSIX: отрицательный offset недопустим
+    if (new_offset < 0) {
+        serial_printf("[SYSCALL] sys_lseek: Negative offset %d (fd %d)\n", new_offset, fd);
+        return -EINVAL;
+    }
+    
+    // ✅ Разрешаем seek за пределы файла (POSIX compliant).
+    // Следующая запись расширит файл через gap (sparse file).
+    file->offset = (uint32_t)new_offset;
+    
+    serial_printf("[SYSCALL] sys_lseek: fd %d -> offset %u (PID %d)\n", 
+                  fd, file->offset, current_task->pid);
+    
+    return new_offset; // lseek возвращает новую позицию
+}
+
+// ========================================================================
+// [ДЕНЬ 13] sys_fstat: получение метаданных файла
+// EBX = fd, ECX = pointer to stat_t in user space
+// ========================================================================
+static int sys_fstat_handler(struct regs* r) {
+    int fd = (int)r->ebx;
+    stat_t* user_stat = (stat_t*)r->ecx;
+    
+    // Zero Trust: валидация файлового дескриптора
+    if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) {
+        serial_printf("[SYSCALL] sys_fstat: Invalid fd %d\n", fd);
+        return -EBADF;
+    }
+    
+    struct open_file* file = current_task->fd_table[fd];
+    if (!file) {
+        serial_printf("[SYSCALL] sys_fstat: fd %d not open in PID %d\n", fd, current_task->pid);
+        return -EBADF;
+    }
+    
+    if (!file->node) {
+        serial_printf("[SYSCALL] sys_fstat: fd %d has NULL vfs_node\n", fd);
+        return -EBADF;
+    }
+    
+    // Zero Trust: проверка указателя в Ring 3
+    if (!is_user_pointer(user_stat, sizeof(stat_t))) {
+        serial_printf("[SYSCALL] sys_fstat: Invalid stat pointer 0x%x (PID %d)\n", 
+                      (uint32_t)user_stat, current_task->pid);
+        return -EFAULT;
+    }
+    
+    // Заполнение структуры stat_t в kernel space
+    stat_t kernel_stat;
+    k_memset(&kernel_stat, 0, sizeof(stat_t));
+    
+    kernel_stat.st_dev = 0;       // TODO: device ID
+    kernel_stat.st_ino = 0;       // TODO: inode number
+    kernel_stat.st_nlink = 1;     // Hard links
+    kernel_stat.st_uid = 0;       // TODO: UID from VFS
+    kernel_stat.st_gid = 0;       // TODO: GID from VFS
+    kernel_stat.st_rdev = 0;
+    kernel_stat.st_size = file->node->size;
+    kernel_stat.st_blksize = 4096;
+    kernel_stat.st_blocks = (file->node->size + 511) / 512;
+    kernel_stat.st_atime = 0;     // TODO: timestamps
+    kernel_stat.st_mtime = 0;
+    kernel_stat.st_ctime = 0;
+    
+    // Определение типа файла из VFS флагов
+    if (file->node->flags & FS_DIRECTORY) {
+        kernel_stat.st_mode = S_IFDIR | 0755;  // drwxr-xr-x
+    } else if (file->node->flags & FS_FILE) {
+        kernel_stat.st_mode = S_IFREG | 0644;  // -rw-r--r--
+    } else if (file->node->flags & FS_MOUNTPOINT) {
+        kernel_stat.st_mode = S_IFDIR | 0755;
+    } else {
+        kernel_stat.st_mode = S_IFREG | 0644;  // Default
+    }
+    
+    // Безопасное копирование в user space
+    k_memcpy(user_stat, &kernel_stat, sizeof(stat_t));
+    
+    serial_printf("[SYSCALL] sys_fstat: fd %d, size=%u, mode=0%o (PID %d)\n", 
+                  fd, kernel_stat.st_size, kernel_stat.st_mode, current_task->pid);
+    
+    return 0;
+}
+
+// ========================================================================
+// [ДЕНЬ 13] sys_ioctl: управление устройствами
+// EBX = fd, ECX = request, EDX = argp (pointer to user data)
+// ========================================================================
+static int sys_ioctl_handler(struct regs* r) {
+    int fd = (int)r->ebx;
+    uint32_t request = r->ecx;
+    void* argp = (void*)r->edx;
+    
+    // Zero Trust: валидация файлового дескриптора
+    if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) {
+        serial_printf("[SYSCALL] sys_ioctl: Invalid fd %d\n", fd);
+        return -EBADF;
+    }
+    
+    struct open_file* file = current_task->fd_table[fd];
+    if (!file) {
+        serial_printf("[SYSCALL] sys_ioctl: fd %d not open in PID %d\n", fd, current_task->pid);
+        return -EBADF;
+    }
+    
+    // Обработка конкретных запросов ioctl
+    switch (request) {
+        case TIOCGWINSZ: {
+            // Запрос размера терминала
+            // Применяется только к stdout/stderr (fd 1 или 2)
+            if (fd != 1 && fd != 2) {
+                return -ENOTTY;  // Not a terminal
+            }
+            
+            // Zero Trust: проверка указателя
+            if (!is_user_pointer(argp, sizeof(winsize_t))) {
+                serial_printf("[SYSCALL] sys_ioctl: Invalid winsize pointer 0x%x\n", 
+                              (uint32_t)argp);
+                return -EFAULT;
+            }
+            
+            winsize_t ws;
+            // TODO: определять режим через framebuffer.c / vga.c
+            // Пока используем VGA 80x50 как fallback
+            extern int fb_is_active;  // Флаг из framebuffer.c
+            if (fb_is_active) {
+                // GUI mode: эмулируем 128x48 символов (1024x768 / 8x16 font)
+                ws.ws_row = 48;
+                ws.ws_col = 128;
+                ws.ws_xpixel = 1024;
+                ws.ws_ypixel = 768;
+            } else {
+                // Text mode: 80x50 (Day 5 VGA)
+                ws.ws_row = 50;
+                ws.ws_col = 80;
+                ws.ws_xpixel = 640;
+                ws.ws_ypixel = 400;
+            }
+            
+            k_memcpy(argp, &ws, sizeof(winsize_t));
+            
+            serial_printf("[SYSCALL] sys_ioctl: TIOCGWINSZ -> %ux%u (PID %d)\n", 
+                          ws.ws_col, ws.ws_row, current_task->pid);
+            return 0;
+        }
+        
+        default:
+            serial_printf("[SYSCALL] sys_ioctl: Unsupported request 0x%x on fd %d (PID %d)\n", 
+                          request, fd, current_task->pid);
+            return -ENOTTY;  // Inappropriate ioctl for device
+    }
 }
 
 // ========================================================================
@@ -578,6 +780,9 @@ void syscall_init(void) {
     syscall_table[SYS_MMAP]     = sys_mmap_handler;
     syscall_table[SYS_MUNMAP]   = sys_munmap_handler;
     syscall_table[SYS_MPROTECT] = sys_mprotect_handler;
+    syscall_table[SYS_LSEEK]  = sys_lseek_handler;    // ✅ [ДЕНЬ 13]
+    syscall_table[SYS_FSTAT]  = sys_fstat_handler;    // ✅ [ДЕНЬ 13]
+    syscall_table[SYS_IOCTL]  = sys_ioctl_handler;    // ✅ [ДЕНЬ 13]
     
     // Регистрация INT 0x80 в IDT
     extern void isr128(); 
