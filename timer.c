@@ -3,7 +3,7 @@
 #include "isr.h"
 #include "klib.h"
 #include "pic.h"
-#include "task.h" // <-- ДОБАВЛЕНО: Нужно для вызова schedule()
+#include "task.h"
 
 #define PIT_BASE_FREQ 1193182
 #define PIT_CHANNEL0  0x40
@@ -12,11 +12,29 @@
 static volatile uint32_t tick_count = 0;
 static uint32_t pit_frequency = 0;
 
+// ✅ [ДЕНЬ 15] Пробуждение задач, спящих по таймеру
+static void wake_sleepers(void) {
+    if (!current_task) return;
+    task_t* t = current_task;
+    do {
+        // Будим только тех, у кого sleep_until > 0 (игнорируем waitpid)
+        if (t->state == TASK_SLEEPING && t->sleep_until > 0) {
+            if (tick_count >= t->sleep_until) {
+                t->state = TASK_READY;
+                t->sleep_until = 0;
+            }
+        }
+        t = t->next;
+    } while (t != current_task);
+}
+
 // Обработчик IRQ0 (INT 32 после remap)
 static void pit_handler(struct regs* r) {
     (void)r; 
     tick_count++;
     
+    wake_sleepers(); // ✅ Пробуждаем спящих перед планированием
+
     // Квантование времени: переключаем задачи каждые 20 миллисекунд (50 Гц)
     if (tick_count % 20 == 0) {
         schedule();
