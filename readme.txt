@@ -90,6 +90,8 @@ project_root/
 │   └── test_vfs_stress.c     # Тест: VFS Stress (1000 файлов в TMPFS)
         test_fork.c
         test_memory_torture.c
+        user_libc.c
+        user_libc.h
 │
 └── .gitignore
 
@@ -296,7 +298,7 @@ klib.c: Паттерн Strategy. output_char() прозрачно маршрут
 gdt.c: Flat Model (4GB), Ring 0/3 Code/Data сегменты, TSS Descriptor.
 idt.c: 256 векторов. EOI Lock Bypass: outb(0x20, 0x20) отправляется в PIC ДО вызова C-обработчика, чтобы schedule() не заблокировал IRQ.
 tss.c: Настройка ESP0 для аппаратного переключения стека при прерываниях из Ring 3.
-timer.c: PIT (1000 Hz). Квант времени = 20 тиков.
+timer.c: PIT (1000 Hz). Квант времени = 10 тиков.
 keyboard.c: PS/2 (IRQ1). Ring Buffer (Producer-Consumer), обработка Make/Break кодов, Shift/Ctrl/CapsLock.
 
 ОПИСАНИЕ ФУНКЦИЙ БИБЛИОТЕКИ klib.c
