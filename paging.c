@@ -114,10 +114,6 @@ void page_fault_handler(struct regs* r) {
                 uint32_t flags = read_eflags();
                 disable_interrupts();
                 
-                // Проверяем refcount: если == 1, мы единственные владельцы
-                // Просто возвращаем PAGE_WRITE и снимаем PAGE_COW (оптимизация!)
-                // Если > 1, выделяем новую страницу и копируем данные
-                
                 uint32_t new_phys = pmm_alloc_page();
                 if (new_phys == 0) {
                     load_eflags(flags);
