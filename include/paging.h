@@ -2,6 +2,7 @@
 #define PAGING_H
 
 #include <stdint.h>
+#include "config.h" // ✅ SSOT: Подключаем для макросов VIRT_TO_PHYS / PHYS_TO_VIRT
 
 // ============================================================================
 // GLOBAL SYMBOLS FROM BOOT.ASM
@@ -9,16 +10,6 @@
 // Корневой Page Directory ядра, созданный на этапе бутстрапа.
 // Используется в task.c для создания main_task и в paging.c для клонирования.
 extern uint32_t boot_page_directory[];
-
-// ============================================================================
-// SINGLE SOURCE OF TRUTH (SSOT) MACROS
-// ============================================================================
-#ifndef KERNEL_SPACE_START
-#define KERNEL_SPACE_START 0xC0000000
-#endif
-
-#define VIRT_TO_PHYS(addr) (((uint32_t)(addr) >= KERNEL_SPACE_START) ? ((uint32_t)(addr) - KERNEL_SPACE_START) : (uint32_t)(addr))
-#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_SPACE_START)
 
 // ============================================================================
 // PAGE TABLE FLAGS (x86 Architecture)
