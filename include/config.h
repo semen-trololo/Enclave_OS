@@ -14,6 +14,14 @@
 #define KERNEL_DIRECT_MAP   0xC0000000
 
 // ============================================================================
+// SSOT ADDRESS TRANSLATION MACROS (Перенесено из paging.h и pmm.c)
+// ============================================================================
+// VIRT_TO_PHYS: учитывает, что секции .boot имеют адреса < 0xC0000000
+#define VIRT_TO_PHYS(addr) (((uint32_t)(addr) >= KERNEL_SPACE_START) ? ((uint32_t)(addr) - KERNEL_SPACE_START) : (uint32_t)(addr))
+// PHYS_TO_VIRT: нижняя память (0-16MB) замаплена в Higher Half (Direct Map)
+#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_SPACE_START)
+
+// ============================================================================
 // LOWER MEMORY (Reserved by PMM)
 // ============================================================================
 #define LOWER_MEM_START     0x00000000
