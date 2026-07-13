@@ -359,14 +359,6 @@ void serial_printf(const char* fmt, ...);
 13. keyboard_install() & timer_init() (Включение IRQ)
 14. shell_run() (Бесконечный цикл CLI)
 
-🗺 Карта памяти (Memory Map)
-0x00000000 - 0x00100000 : Lower Memory (IVT, BDA, VGA RAM) -> Зарезервировано PMM.
-0x00100000 - 0x01000000 : Kernel Image & Boot Structures (1MB - 16MB) -> Зарезервировано PMM.
-0xC0000000 - 0xDFFFFFFF : Higher Half Kernel (Direct Map 512MB RAM).
-0xD0000000 - 0xD2000000 : Kernel Heap (32MB Virtual Pool, Buddy System). Физически не выделен на старте, бэкапится страницами по требованию (On-Demand Paging).
-0xE0000000 - 0xFFFFFFFF : PCI MMIO Hole -> Зарезервировано PMM.
-0xFD000000 - 0xFE000000 : Framebuffer LFB (16MB, PAGE_PCD).
-
 ⚠️ Критические архитектурные нюансы (Выжимка из Базы Знаний)
 
 Framebuffer PCD (Page Cache Disable): При маппинге LFB (Linear Framebuffer) в boot.asm и paging.c ОБЯЗАТЕЛЬНО использовать флаг PAGE_PCD (0x10). Без него CPU кэширует записи в видеопамять, что вызывает артефакты, тиринг и падение FPS.
@@ -451,23 +443,6 @@ ELF Loader:
 Инфраструктура сборки:
 * Переделан Makefile — все артефакты в build/, автоматическая компиляция user-space программ
 * user_linker.ld — linker script для ELF-бинарников
-* Тестовый бинарник user_src/hello.asm — Hello World через sys_write
-
-🎯 Итоговая архитектура памяти процесса
-0xFFFFFFFF ┌─────────────────────────┐
-           │   Kernel Space          │ (Shared, Read-Only для Ring 3)
-0xC0000000 ├─────────────────────────┤
-           │   Stack (64 KB)         │ VMA: READ | WRITE
-           │   Guard Page (4 KB)     │ NO VMA (Stack Overflow Trap)
-0xBFFEF000 ├─────────────────────────┤
-           │   [Свободное пространство]         │
-0x08000000 ├─────────────────────────┤
-           │   Heap (sys_brk)        │ VMA: READ | WRITE
-0x01000000 ├─────────────────────────┤
-           │   .bss / .data / .text  │ VMA с правами из ELF
-0x00001000 ├─────────────────────────┤
-           │   NULL Guard Page       │ NO VMA (NULL Pointer Trap)
-0x00000000 └─────────────────────────┘
 
 6. ПЛАН РАЗВИТИЯ (Дорожная карта)
 
@@ -856,6 +831,17 @@ malloc использует **bump allocator** — просто увеличив
 - open + write + close + open + read + close
 
 ---
+
+Итог Дня 16: User Libc Foundation
+Что сделано:
+✅ SSOT Fix: Синхронизированы номера syscall'ов между ядром и user-space (особенно SYS_GETPID: было 20, стало 122).
+✅ User Libc (user_libc.c/h): Полноценная libc для Ring 3 с:
+Bump allocator (malloc/calloc/realloc/free)
+Полным набором string/memory операций (memset, memcpy, strlen, strcmp, strstr, strtol и т.д.)
+File I/O через FILE* (fopen/fread/fwrite/fclose)
+printf family (printf, fprintf, sprintf, snprintf, vsnprintf) с поддержкой width/padding
+Process control (exit, fork, waitpid, getpid)
+Day 15 API (gettimeofday, uname, sysinfo, sleep)
 
 ### День 17: TinyCC Dependency Analysis
 **Цель:** Проанализировать зависимости TinyCC от libc.
