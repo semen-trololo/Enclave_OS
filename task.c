@@ -349,17 +349,14 @@ void task_exit(void) {
             task_t* next = child->next_sibling;
             if (child->state != TASK_ZOMBIE && child->state != TASK_DEAD) {
                 serial_printf("[TASK] Killing child PID %d (Supervisor Tree)\n", child->pid);
-                // Принудительно убиваем ребенка
                 child->state = TASK_ZOMBIE;
                 child->exit_code = -1;
                 
-                // Удаляем из Run Queue
                 if (child->next != child) {
                     child->prev->next = child->next;
                     child->next->prev = child->prev;
                 }
                 
-                // Добавляем в Reaper Queue
                 child->reaper_next = dead_tasks_head;
                 dead_tasks_head = child;
             }
@@ -368,22 +365,12 @@ void task_exit(void) {
         current_task->children = NULL;
     }
     
-    // [ДЕНЬ 14] Удаляем себя из списка детей родителя
-    if (current_task->parent && current_task->parent->children == current_task) {
-        current_task->parent->children = current_task->next_sibling;
-    } else if (current_task->parent) {
-        task_t* sibling = current_task->parent->children;
-        while (sibling && sibling->next_sibling != current_task) {
-            sibling = sibling->next_sibling;
-        }
-        if (sibling) {
-            sibling->next_sibling = current_task->next_sibling;
-        }
-    }
-    current_task->next_sibling = NULL;
+    // ❌ УДАЛЕНО: Не отвязываем себя от parent->children здесь!
+    // Зомби должен оставаться в списке детей до waitpid!
     
     // [ДЕНЬ 14] Переходим в Zombie state (память освобождена, PCB жив)
     current_task->state = TASK_ZOMBIE;
+    current_task->exit_code = /* получить из r->ebx если нужно */ 0;
     
     // [ДЕНЬ 14] Будим родителя, если он спит в waitpid
     if (current_task->parent && current_task->parent->state == TASK_SLEEPING) {
@@ -410,7 +397,6 @@ void task_exit(void) {
     }
     
     // НЕ добавляем в Reaper Queue - Zombie ждет waitpid!
-    // Reaper Queue будет использован только после waitpid
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
@@ -418,7 +404,6 @@ void task_exit(void) {
     
     while(1) __asm__ volatile("cli; hlt"); 
 }
-
 // ============================================================================
 // [ДЕНЬ 10] ПРИНУДИТЕЛЬНОЕ УБИЙСТВО (Page Fault / OOM Killer)
 // ============================================================================
