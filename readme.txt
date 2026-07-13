@@ -88,6 +88,8 @@ project_root/
 │   ├── test_stack_overflow.c # Тест: Stack Overflow (рекурсия)
 │   ├── test_oom.c            # Тест: OOM Killer (sys_brk)
 │   └── test_vfs_stress.c     # Тест: VFS Stress (1000 файлов в TMPFS)
+        test_fork.c
+        test_memory_torture.c
 │
 └── .gitignore
 
@@ -742,6 +744,30 @@ sys_lseek работает с `open_file_t->offset`, а не с файлом н�
 - ioctl(TIOCGWINSZ) + проверка 80x50 (VGA) или 1024x768 (FB)
 
 ---
+
+СТАТУС ДНЯ 13: Advanced File I/O Syscalls (ЗАВЕРШЕНО)
+✅ Реализовано
+Добавлены три POSIX-совместимых системных вызова для продвинутой работы с файлами: sys_lseek (19), sys_fstat (28), sys_ioctl (54).
+Внедрены POSIX-константы в syscall.h и user_syscalls.h (SSOT): SEEK_SET/SEEK_CUR/SEEK_END, TIOCGWINSZ, POSIX file mode bits (S_IFMT, S_IFREG, S_IFDIR, S_IFCHR, S_IFBLK).
+Добавлены POSIX-совместимые структуры данных:
+stat_t — полная структура метаданных файла (st_dev, st_ino, st_mode, st_nlink, st_uid, st_gid, st_rdev, st_size, st_blksize, st_blocks, st_atime/mtime/ctime)
+winsize_t — структура размера терминала для TIOCGWINSZ (ws_row, ws_col, ws_xpixel, ws_ypixel)
+Расширена подсистема VFS-обработчиков с Zero Trust Sandbox:
+Валидация файлового дескриптора через bounds-checking (fd >= 0 && fd < TASK_MAX_OPEN_FILES)
+Проверка валидности open_file и vfs_node (защита от NULL pointer dereference в ядре)
+is_user_pointer() для всех указателей, передаваемых из Ring 3 (stat buffer, winsize buffer)
+Обновлен user_syscalls.h: добавлены inline-ассемблерные wrapper'ы для sys_lseek, sys_fstat, sys_ioctl с правильным маппингом регистров (EBX/ECX/EDX) и сохранением clobber registers.
+Интеграция с VFS: автоматическое определение типа файла из vfs_node->flags (FS_DIRECTORY → S_IFDIR | 0755, FS_FILE → S_IFREG | 0644, FS_MOUNTPOINT → S_IFDIR | 0755).
+🏛 Архитектурные решения
+FD-Centric Offset Tracking (POSIX Compliance): sys_lseek работает с open_file_t->offset, а не с файлом напрямую. Это позволяет нескольким файловым дескрипторам на один и тот же файл иметь независимые позиции чтения/записи — фундаментальное требование POSIX.
+Kernel-Buffer Pattern (Race-Condition Protection): sys_fstat сначала заполняет stat_t в kernel space (на стеке), затем одним атомарным k_memcpy копирует в user space. Это защищает от race conditions, когда пользовательский процесс мог бы попытаться изменить буфер во время заполнения его ядром.
+Sparse File Support (True POSIX): sys_lseek разрешает seek за пределы файла (new_offset > file_size), что соответствует POSIX-семантике sparse files. Следующая запись через sys_write расширит файл, заполнив промежуток нулями (gap). Отрицательный new_offset возвращает -EINVAL (строго по POSIX).
+Extensible IOCTL Dispatcher: sys_ioctl реализован через switch-case архитектуру с fallback на -ENOTTY (Not a typewriter / inappropriate ioctl for device). Это позволяет легко добавлять новые device-specific запросы (в будущем: FIONBIO, FIONREAD, disk ioctls) без изменения dispatcher'а.
+Automatic GUI/Text Mode Detection: TIOCGWINSZ автоматически определяет режим терминала через флаг fb_is_active из framebuffer.c: в GUI-режиме возвращает 128x48 символов (1024x768 / 8x16 font), в text-mode — классические 80x50 VGA. Это обеспечивает прозрачную работу консольных утилит (cat, ls, grep) в обоих режимах.
+Strict Error Propagation: Все три syscall'а возвращают стандартные POSIX errno коды: -EBADF (невалидный fd), -EFAULT (невалидный указатель в Ring 3), -EINVAL (неверные аргументы), -ENOTTY (неподдерживаемый ioctl), что позволяет user-space программам использовать стандартные паттерны обработки ошибок.
+🐛 Исправленные архитектурные пробелы
+Missing POSIX Foundation для TinyCC: До Дня 13 отсутствовали критически важные для компиляторов syscalls. TinyCC использует lseek для random-access в исходных файлах, fstat для определения размеров файлов перед mmap, и ioctl(TIOCGWINSZ) для адаптации вывода под размер терминала. Без этих syscall'ов портирование TinyCC (День 17-20) было бы невозможно.
+File Descriptor Abstraction Leak: Ранее VFS-операции работали напрямую с vfs_node_t, что нарушало 3-звенную POSIX-модель (inode → open_file → fd). sys_lseek закрывает этот пробел, работая строго через open_file_t, что обеспечивает корректное поведение при dup()/dup2() в будущем.
 
 ### День 14: Process Management Syscalls
 **Цель:** Реализовать sys_fork/sys_waitpid/sys_getpid для Supervisor Trees.
