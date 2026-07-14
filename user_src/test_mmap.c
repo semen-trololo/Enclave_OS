@@ -1,14 +1,16 @@
 #include "user_libc.h"
 #include "user_syscalls.h"
 
-void _start() {
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    
     printf("[TEST] Starting Day 12 mmap test...\n");
     
     void* ptr = sys_mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     
     if ((uintptr_t)ptr > 0xFFFFF000) {
         printf("[FAIL] mmap returned error: %p\n", ptr);
-        exit(1);
+        return 1;
     }
     printf("[PASS] mmap allocated at: %p\n", ptr);
     
@@ -21,7 +23,7 @@ void _start() {
     int ret = sys_mprotect(ptr, 8192, PROT_READ);
     if (ret < 0) {
         printf("[FAIL] mprotect failed: %d\n", ret);
-        exit(2);
+        return 2;
     }
     printf("[PASS] mprotect(PROT_READ) succeeded\n");
     
@@ -32,10 +34,10 @@ void _start() {
     ret = sys_munmap(ptr, 8192);
     if (ret < 0) {
         printf("[FAIL] munmap failed: %d\n", ret);
-        exit(3);
+        return 3;
     }
     printf("[PASS] munmap succeeded\n");
     
     printf("[TEST] All tests passed!\n");
-    exit(0);
+    return 0;
 }

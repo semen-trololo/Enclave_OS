@@ -1,4 +1,9 @@
 # ==============================================================================
+# BARE METAL OS — Makefile (Single Source of Truth)
+# Версия: Day 17+ (TinyCC Ready, crt0.asm NASM Integration)
+# ==============================================================================
+
+# ==============================================================================
 # КОНФИГУРАЦИЯ И ИНСТРУМЕНТЫ
 # ==============================================================================
 CC = i686-linux-gnu-gcc
@@ -31,7 +36,7 @@ LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
 # Флаги компиляции user-space
 # ✅ -fno-optimize-sibling-calls для отключения TCO (корректная рекурсия в тестах)
 USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra -fno-optimize-sibling-calls -Iuser_src
-USER_LDFLAGS = -nostdlib -T $(USER_SRC_DIR)/user_linker.ld
+USER_LDFLAGS = -nostdlib -static -no-pie -T $(USER_SRC_DIR)/user_linker.ld
 
 # ==============================================================================
 # ИСХОДНИКИ И ОБЪЕКТЫ ЯДРА
@@ -48,28 +53,33 @@ OBJ = $(BUILD_DIR)/boot.o $(filter-out $(BUILD_DIR)/boot.o,$(C_OBJS) $(ASM_OBJS)
 DEPS = $(C_OBJS:.o=.d)
 
 # ==============================================================================
-# USER-SPACE ИСХОДНИКИ (С разделением библиотеки и тестов)
+# USER-SPACE ИСХОДНИКИ (С разделением библиотеки, crt0 и тестов)
 # ==============================================================================
 # 1. Библиотека libc (компилируется один раз, линкуется ко всем тестам)
 USER_LIBC_SRC = $(USER_SRC_DIR)/user_libc.c
 USER_LIBC_OBJ = $(BUILD_DIR)/user_libc.o
 
-# 2. ASM исходники user-space (если есть)
-USER_ASM_SOURCES = $(wildcard $(USER_SRC_DIR)/*.asm)
+# ✅ C Runtime Startup (NASM, линкуется ПЕРВЫМ ко всем ELF)
+USER_CRT0_SRC = $(USER_SRC_DIR)/crt0.asm
+USER_CRT0_OBJ = $(BUILD_DIR)/crt0.o
+
+# 2. ASM исходники user-space (ИСКЛЮЧАЕМ crt0.asm через filter-out)
+#    🛡️ ВАЖНО: без filter-out crt0.asm попал бы в USER_ELFS как отдельный бинарник!
+USER_ASM_SOURCES = $(filter-out $(USER_CRT0_SRC),$(wildcard $(USER_SRC_DIR)/*.asm))
 USER_ASM_OBJS = $(patsubst $(USER_SRC_DIR)/%.asm,$(BUILD_DIR)/user_%.o,$(USER_ASM_SOURCES))
 
 # 3. Тестовые C-исходники (ИСКЛЮЧАЕМ user_libc.c через filter-out)
 USER_TEST_C_SOURCES = $(filter-out $(USER_LIBC_SRC),$(wildcard $(USER_SRC_DIR)/*.c))
 USER_TEST_C_OBJS = $(patsubst $(USER_SRC_DIR)/%.c,$(BUILD_DIR)/user_%.o,$(USER_TEST_C_SOURCES))
 
-# 4. Финальные ELF бинарники (только тесты + asm программы)
+# 4. Финальные ELF бинарники (только тесты + asm программы, БЕЗ crt0.elf)
 USER_ELFS = $(patsubst $(USER_SRC_DIR)/%.c,$(USER_BIN_DIR)/%.elf,$(USER_TEST_C_SOURCES)) \
             $(patsubst $(USER_SRC_DIR)/%.asm,$(USER_BIN_DIR)/%.elf,$(USER_ASM_SOURCES))
 
 # ==============================================================================
 # ГЛАВНЫЕ ТАРГЕТЫ
 # ==============================================================================
-all: iso
+all: user_programs iso
 
 # Линковка ядра
 $(KERNEL_BIN): $(OBJ) linker.ld | $(BUILD_DIR)
@@ -93,22 +103,27 @@ $(BUILD_DIR):
 # USER-SPACE PROGRAMS (ELF Binaries)
 # ==============================================================================
 
-# 🛠 Компиляция самой библиотеки user_libc (один раз для всех тестов)
+# Компиляция самой библиотеки user_libc (один раз для всех тестов)
 $(USER_LIBC_OBJ): $(USER_LIBC_SRC) $(USER_SRC_DIR)/user_libc.h $(USER_SRC_DIR)/user_syscalls.h | $(BUILD_DIR)
 	@echo "[USER LIB] $< -> $@"
 	@$(USER_CC) $(USER_CFLAGS) -c $< -o $@
 
-# 🔗 Линковка C-тестов с обязательным подключением user_libc.o
-$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.c $(USER_LIBC_OBJ) | $(USER_BIN_DIR)
+# ✅ Компиляция crt0.asm через NASM (Intel Syntax, консистентность с остальным ASM)
+$(USER_CRT0_OBJ): $(USER_CRT0_SRC) | $(BUILD_DIR)
+	@echo "[USER AS-NASM] $< -> $@"
+	@$(AS) $(ASFLAGS) $< -o $@
+
+# ✅ Линковка C-тестов с crt0.o ПЕРВЫМ (POSIX ABI _start)
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.c $(USER_LIBC_OBJ) $(USER_CRT0_OBJ) | $(USER_BIN_DIR)
 	@echo "[USER CC] $< -> $@"
 	@$(USER_CC) $(USER_CFLAGS) -c $< -o $(BUILD_DIR)/user_$*.o
-	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(USER_CRT0_OBJ) $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
 
-# 🔗 Линковка ASM-тестов (тоже линкуем с libc)
-$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.asm $(USER_LIBC_OBJ) | $(USER_BIN_DIR)
+# ✅ Линковка ASM-тестов (тоже линкуем с libc + crt0)
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.asm $(USER_LIBC_OBJ) $(USER_CRT0_OBJ) | $(USER_BIN_DIR)
 	@echo "[USER AS] $< -> $@"
 	@$(AS) -f elf32 $< -o $(BUILD_DIR)/user_$*.o
-	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(USER_CRT0_OBJ) $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
 
 $(USER_BIN_DIR):
 	@mkdir -p $(USER_BIN_DIR)
@@ -177,7 +192,7 @@ prepare_iso_dir: $(KERNEL_BIN) $(INITRD_TAR)
 # ==============================================================================
 # СБОРКА ISO (GRUB-MKRESCUE)
 # ==============================================================================
-iso: check_prerequisites prepare_iso_dir
+iso: user_programs check_prerequisites prepare_iso_dir
 	@echo "[ISO]  Generating bootable ISO with grub-mkrescue..."
 	@grub-mkrescue -o $(ISO_NAME) $(ISO_DIR) 2>/dev/null
 	@echo "[ OK ] ISO created: $(ISO_NAME)"

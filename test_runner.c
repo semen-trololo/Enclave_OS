@@ -42,7 +42,7 @@ static int spawn_process(const char* filename) {
         return -1;
     }
 
-    uint32_t stack_top = USER_STACK_VIRT_TOP;
+    uint32_t stack_top = USER_STACK_VIRT_TOP - 16;
     uint32_t stack_bottom = stack_top - USER_STACK_SIZE;
 
     uint32_t eflags;

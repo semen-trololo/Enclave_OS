@@ -67,8 +67,9 @@ void page_fault_handler(struct regs* r) {
         task_kill_current("Attempted access to Kernel Space");
     }
     
-    // 3. Kernel Heap Lazy Allocation (Ring 0 only)
+       // 3. Kernel Heap Lazy Allocation + User Space Demand Paging from Ring 0
     if (!us) {
+        // 3.1. Стандартный Kernel Heap (0xD0000000 - 0xE0000000)
         if (!present && !reserved && faulting_address >= KERNEL_HEAP_VIRT && 
             faulting_address < KERNEL_HEAP_END) {
             uint32_t phys = pmm_alloc_page();
@@ -80,6 +81,34 @@ void page_fault_handler(struct regs* r) {
             } else {
                 serial_print("\n[PF] === FATAL: Kernel OOM ===\n");
                 while(1) { __asm__ volatile("cli; hlt"); }
+            }
+        }
+        
+        // 🔧 NEW: Allow Ring 0 to trigger Demand Paging for User Space VMA!
+        // Это критически важно для sys_exec (Stack Forging) и будущих copy_to_user.
+        if (!present && faulting_address < KERNEL_SPACE_START) {
+            vma_node_t* vma = vma_find(current_task, faulting_address);
+            if (vma) {
+                uint32_t phys = pmm_alloc_page();
+                if (phys == 0) {
+                    serial_printf("[PF] OOM Kill: Physical memory exhausted in PID %d (Kernel writing to User Space)\n", current_task->pid);
+                    task_kill_current("Out of Memory (OOM Kill)");
+                }
+                
+                k_memset((void*)PHYS_TO_VIRT(phys), 0, 4096);
+                uint32_t virt_page = faulting_address & 0xFFFFF000;
+                
+                uint32_t flags = PAGE_PRESENT | PAGE_USER;
+                if (vma->flags & VMA_WRITE) flags |= PAGE_WRITE;
+                
+                if (vmm_map_page_in_pd(current_task->pdir_virt, virt_page, phys, flags) != 0) {
+                    pmm_free_page(phys);
+                    task_kill_current("Out of Memory (VMM PT Alloc Failed)");
+                }
+                
+                serial_printf("[PF] Demand paging (Ring 0 -> User): Virt 0x%x -> Phys 0x%x (PID %d)\n", 
+                              virt_page, phys, current_task->pid);
+                return;
             }
         }
         

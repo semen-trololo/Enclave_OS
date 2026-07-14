@@ -2,6 +2,7 @@
 #include "user_syscalls.h" // Для sys_yield
 
 static uint32_t lcg_state = 0xDEADBEEF;
+
 static uint32_t next_rand(void) {
     lcg_state = lcg_state * 1103515245 + 12345;
     return (lcg_state >> 16) & 0x7FFF;
@@ -111,15 +112,16 @@ static int stage_final_sweep(uint32_t* base, uint32_t pages) {
     printf("[PASS] Stage 6\n"); return 0;
 }
 
-void _start() {
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    
     printf("\n=== MEMORY TORTURE TEST INITIATED ===\n");
     uint32_t test_pages = 32; // 128 KB test region
     
-    // Пре-аллокация одного большого куска через libc
     uint32_t* heap_region = (uint32_t*)malloc(test_pages * 4096);
     if (!heap_region) {
         printf("[FATAL] Initial malloc failed\n");
-        exit(255);
+        return 255;
     }
 
     int res = 0;
@@ -133,5 +135,5 @@ void _start() {
     if (res == 0) printf("=== ALL STAGES PASSED. ===\n");
     else printf("=== TEST FAILED AT STAGE %d ===\n", res);
     
-    exit(res);
+    return res;
 }

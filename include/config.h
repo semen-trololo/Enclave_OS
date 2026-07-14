@@ -36,7 +36,9 @@
 // ============================================================================
 // PROCESS MEMORY LAYOUT (User Space)
 // ============================================================================
-#define USER_STACK_VIRT_TOP 0xC0000000
+// ✅ ИСПРАВЛЕНО: Стек должен быть СТРОГО ниже KERNEL_SPACE_START
+// Стек растет ВНИЗ от stack_top, поэтому граница = KERNEL_SPACE_START - 4KB
+#define USER_STACK_VIRT_TOP 0xBFFFF000  // Было 0xC0000000
 #define USER_STACK_SIZE     (64 * 1024)
 #define USER_STACK_GUARD_SIZE (4 * 1024)
 

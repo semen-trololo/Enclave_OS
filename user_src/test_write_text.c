@@ -1,16 +1,16 @@
 #include "user_libc.h"
 
-void _start() {
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    
     printf("[TEST] Triggering W^X violation (Write to .text)...\n");
     
-    // Пытаемся модифицировать первую инструкцию самой функции _start
     __asm__ volatile(
         "movb $0x90, (%0)" 
         : 
-        : "r"(_start)
+        : "r"(main)
     );
     
-    // Если дошли сюда, W^X не работает!
     printf("[FAIL] W^X protection failed!\n");
-    exit(1);
+    return 1;
 }

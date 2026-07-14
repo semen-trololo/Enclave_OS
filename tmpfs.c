@@ -104,7 +104,6 @@ static vfs_node_t* tmpfs_create(vfs_node_t* parent, const char* name, uint32_t m
 }
 
 static int tmpfs_unlink(vfs_node_t* parent, const char* name) {
-    //serial_printf("[TMPFS_UNLINK] >>> Deleting '%s'\n", name);
     vfs_node_t* prev = NULL;
     vfs_node_t* curr = parent->first_child;
 
@@ -126,7 +125,6 @@ static int tmpfs_unlink(vfs_node_t* parent, const char* name) {
         prev = curr;
         curr = curr->next_sibling;
     }
-    serial_printf("[TMPFS_UNLINK] ❌ File not found in tmpfs!\n");
     return -2; // ENOENT
 }
 

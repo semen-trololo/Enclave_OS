@@ -16,9 +16,32 @@
 int errno = 0;
 
 // Pre-allocated FILE streams (static, no malloc needed)
-static FILE _stdin_stream  = { STDIN_FILENO,  0, 0 };
-static FILE _stdout_stream = { STDOUT_FILENO, 0, 0 };
-static FILE _stderr_stream = { STDERR_FILENO, 0, 0 };
+static FILE _stdin_stream = {
+    .fd = STDIN_FILENO,
+    .eof = 0,
+    .error = 0,
+    .buffer_pos = 0,
+    .buffer_len = 0,
+    .write_pos = 0
+};
+
+static FILE _stdout_stream = {
+    .fd = STDOUT_FILENO,
+    .eof = 0,
+    .error = 0,
+    .buffer_pos = 0,
+    .buffer_len = 0,
+    .write_pos = 0
+};
+
+static FILE _stderr_stream = {
+    .fd = STDERR_FILENO,
+    .eof = 0,
+    .error = 0,
+    .buffer_pos = 0,
+    .buffer_len = 0,
+    .write_pos = 0
+};
 
 FILE* stdin  = &_stdin_stream;
 FILE* stdout = &_stdout_stream;
@@ -347,7 +370,9 @@ off_t lseek(int fd, off_t offset, int whence) {
     return (off_t)ret;
 }
 
-// FILE* API (минимальная реализация для TinyCC)
+// ============================================================================
+// FILE* API С БУФЕРИЗАЦИЕЙ (4KB для ускорения TinyCC парсинга в 10-100x)
+// ============================================================================
 FILE* fopen(const char* path, const char* mode) {
     int flags = 0;
     if (!mode) { errno = EINVAL; return NULL; }
@@ -365,34 +390,146 @@ FILE* fopen(const char* path, const char* mode) {
     
     FILE* f = (FILE*)malloc(sizeof(FILE));
     if (!f) { sys_close(fd); errno = ENOMEM; return NULL; }
+    
     f->fd = fd;
     f->eof = 0;
     f->error = 0;
+    // Инициализация read buffer
+    f->buffer_pos = 0;
+    f->buffer_len = 0;
+    // Инициализация write buffer
+    f->write_pos = 0;
+    
     return f;
+}
+
+// Внутренняя функция: сброс write buffer в файл
+static int fflush_write(FILE* stream) {
+    if (stream->write_pos == 0) return 0;
+    
+    int ret = sys_write(stream->fd, stream->write_buffer, (uint32_t)stream->write_pos);
+    if (ret < 0) {
+        stream->error = 1;
+        return EOF;
+    }
+    stream->write_pos = 0;
+    return 0;
+}
+
+// Внутренняя функция: заполнение read buffer из файла
+static int fill_read_buffer(FILE* stream) {
+    int ret = sys_read(stream->fd, stream->read_buffer, FILE_BUFFER_SIZE);
+    if (ret < 0) {
+        stream->error = 1;
+        stream->buffer_len = 0;
+        stream->buffer_pos = 0;
+        return -1;
+    }
+    if (ret == 0) {
+        stream->eof = 1;
+        stream->buffer_len = 0;
+        stream->buffer_pos = 0;
+        return 0;
+    }
+    stream->buffer_len = ret;
+    stream->buffer_pos = 0;
+    return ret;
 }
 
 int fclose(FILE* stream) {
     if (!stream) { errno = EBADF; return EOF; }
+    
+    // Сброс write buffer перед закрытием
+    if (stream->write_pos > 0) {
+        fflush_write(stream);
+    }
+    
     int ret = sys_close(stream->fd);
     free(stream);
     return (ret < 0) ? EOF : 0;
 }
 
-size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream) {
-    if (!stream || size == 0 || nmemb == 0) return 0;
-    size_t total = size * nmemb;
-    int ret = sys_read(stream->fd, ptr, (uint32_t)total);
-    if (ret < 0) { stream->error = 1; return 0; }
-    if (ret == 0) { stream->eof = 1; return 0; }
-    return (size_t)ret / size;
+int fflush(FILE* stream) {
+    if (!stream) return EOF;
+    return fflush_write(stream);
 }
 
-size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream) {
+size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream) {
     if (!stream || size == 0 || nmemb == 0) return 0;
-    size_t total = size * nmemb;
-    int ret = sys_write(stream->fd, ptr, (uint32_t)total);
-    if (ret < 0) { stream->error = 1; return 0; }
-    return (size_t)ret / size;
+    
+    size_t total_bytes = size * nmemb;
+    uint8_t* dest = (uint8_t*)ptr;
+    size_t bytes_read = 0;
+    
+    while (bytes_read < total_bytes) {
+        // Если буфер пуст, заполняем его
+        if (stream->buffer_pos >= stream->buffer_len) {
+            if (fill_read_buffer(stream) <= 0) {
+                break; // EOF или ошибка
+            }
+        }
+        
+        // Копируем из буфера
+        size_t available = stream->buffer_len - stream->buffer_pos;
+        size_t to_copy = total_bytes - bytes_read;
+        if (to_copy > available) to_copy = available;
+        
+        memcpy(dest + bytes_read, stream->read_buffer + stream->buffer_pos, to_copy);
+        stream->buffer_pos += to_copy;
+        bytes_read += to_copy;
+    }
+    
+    return bytes_read / size;
+}
+
+int fgetc(FILE* stream) {
+    if (!stream) return EOF;
+    
+    // Если буфер пуст, заполняем его
+    if (stream->buffer_pos >= stream->buffer_len) {
+        if (fill_read_buffer(stream) <= 0) {
+            return EOF; // EOF или ошибка
+        }
+    }
+    
+    // Возвращаем байт из буфера
+    return (unsigned char)stream->read_buffer[stream->buffer_pos++];
+}
+
+int fputc(int c, FILE* stream) {
+    if (!stream) return EOF;
+    
+    // Если буфер полон, сбрасываем
+    if (stream->write_pos >= FILE_BUFFER_SIZE) {
+        if (fflush_write(stream) == EOF) {
+            return EOF;
+        }
+    }
+    
+    stream->write_buffer[stream->write_pos++] = (char)c;
+    return (unsigned char)c;
+}
+
+char* fgets(char* s, int size, FILE* stream) {
+    if (!s || size <= 0 || !stream) return NULL;
+    
+    int i = 0;
+    int c;
+    
+    while (i < size - 1) {
+        c = fgetc(stream);
+        if (c == EOF) {
+            if (i == 0) return NULL; // EOF до чтения любого символа
+            break;
+        }
+        
+        s[i++] = (char)c;
+        
+        if (c == '\n') break; // POSIX: включаем \n в строку
+    }
+    
+    s[i] = '\0';
+    return s;
 }
 
 int ferror(FILE* stream) {
@@ -603,6 +740,15 @@ int waitpid(int pid, int* status, int options) {
     return sys_waitpid(pid, status, options);
 }
 
+int exec(const char* path, const char** argv) {
+    int ret = sys_exec(path, argv);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
+}
+
 // ============================================================================
 // TIME & SYSTEM INFO (Day 15)
 // ============================================================================
@@ -633,4 +779,101 @@ unsigned int sleep(unsigned int seconds) {
 int usleep(unsigned int usec) {
     sys_sleep(usec / 1000);
     return 0;
+}
+
+// ============================================================================
+// SYSTEM() — Упрощенная реализация для TinyCC (~40 строк)
+// TinyCC вызывает system() ТОЛЬКО для простых команд без shell-синтаксиса:
+//   system("ld -o output.elf file1.o file2.o")
+// НЕ поддерживает pipes, redirects, globs (для этого нужен /bin/sh)
+// ============================================================================
+int system(const char* command) {
+    if (!command) return 0; // POSIX: проверка наличия shell
+    
+    // Парсим команду на argv: "ld -o out.elf a.o" → ["ld", "-o", "out.elf", "a.o"]
+    char buf[256];
+    strncpy(buf, command, 255);
+    buf[255] = '\0';
+    
+    char* argv[32];
+    int argc = 0;
+    
+    char* ptr = buf;
+    while (*ptr && argc < 31) {
+        // Пропускаем пробелы
+        while (*ptr == ' ') ptr++;
+        if (*ptr == '\0') break;
+        
+        argv[argc++] = ptr;
+        
+        // Ищем конец аргумента
+        while (*ptr && *ptr != ' ') ptr++;
+        if (*ptr) *ptr++ = '\0';
+    }
+    argv[argc] = NULL;
+    
+    if (argc == 0) return -1;
+    
+    // Ищем бинарник в /bin/
+    char path[256];
+    snprintf(path, sizeof(path), "/bin/%s", argv[0]);
+    
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child process
+        exec(path, (const char**)argv);
+        exit(127); // exec failed (ENOENT)
+    } else if (pid > 0) {
+        // Parent process
+        int status;
+        waitpid(pid, &status, 0);
+        return status;
+    }
+    
+    return -1; // fork failed
+}
+
+// ============================================================================
+// GETENV — Упрощенная реализация (возвращает NULL)
+// TinyCC использует getenv для чтения PATH, но мы hardcode'им "/bin"
+// ============================================================================
+char* getenv(const char* name) {
+    (void)name;
+    return NULL; // TinyCC работает без переменных окружения
+}
+
+// ============================================================================
+// SIGNAL — No-op реализация (TinyCC не обрабатывает сигналы в Ring 3)
+// ============================================================================
+sighandler_t signal(int signum, sighandler_t handler) {
+    (void)signum;
+    (void)handler;
+    return SIG_DFL; // Возвращаем дефолтный обработчик
+}
+
+// ============================================================================
+// DYNAMIC LINKING — Заглушки (TinyCC не использует dlopen)
+// ============================================================================
+void* dlopen(const char* filename, int flag) {
+    (void)filename;
+    (void)flag;
+    errno = ENOSYS;
+    return NULL;
+}
+
+void* dlsym(void* handle, const char* symbol) {
+    (void)handle;
+    (void)symbol;
+    errno = ENOSYS;
+    return NULL;
+}
+
+int dlclose(void* handle) {
+    (void)handle;
+    errno = ENOSYS;
+    return -1;
+}
+
+char* dlerror(void) {
+    return (char*)"Dynamic linking not supported";
 }

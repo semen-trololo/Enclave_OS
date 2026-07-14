@@ -89,6 +89,179 @@ static int copy_string_from_user(char* dest, const char* user_src, size_t max_le
 }
 
 // ========================================================================
+// sys_exec: ЗАМЕНА текущего процесса (POSIX execve semantics + Stack Forging)
+// ========================================================================
+static int sys_exec_handler(struct regs* r) {
+    const char* user_filename = (const char*)r->ebx;
+    const char** user_argv = (const char**)r->ecx; // 🛡️ Читаем argv из Ring 3
+    
+    char filename_buf[256];
+    int ret = copy_string_from_user(filename_buf, user_filename, sizeof(filename_buf));
+    if (ret < 0) {
+        serial_printf("[SYSCALL] sys_exec: Invalid filename pointer\n");
+        return ret;
+    }
+    
+    // 🛡️ CRITICAL: Extract argv into Kernel Space BEFORE CR3 switch!
+    // Если мы сделаем switch_pdir() раньше, указатели user_argv станут невалидными.
+    #define EXEC_MAX_ARGS 64
+    #define EXEC_MAX_ARG_LEN 256
+    char k_argv_buf[EXEC_MAX_ARGS][EXEC_MAX_ARG_LEN];
+    int argc = 0;
+    
+    if (user_argv && is_user_pointer(user_argv, sizeof(char*))) {
+        for (int i = 0; i < EXEC_MAX_ARGS; i++) {
+            if (!is_user_pointer(user_argv + i, sizeof(char*))) break;
+            const char* u_arg = user_argv[i];
+            if (u_arg == NULL) break;
+            
+            if (copy_string_from_user(k_argv_buf[argc], u_arg, EXEC_MAX_ARG_LEN) < 0) {
+                k_argv_buf[argc][0] = '\0'; // Безопасный fallback
+            }
+            argc++;
+        }
+    }
+    
+    serial_printf("[SYSCALL] sys_exec: PID %d loading '%s' (argc=%d)\n", 
+                  current_task->pid, filename_buf, argc);
+    
+    vfs_node_t* file_node = vfs_findnode(filename_buf);
+    if (!file_node) {
+        serial_printf("[SYSCALL] sys_exec: File not found: %s\n", filename_buf);
+        return -ENOENT;
+    }
+    
+    if (!(file_node->flags & FS_FILE)) {
+        serial_printf("[SYSCALL] sys_exec: Not a file: %s\n", filename_buf);
+        return -EACCES;
+    }
+    
+    uint32_t* new_pdir_virt = vmm_create_address_space();
+    if (!new_pdir_virt) {
+        serial_print("[SYSCALL] sys_exec: OOM creating address space\n");
+        return -ENOMEM;
+    }
+    
+    task_t temp_task;
+    k_memset(&temp_task, 0, sizeof(task_t));
+    temp_task.pdir_virt = new_pdir_virt;
+    temp_task.vma_head = NULL;
+    
+    uint32_t entry_point = elf_load(file_node, &temp_task);
+    if (entry_point == 0) {
+        serial_print("[SYSCALL] sys_exec: Failed to load ELF\n");
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(new_pdir_virt);
+        return -ENOEXEC;
+    }
+    
+    // Сохраняем идентичность процесса (PID, имя, FD table)
+    uint32_t saved_pid = current_task->pid;
+    char saved_name[32];
+    k_strncpy(saved_name, current_task->name, sizeof(saved_name));
+    
+    struct open_file* saved_fds[TASK_MAX_OPEN_FILES];
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        saved_fds[i] = current_task->fd_table[i];
+    }
+    
+    // Уничтожаем старое адресное пространство и VMA
+    if (current_task->vma_head) {
+        vma_destroy_all(current_task);
+    }
+    
+    if (current_task->pdir_virt && current_task->pdir_virt != new_pdir_virt) {
+        vmm_destroy_address_space(current_task->pdir_virt);
+    }
+    
+    // ✅ FIX 1: Устанавливаем новое адресное пространство
+    current_task->pdir_virt = new_pdir_virt;
+    current_task->cr3 = VIRT_TO_PHYS(new_pdir_virt);
+    
+    // ✅ FIX 2: КРИТИЧНО! Загружаем новый CR3 в процессор (инвалидация TLB)
+    // Без этого MMU будет использовать старый Page Directory при возврате в Ring 3
+    vmm_switch_pdir(current_task->cr3);
+    
+    current_task->vma_head = temp_task.vma_head;
+    
+    // Восстанавливаем идентичность
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        current_task->fd_table[i] = saved_fds[i];
+    }
+    
+    current_task->pid = saved_pid;
+    k_strncpy(current_task->name, saved_name, sizeof(current_task->name));
+    
+    // ✅ FIX 3: Сбрасываем FPU state (защита от утечки контекста)
+    fpu_release_ownership(current_task);
+    current_task->fpu_initialized = 0;
+    
+    // ✅ FIX 4: Сбрасываем таймер сна
+    current_task->sleep_until = 0;
+    
+    // Создаем VMA для стека и кучи
+    uint32_t stack_top = USER_STACK_VIRT_TOP;  // Теперь 0xBFFFF000
+    uint32_t stack_bottom = stack_top - USER_STACK_SIZE;
+    
+    if (vma_add(current_task, stack_bottom, stack_top, VMA_READ | VMA_WRITE) < 0 ||
+        vma_add(current_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE) < 0) {
+        serial_print("[SYSCALL] sys_exec: OOM creating stack/heap VMA\n");
+        return -ENOMEM; 
+    }
+    
+    // 🔨 STACK FORGING (POSIX ABI)
+    // Формируем стек для crt0.asm в НОВОМ адресном пространстве
+    uint32_t* stack_ptr = (uint32_t*)stack_top;
+    char* argv_ptrs[EXEC_MAX_ARGS + 1];
+    
+    // 1. Копируем строки аргументов на верхушку стека (сверху вниз)
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = k_strlen(k_argv_buf[i]) + 1;
+        stack_ptr = (uint32_t*)((uint8_t*)stack_ptr - len);
+        k_memcpy(stack_ptr, k_argv_buf[i], len);
+        argv_ptrs[i] = (char*)stack_ptr;
+    }
+    argv_ptrs[argc] = NULL;
+    
+    // 🛡️ ЗАЩИТА 1: Гарантируем, что stack_ptr < KERNEL_SPACE_START
+    if ((uint32_t)stack_ptr >= KERNEL_SPACE_START) {
+        serial_printf("[SYSCALL] sys_exec: CRITICAL - stack_ptr in Kernel Space!\n");
+        stack_ptr = (uint32_t*)(KERNEL_SPACE_START - 16);
+    }
+    
+    // Выравнивание стека на 4 байта
+    stack_ptr = (uint32_t*)((uint32_t)stack_ptr & ~0x3);
+    
+    // 2. Push envp (NULL)
+    *(--stack_ptr) = 0;
+    
+    // 3. Push argv pointers (массив указателей)
+    stack_ptr -= (argc + 1);
+    for (int i = 0; i <= argc; i++) {
+        stack_ptr[i] = (uint32_t)argv_ptrs[i];
+    }
+    
+    // 4. Push argc
+    *(--stack_ptr) = (uint32_t)argc;
+    
+    // 🛡️ ЗАЩИТА 2: Финальная проверка ESP перед возвратом в Ring 3
+    if ((uint32_t)stack_ptr >= KERNEL_SPACE_START) {
+        serial_printf("[SYSCALL] sys_exec: CRITICAL - ESP would be in Kernel Space!\n");
+        stack_ptr = (uint32_t*)(KERNEL_SPACE_START - 16);
+    }
+    
+    // Модифицируем ISR Frame для возврата в Ring 3
+    r->esp = (uint32_t)stack_ptr;
+    r->eip = entry_point;
+    r->eax = 0; // POSIX: exec не возвращает значение при успехе
+    
+    serial_printf("[SYSCALL] sys_exec: PID %d replaced with '%s' at 0x%x, ESP=0x%x\n", 
+                  current_task->pid, current_task->name, entry_point, r->esp);
+    
+    return 0;
+}
+
+// ========================================================================
 // sys_exit: завершение текущего процесса
 // ========================================================================
 static int sys_exit_handler(struct regs* r) {
@@ -98,7 +271,6 @@ static int sys_exit_handler(struct regs* r) {
     task_exit(exit_code); // ✅ FIX: Передаем код выхода для waitpid
     return 0;
 }
-
 // ========================================================================
 // sys_write: запись в файловый дескриптор
 // ========================================================================
@@ -427,117 +599,6 @@ static int sys_ioctl_handler(struct regs* r) {
                           request, fd, current_task->pid);
             return -ENOTTY;
     }
-}
-
-// ========================================================================
-// sys_exec: ЗАМЕНА текущего процесса (POSIX execve semantics)
-// ========================================================================
-static int sys_exec_handler(struct regs* r) {
-    const char* user_filename = (const char*)r->ebx;
-    
-    char filename_buf[256];
-    int ret = copy_string_from_user(filename_buf, user_filename, sizeof(filename_buf));
-    if (ret < 0) {
-        serial_printf("[SYSCALL] sys_exec: Invalid filename pointer\n");
-        return ret;
-    }
-    
-    serial_printf("[SYSCALL] sys_exec: PID %d loading '%s'\n", current_task->pid, filename_buf);
-    
-    vfs_node_t* file_node = vfs_findnode(filename_buf);
-    if (!file_node) {
-        serial_printf("[SYSCALL] sys_exec: File not found: %s\n", filename_buf);
-        return -ENOENT;
-    }
-    
-    if (!(file_node->flags & FS_FILE)) {
-        serial_printf("[SYSCALL] sys_exec: Not a file: %s\n", filename_buf);
-        return -EACCES;
-    }
-    
-    uint32_t* new_pdir_virt = vmm_create_address_space();
-    if (!new_pdir_virt) {
-        serial_print("[SYSCALL] sys_exec: OOM creating address space\n");
-        return -ENOMEM;
-    }
-    
-    task_t temp_task;
-    k_memset(&temp_task, 0, sizeof(task_t));
-    temp_task.pdir_virt = new_pdir_virt;
-    temp_task.vma_head = NULL;
-    
-    uint32_t entry_point = elf_load(file_node, &temp_task);
-    if (entry_point == 0) {
-        serial_print("[SYSCALL] sys_exec: Failed to load ELF\n");
-        vma_destroy_all(&temp_task);
-        vmm_destroy_address_space(new_pdir_virt);
-        return -ENOEXEC;
-    }
-    
-    // Сохраняем идентичность процесса (PID, имя, FD table)
-    uint32_t saved_pid = current_task->pid;
-    char saved_name[32];
-    k_strncpy(saved_name, current_task->name, sizeof(saved_name));
-    
-    struct open_file* saved_fds[TASK_MAX_OPEN_FILES];
-    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
-        saved_fds[i] = current_task->fd_table[i];
-    }
-    
-    // Уничтожаем старое адресное пространство и VMA
-    if (current_task->vma_head) {
-        vma_destroy_all(current_task);
-    }
-    
-    if (current_task->pdir_virt && current_task->pdir_virt != new_pdir_virt) {
-        vmm_destroy_address_space(current_task->pdir_virt);
-    }
-    
-    // ✅ FIX 1: Устанавливаем новое адресное пространство
-    current_task->pdir_virt = new_pdir_virt;
-    current_task->cr3 = VIRT_TO_PHYS(new_pdir_virt);
-    
-    // ✅ FIX 2: КРИТИЧНО! Загружаем новый CR3 в процессор (инвалидация TLB)
-    // Без этого MMU будет использовать старый Page Directory при возврате в Ring 3
-    vmm_switch_pdir(current_task->cr3);
-    
-    current_task->vma_head = temp_task.vma_head;
-    
-    // Восстанавливаем идентичность
-    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
-        current_task->fd_table[i] = saved_fds[i];
-    }
-    
-    current_task->pid = saved_pid;
-    k_strncpy(current_task->name, saved_name, sizeof(current_task->name));
-    
-    // ✅ FIX 3: Сбрасываем FPU state (защита от утечки контекста)
-    // Новый процесс должен начать с чистого FPU (fninit при первом #NM)
-    fpu_release_ownership(current_task);
-    current_task->fpu_initialized = 0;
-    
-    // ✅ FIX 4: Сбрасываем таймер сна (если процесс был в sys_sleep)
-    current_task->sleep_until = 0;
-    
-    // Создаем VMA для стека и кучи
-    uint32_t stack_top = USER_STACK_VIRT_TOP;
-    uint32_t stack_bottom = stack_top - USER_STACK_SIZE;
-    
-    if (vma_add(current_task, stack_bottom, stack_top, VMA_READ | VMA_WRITE) < 0 ||
-        vma_add(current_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE) < 0) {
-        serial_print("[SYSCALL] sys_exec: OOM creating stack/heap VMA\n");
-        return -ENOMEM; 
-    }
-    
-    serial_printf("[SYSCALL] sys_exec: PID %d replaced with '%s' at 0x%x\n", 
-                  current_task->pid, current_task->name, entry_point);
-    
-    // Модифицируем ISR Frame для возврата в Ring 3
-    r->eip = entry_point;
-    r->esp = stack_top;
-    r->eax = 0; // POSIX: exec не возвращает значение при успехе
-    
-    return 0;
 }
 
 // ========================================================================

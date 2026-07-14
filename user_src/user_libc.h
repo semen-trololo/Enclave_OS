@@ -10,7 +10,7 @@
 // ============================================================================
 typedef int32_t ssize_t;  // Signed size_t (для read/write, возвращает -1 при ошибке)
 typedef int32_t off_t;    // File offset (для lseek)
-
+typedef int32_t pid_t;    // Process ID (для fork/waitpid/system)
 // ============================================================================
 // POSIX-совместимый API для Ring 3 программ
 // Все функции работают ТОЛЬКО через syscalls (Zero Trust Sandbox)
@@ -52,10 +52,19 @@ extern int errno;
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
+#define FILE_BUFFER_SIZE 4096
+
 typedef struct {
     int fd;
     int eof;
     int error;
+    // Read buffer (для ускорения fread/fgetc в 10-100x)
+    char read_buffer[FILE_BUFFER_SIZE];
+    int buffer_pos;      // Текущая позиция в буфере
+    int buffer_len;      // Количество валидных байт в буфере
+    // Write buffer (для ускорения fwrite/fputc)
+    char write_buffer[FILE_BUFFER_SIZE];
+    int write_pos;       // Текущая позиция записи
 } FILE;
 
 extern FILE* stdin;
@@ -115,8 +124,12 @@ off_t lseek(int fd, off_t offset, int whence);
 
 FILE* fopen(const char* path, const char* mode);
 int fclose(FILE* stream);
+int fflush(FILE* stream);
 size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream);
 size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream);
+int fgetc(FILE* stream);      // ✅ ДОБАВИТЬ
+int fputc(int c, FILE* stream);  // ✅ ДОБАВИТЬ
+char* fgets(char* s, int size, FILE* stream);  // ✅ ДОБАВИТЬ
 int ferror(FILE* stream);
 int feof(FILE* stream);
 int unlink(const char* pathname);
@@ -140,6 +153,7 @@ void exit(int status) __attribute__((noreturn));
 int getpid(void);
 int fork(void);
 int waitpid(int pid, int* status, int options);
+int exec(const char* path, const char** argv); 
 
 // ============================================================================
 // Time & System Info (Day 15)
@@ -189,5 +203,53 @@ unsigned long strtoul(const char* str, char** endptr, int base);
 // Internal helpers (exposed for completeness)
 void itoa(int value, char* buf, int base);
 void uitoa(unsigned int value, char* buf, int base);
+
+// ============================================================================
+// Process Execution (system() для TinyCC)
+// ============================================================================
+int system(const char* command);
+
+// ============================================================================
+// Environment Variables (упрощенные для TinyCC)
+// ============================================================================
+char* getenv(const char* name);
+
+// ============================================================================
+// Signal Handling (no-op для TinyCC)
+// ============================================================================
+#define SIG_DFL ((void (*)(int))0)
+#define SIG_IGN ((void (*)(int))1)
+#define SIG_ERR ((void (*)(int))-1)
+
+#define SIGHUP    1
+#define SIGINT    2
+#define SIGQUIT   3
+#define SIGILL    4
+#define SIGTRAP   5
+#define SIGABRT   6
+#define SIGBUS    7
+#define SIGFPE    8
+#define SIGKILL   9
+#define SIGUSR1  10
+#define SIGSEGV  11
+#define SIGUSR2  12
+#define SIGPIPE  13
+#define SIGALRM  14
+#define SIGTERM  15
+
+typedef void (*sighandler_t)(int);
+sighandler_t signal(int signum, sighandler_t handler);
+
+// ============================================================================
+// Dynamic Linking (заглушки для TinyCC)
+// ============================================================================
+#define RTLD_LAZY   0x00001
+#define RTLD_NOW    0x00002
+#define RTLD_GLOBAL 0x00100
+
+void* dlopen(const char* filename, int flag);
+void* dlsym(void* handle, const char* symbol);
+int dlclose(void* handle);
+char* dlerror(void);
 
 #endif // USER_LIBC_H
