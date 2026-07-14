@@ -12,7 +12,7 @@
 #include <stdbool.h>
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
-extern void ret_from_fork(void); // ✅ ASM-трамплин из context_switch.asm
+extern void ret_from_fork(void);
 
 task_t* current_task = 0;
 uint32_t next_pid = 1;
@@ -161,7 +161,7 @@ void tasking_init(void) {
 }
 
 // ============================================================================
-// СОЗДАНИЕ НОВОЙ ЗАДАЧИ (С поддержкой готового Address Space)
+// СОЗДАНИЕ НОВОЙ ЗАДАЧИ
 // ============================================================================
 task_t* task_create(const char* name, void (*entry_point)(void), 
                     bool is_user_mode, uint32_t user_esp, uint32_t* custom_pdir) {
@@ -193,7 +193,6 @@ task_t* task_create(const char* name, void (*entry_point)(void),
         } else {
             new_task->pdir_virt = vmm_create_address_space();
             if (!new_task->pdir_virt) {
-                serial_print("[TASK] OOM: Failed to create Address Space!\n");
                 kfree((void*)stack_virt);
                 pmm_free_page(pcb_phys);
                 return 0;
@@ -214,7 +213,7 @@ task_t* task_create(const char* name, void (*entry_point)(void),
     *(--stack_top) = (uint32_t)is_user_mode;        
     *(--stack_top) = (uint32_t)entry_point;         
     *(--stack_top) = (uint32_t)task_exit;           
-    
+   
     *(--stack_top) = (uint32_t)task_entry_trampoline; 
     *(--stack_top) = 0; // EBX
     *(--stack_top) = 0; // ESI
@@ -249,11 +248,32 @@ task_t* task_create(const char* name, void (*entry_point)(void),
 }
 
 // ============================================================================
-// ПЛАНИРОВЩИК (ROUND-ROBIN + SLEEP-AWARE + IDLE HLT)
+// ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IDLE HLT)
 // ============================================================================
 void schedule(void) {
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    // 🛡️ REAPER PHASE: Очищаем мертвые задачи ПЕРЕД планированием.
+    // Это гарантирует, что ресурсы освободятся даже если в системе только 1 задача
+    // и switch_context не вызывается (old_task == new_task).
+    if (dead_tasks_head != NULL) {
+        while (dead_tasks_head != NULL) {
+            task_t* dead = dead_tasks_head;
+            dead_tasks_head = dead->reaper_next; 
+        
+            serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
+        
+            // VMA и Address Space уже уничтожены в task_exit / task_kill_current
+            
+            if (dead->kernel_stack_virt != 0) {
+                kfree((void*)dead->kernel_stack_virt);
+            }
+            
+            pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
+            task_count--;
+        }
+    }
 
     if (!current_task || !current_task->next) {
         __asm__ volatile("push %0; popf" : : "r"(eflags));
@@ -289,31 +309,6 @@ void schedule(void) {
     switch_context(&old_task->esp, new_task->esp, new_task->cr3);
     
     // --- ЗДЕСЬ ПРОДОЛЖАЕТ ВЫПОЛНЕНИЕ УЖЕ НОВАЯ ЗАДАЧА ---
-
-    if (dead_tasks_head != NULL) {
-        uint32_t reap_flags;
-        __asm__ volatile("pushf; pop %0; cli" : "=r"(reap_flags));
-        
-        while (dead_tasks_head != NULL) {
-            task_t* dead = dead_tasks_head;
-            dead_tasks_head = dead->reaper_next; 
-        
-            serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
-        
-            vma_destroy_all(dead);
-            if (dead->pdir_virt && dead->pdir_virt != boot_page_directory) {
-                vmm_destroy_address_space(dead->pdir_virt);
-            }
-            
-            if (dead->kernel_stack_virt != 0) {
-                kfree((void*)dead->kernel_stack_virt);
-            }
-            
-            pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
-            task_count--;
-        }
-        __asm__ volatile("push %0; popf" : : "r"(reap_flags));
-    }
 
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 }
@@ -358,14 +353,21 @@ void task_exit(int exit_code) {
                     child->next->prev = child->prev;
                 }
                 
-                child->reaper_next = dead_tasks_head;
-                dead_tasks_head = child;
+                // 🛡️ ФИКС: Зомби-дети должны пройти через waitpid, а не сразу в Reaper
+                // Оставляем их в списке детей, чтобы родитель (или init) их забрал
             }
             child = next;
         }
         current_task->children = NULL;
     }
     
+    // 🛡️ Освобождаем ресурсы памяти ДО того, как стать зомби
+    vma_destroy_all(current_task);
+    if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
+        vmm_destroy_address_space(current_task->pdir_virt);
+        current_task->pdir_virt = NULL;
+    }
+
     current_task->state = TASK_ZOMBIE;
     current_task->exit_code = exit_code;
     
@@ -373,12 +375,6 @@ void task_exit(int exit_code) {
         current_task->parent->state = TASK_READY;
         current_task->parent->sleep_until = 0;
         serial_printf("[TASK] Waking up parent PID %d\n", current_task->parent->pid);
-    }
-    
-    vma_destroy_all(current_task);
-    if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
-        vmm_destroy_address_space(current_task->pdir_virt);
-        current_task->pdir_virt = NULL;
     }
     
     uint32_t eflags;
@@ -390,6 +386,8 @@ void task_exit(int exit_code) {
         dead_task->prev->next = dead_task->next;
         dead_task->next->prev = dead_task->prev;
     }
+    
+    // НЕ добавляем в dead_tasks_head! Это сделает waitpid.
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
@@ -418,7 +416,22 @@ void task_kill_current(const char* reason) {
         }
     }
     
-    current_task->state = TASK_DEAD;
+    // 🛡️ КРИТИЧЕСКИЙ ФИКС: Освобождаем память и становимся ЗОМБИ (как task_exit)
+    // Это позволяет waitpid корректно забрать статус и отправить задачу в Reaper.
+    vma_destroy_all(current_task);
+    if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
+        vmm_destroy_address_space(current_task->pdir_virt);
+        current_task->pdir_virt = NULL;
+    }
+
+    current_task->state = TASK_ZOMBIE; // 🛡️ СТАНОВИМСЯ ЗОМБИ, А НЕ DEAD!
+    current_task->exit_code = -1; // Убито ядром (SIGSEGV/SIGKILL)
+    
+    if (current_task->parent && current_task->parent->state == TASK_SLEEPING) {
+        current_task->parent->state = TASK_READY;
+        current_task->parent->sleep_until = 0;
+        serial_printf("[TASK] Waking up parent PID %d (Child killed)\n", current_task->parent->pid);
+    }
     
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
@@ -430,8 +443,7 @@ void task_kill_current(const char* reason) {
         dead_task->next->prev = dead_task->prev;
     }
     
-    dead_task->reaper_next = dead_tasks_head; 
-    dead_tasks_head = dead_task;       
+    // НЕ добавляем в dead_tasks_head! Это сделает waitpid.
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
     
@@ -440,10 +452,8 @@ void task_kill_current(const char* reason) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14] TASK FORK (Copy-on-Write) - PRODUCTION READY
+// [ДЕНЬ 14] TASK FORK (Copy-on-Write)
 // ============================================================================
-extern void ret_from_fork(void);
-
 int task_fork(struct regs* r) {
     uint32_t stack_size = 16384;
     uint32_t stack_virt = (uint32_t)kmalloc(stack_size);
@@ -496,32 +506,27 @@ int task_fork(struct regs* r) {
     child->orphan_on_exit = current_task->orphan_on_exit;
     child->monitor_children = current_task->monitor_children;
     
-    // ========================================================================
-    // 🛡️ BULLETPROOF KERNEL STACK COPYING & FORGING
-    // ========================================================================
     k_memcpy((void*)(stack_virt), (void*)(current_task->kernel_stack_virt), stack_size);
     
     uint32_t offset_from_base = (uint32_t)r - current_task->kernel_stack_virt;
     struct regs* original_child_r = (struct regs*)(stack_virt + offset_from_base);
     
-    // Сдвигаем ISR frame вниз на 32 байта, освобождая место для фейкового фрейма
     uint32_t shift = 32;
     struct regs* child_r = (struct regs*)((uint32_t)original_child_r - shift);
     k_memcpy(child_r, original_child_r, sizeof(struct regs));
     
-    child_r->eax = 0; // POSIX: ребенок видит 0
+    child_r->eax = 0; 
     
     uint32_t* child_stack_top = (uint32_t*)child_r;
     
     *(--child_stack_top) = (uint32_t)child_r;
     *(--child_stack_top) = (uint32_t)ret_from_fork;
-    *(--child_stack_top) = 0; // EBX
-    *(--child_stack_top) = 0; // ESI
-    *(--child_stack_top) = 0; // EDI
-    *(--child_stack_top) = 0; // EBP
+    *(--child_stack_top) = 0; 
+    *(--child_stack_top) = 0; 
+    *(--child_stack_top) = 0; 
+    *(--child_stack_top) = 0; 
     
     child->esp = (uint32_t)child_stack_top;
-    // ========================================================================
     
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));

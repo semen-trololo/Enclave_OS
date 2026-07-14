@@ -372,7 +372,7 @@ static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     const char* path = "/";
     if (argc > 1) path = args[1];
 
-    int fd = sys_open(path, O_RDONLY);
+    int fd = sys_open(path, O_RDONLY, 0);
     
     if (fd < 0) {
         k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
@@ -405,7 +405,7 @@ static void handle_cat(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     }
 
     const char* path = args[1];
-    int fd = sys_open(path, O_RDONLY);
+    int fd = sys_open(path, O_RDONLY, 0);
     if (fd < 0) {
         k_set_color(VGA_COLOR_RED, VGA_COLOR_BLACK);
         k_printf("cat: %s: Error %d\n", path, fd);

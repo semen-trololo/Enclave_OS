@@ -107,7 +107,7 @@ char* strstr(const char* haystack, const char* needle);
 // ============================================================================
 // File I/O (через syscalls)
 // ============================================================================
-int open(const char* pathname, int flags);
+int open(const char* pathname, int flags, ...);
 int close(int fd);
 ssize_t read(int fd, void* buf, size_t count);
 ssize_t write(int fd, const void* buf, size_t count);
@@ -119,6 +119,7 @@ size_t fread(void* ptr, size_t size, size_t nmemb, FILE* stream);
 size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* stream);
 int ferror(FILE* stream);
 int feof(FILE* stream);
+int unlink(const char* pathname);
 
 // ============================================================================
 // Output (printf family)

@@ -21,7 +21,7 @@
 #define O_RDONLY   0x0000
 #define O_WRONLY   0x0001
 #define O_RDWR     0x0002
-#define O_CREAT    0x0100
+#define O_CREAT    0x0040
 #define O_TRUNC    0x0200
 #define O_APPEND   0x0400
 
@@ -57,7 +57,7 @@ typedef int32_t (*readdir_type_t)(struct vfs_node*, uint32_t index, dirent_t* en
 typedef struct vfs_node* (*finddir_type_t)(struct vfs_node*, const char* name);
 typedef int (*open_type_t)(struct vfs_node*, uint32_t flags);
 typedef void (*close_type_t)(struct vfs_node*);
-typedef struct vfs_node* (*create_type_t)(struct vfs_node*, const char*);
+typedef struct vfs_node* (*create_type_t)(struct vfs_node*, const char*, uint32_t mode);
 typedef int (*unlink_type_t)(struct vfs_node*, const char*);
 
 // ==========================================
@@ -122,7 +122,7 @@ int32_t vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_
 // ==========================================
 // API СИСТЕМНЫХ ВЫЗОВОВ (Граница Ring 3 -> Ring 0)
 // ==========================================
-int sys_open(const char* pathname, uint32_t flags);
+int sys_open(const char* pathname, uint32_t flags, uint32_t mode);
 int sys_close(int fd);
 int32_t sys_read(int fd, void* buf, uint32_t count);
 int32_t sys_write(int fd, const void* buf, uint32_t count);

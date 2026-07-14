@@ -1,9 +1,9 @@
-// user_src/test_write_text.c
-#include "user_syscalls.h"
+#include "user_libc.h"
 
 void _start() {
-    // Пытаемся модифицировать первую инструкцию самой функции _start (код в .text)
-    // movb $0x90, (%eax) -> записываем NOP по адресу _start
+    printf("[TEST] Triggering W^X violation (Write to .text)...\n");
+    
+    // Пытаемся модифицировать первую инструкцию самой функции _start
     __asm__ volatile(
         "movb $0x90, (%0)" 
         : 
@@ -11,5 +11,6 @@ void _start() {
     );
     
     // Если дошли сюда, W^X не работает!
-    sys_exit(1);
+    printf("[FAIL] W^X protection failed!\n");
+    exit(1);
 }

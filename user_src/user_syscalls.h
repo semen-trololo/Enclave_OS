@@ -101,9 +101,10 @@ static inline int sys_write(int fd, const void* buf, uint32_t count) {
     return syscall3(SYS_WRITE, fd, (int)buf, count);
 }
 
-static inline int sys_open(const char* path, int flags) {
-    return syscall2(SYS_OPEN, (int)path, flags);
+static inline int sys_open(const char* path, int flags, int mode) {
+    return syscall3(SYS_OPEN, (int)path, flags, mode);
 }
+
 
 static inline int sys_close(int fd) {
     return syscall1(SYS_CLOSE, fd);

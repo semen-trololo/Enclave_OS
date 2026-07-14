@@ -305,8 +305,20 @@ long strtol(const char* str, char** endptr, int base) {
 // ============================================================================
 // FILE I/O
 // ============================================================================
-int open(const char* pathname, int flags) {
-    int fd = sys_open(pathname, flags);
+// ✅ ПОЛНОЦЕННАЯ POSIX VARIADIC РЕАЛИЗАЦИЯ
+int open(const char* pathname, int flags, ...) {
+    int mode = 0644; // Дефолтные POSIX-права (rw-r--r--)
+    
+    // По стандарту POSIX третий аргумент (mode) передается ТОЛЬКО если есть O_CREAT
+    if (flags & O_CREAT) {
+        va_list args;
+        va_start(args, flags);
+        mode = va_arg(args, int); // Извлекаем mode из стека
+        va_end(args);
+    }
+    
+    // Пробрасываем в ядро (sys_open уже умеет принимать mode и передавать в tmpfs_create)
+    int fd = sys_open(pathname, flags, mode);
     if (fd < 0) errno = -fd;
     return fd;
 }
@@ -348,7 +360,7 @@ FILE* fopen(const char* path, const char* mode) {
     else if (strcmp(mode, "a+") == 0) flags = O_RDWR | O_CREAT | O_APPEND;
     else { errno = EINVAL; return NULL; }
     
-    int fd = sys_open(path, flags);
+    int fd = sys_open(path, flags, 0644);
     if (fd < 0) { errno = -fd; return NULL; }
     
     FILE* f = (FILE*)malloc(sizeof(FILE));
@@ -389,6 +401,15 @@ int ferror(FILE* stream) {
 
 int feof(FILE* stream) {
     return stream ? stream->eof : 0;
+}
+
+int unlink(const char* pathname) {
+    int ret = sys_unlink(pathname);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
 }
 
 // ============================================================================

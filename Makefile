@@ -10,16 +10,14 @@ BUILD_DIR = build
 ISO_DIR = $(BUILD_DIR)/isodir
 INITRD_ROOT = $(BUILD_DIR)/initrd_root
 USER_BIN_DIR = $(BUILD_DIR)/bin
+USER_SRC_DIR = user_src
+INITRD_SRC_DIR = initrd_src
 
 # Имена файлов
 ISO_NAME = $(BUILD_DIR)/metal_os.iso
 KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 INITRD_TAR = $(BUILD_DIR)/initrd.tar
 DISK_IMG = $(BUILD_DIR)/disk.img
-
-# Исходники
-INITRD_SRC_DIR = initrd_src
-USER_SRC_DIR = user_src
 
 # Флаги компиляции ядра (Строго по Базе Знаний)
 CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Iinclude
@@ -31,9 +29,9 @@ ASFLAGS = -f elf32 -g
 LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
 
 # Флаги компиляции user-space
-# ✅ ИСПРАВЛЕНО: Добавлен -fno-optimize-sibling-calls для отключения TCO
-USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra -fno-optimize-sibling-calls
-USER_LDFLAGS = -nostdlib -T user_linker.ld
+# ✅ -fno-optimize-sibling-calls для отключения TCO (корректная рекурсия в тестах)
+USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra -fno-optimize-sibling-calls -Iuser_src
+USER_LDFLAGS = -nostdlib -T $(USER_SRC_DIR)/user_linker.ld
 
 # ==============================================================================
 # ИСХОДНИКИ И ОБЪЕКТЫ ЯДРА
@@ -49,12 +47,23 @@ OBJ = $(BUILD_DIR)/boot.o $(filter-out $(BUILD_DIR)/boot.o,$(C_OBJS) $(ASM_OBJS)
 # Автоматически сгенерированные зависимости (.d файлы)
 DEPS = $(C_OBJS:.o=.d)
 
-# User-space исходники
-USER_C_SOURCES = $(wildcard $(USER_SRC_DIR)/*.c)
+# ==============================================================================
+# USER-SPACE ИСХОДНИКИ (С разделением библиотеки и тестов)
+# ==============================================================================
+# 1. Библиотека libc (компилируется один раз, линкуется ко всем тестам)
+USER_LIBC_SRC = $(USER_SRC_DIR)/user_libc.c
+USER_LIBC_OBJ = $(BUILD_DIR)/user_libc.o
+
+# 2. ASM исходники user-space (если есть)
 USER_ASM_SOURCES = $(wildcard $(USER_SRC_DIR)/*.asm)
-USER_C_OBJS = $(patsubst $(USER_SRC_DIR)/%.c,$(BUILD_DIR)/user_%.o,$(USER_C_SOURCES))
 USER_ASM_OBJS = $(patsubst $(USER_SRC_DIR)/%.asm,$(BUILD_DIR)/user_%.o,$(USER_ASM_SOURCES))
-USER_ELFS = $(patsubst $(USER_SRC_DIR)/%.c,$(USER_BIN_DIR)/%.elf,$(USER_C_SOURCES)) \
+
+# 3. Тестовые C-исходники (ИСКЛЮЧАЕМ user_libc.c через filter-out)
+USER_TEST_C_SOURCES = $(filter-out $(USER_LIBC_SRC),$(wildcard $(USER_SRC_DIR)/*.c))
+USER_TEST_C_OBJS = $(patsubst $(USER_SRC_DIR)/%.c,$(BUILD_DIR)/user_%.o,$(USER_TEST_C_SOURCES))
+
+# 4. Финальные ELF бинарники (только тесты + asm программы)
+USER_ELFS = $(patsubst $(USER_SRC_DIR)/%.c,$(USER_BIN_DIR)/%.elf,$(USER_TEST_C_SOURCES)) \
             $(patsubst $(USER_SRC_DIR)/%.asm,$(USER_BIN_DIR)/%.elf,$(USER_ASM_SOURCES))
 
 # ==============================================================================
@@ -83,15 +92,23 @@ $(BUILD_DIR):
 # ==============================================================================
 # USER-SPACE PROGRAMS (ELF Binaries)
 # ==============================================================================
-$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.c | $(USER_BIN_DIR)
+
+# 🛠 Компиляция самой библиотеки user_libc (один раз для всех тестов)
+$(USER_LIBC_OBJ): $(USER_LIBC_SRC) $(USER_SRC_DIR)/user_libc.h $(USER_SRC_DIR)/user_syscalls.h | $(BUILD_DIR)
+	@echo "[USER LIB] $< -> $@"
+	@$(USER_CC) $(USER_CFLAGS) -c $< -o $@
+
+# 🔗 Линковка C-тестов с обязательным подключением user_libc.o
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.c $(USER_LIBC_OBJ) | $(USER_BIN_DIR)
 	@echo "[USER CC] $< -> $@"
 	@$(USER_CC) $(USER_CFLAGS) -c $< -o $(BUILD_DIR)/user_$*.o
-	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
 
-$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.asm | $(USER_BIN_DIR)
+# 🔗 Линковка ASM-тестов (тоже линкуем с libc)
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.asm $(USER_LIBC_OBJ) | $(USER_BIN_DIR)
 	@echo "[USER AS] $< -> $@"
 	@$(AS) -f elf32 $< -o $(BUILD_DIR)/user_$*.o
-	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
 
 $(USER_BIN_DIR):
 	@mkdir -p $(USER_BIN_DIR)

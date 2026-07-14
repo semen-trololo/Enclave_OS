@@ -210,18 +210,16 @@ int32_t vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_
 // 5. POSIX SYSCALLS (Граница Ring 3 -> Ring 0)
 // ==========================================
 
-int sys_open(const char* pathname, uint32_t flags) {
+int sys_open(const char* pathname, uint32_t flags, uint32_t mode)  {
     if (!pathname) return -2; // VFS_ENOENT
     
     vfs_node_t* node = vfs_findnode(pathname);
     
-    // ✅ ИСПРАВЛЕНО: Поддержка O_CREAT
     if (!node) {
         if (flags & O_CREAT) {
             int len = k_strlen(pathname);
             if (len == 0 || pathname[0] != '/') return -2;
             
-            // Ищем последний слэш, чтобы отделить путь к родителю от имени файла
             int last_slash = -1;
             for (int i = len - 1; i >= 0; i--) {
                 if (pathname[i] == '/') {
@@ -248,10 +246,7 @@ int sys_open(const char* pathname, uint32_t flags) {
             vfs_node_t* parent = vfs_findnode(parent_path);
             if (!parent) return -2;
             
-            // 🛡️ CRITICAL: Mountpoint Resolution
-            // Если родитель является точкой монтирования (например, /tmp),
-            // мы должны телепортироваться в корень примонтированной ФС (tmpfs),
-            // иначе create сработает на узле Initrd!
+            // 🛡️ CRITICAL: Mountpoint Resolution (Teleportation)
             if (parent->flags & FS_MOUNTPOINT) {
                 parent = parent->mountpoint_node;
                 if (!parent) return -2;
@@ -260,7 +255,7 @@ int sys_open(const char* pathname, uint32_t flags) {
             if (!(parent->flags & FS_DIRECTORY)) return -13; // EACCES
             if (!parent->create) return -13;                 // ENOSYS
             
-            node = parent->create(parent, file_name);
+            node = parent->create(parent, file_name, mode);
             if (!node) return -12; // ENOMEM
         } else {
             return -2; // ENOENT (файла нет и O_CREAT не указан)

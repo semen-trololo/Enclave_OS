@@ -223,12 +223,10 @@ static int sys_unlink_handler(struct regs* r) {
     return sys_unlink(path_buf);
 }
 
-// ========================================================================
-// sys_open: открытие файла
-// ========================================================================
 static int sys_open_handler(struct regs* r) {
     const char* user_path = (const char*)r->ebx;
     uint32_t flags = (uint32_t)r->ecx;
+    uint32_t mode = (uint32_t)r->edx; // 🛡️ Читаем mode из 3-го аргумента (EDX)
     char path_buf[256];
     
     int ret = copy_string_from_user(path_buf, user_path, sizeof(path_buf));
@@ -237,7 +235,14 @@ static int sys_open_handler(struct regs* r) {
         return ret;
     }
     
-    return sys_open(path_buf, flags);
+    // 🛡️ POSIX COMPLIANCE & SECURITY HARDENING:
+    // User-space передает только права (0644). Ядро обязано добавить тип файла (S_IFREG),
+    // иначе tmpfs_create отвергнет запрос. Маска 07777 защищает от инъекции S_IFCHR/S_IFDIR.
+    if (flags & O_CREAT) {
+        mode = (mode & 07777) | S_IFREG; 
+    }
+    
+    return sys_open(path_buf, flags, mode);
 }
 
 // ========================================================================
