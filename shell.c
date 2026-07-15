@@ -81,7 +81,7 @@ static void print_help(void) {
     k_print("  pmm alloc [num]  - Allocate physical pages\n");
     k_print("  pmm free <addr>  - Free a physical page (hex)\n");
     k_print("  pmm test         - Run PMM stress tests\n");
-    k_print("  heap <cmd>       - Heap operations (status|alloc|free|test)\n");
+    k_print("  heap <cmd>       - Heap operations (status|alloc|free|test|frag)\n");
     
     k_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     k_print("  [ Graphics & Fonts ]\n");
@@ -640,7 +640,9 @@ static void execute_command(char* buffer) {
     else if (k_strcmp(args[0], "ps") == 0) {
         task_print_list(); 
     }
-    
+    else if (k_strcmp(args[0], "frag") == 0 ) {
+        heap_print_fragmentation();
+    }
     // [ Memory ]
     else if (k_strcmp(args[0], "memmap") == 0) {
         handle_memmap();

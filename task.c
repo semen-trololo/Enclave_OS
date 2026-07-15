@@ -1,3 +1,5 @@
+//task.c
+
 #include "task.h"
 #include "pmm.h"
 #include "klib.h"
@@ -10,6 +12,7 @@
 #include "syscall.h"
 #include "heap.h"
 #include <stdbool.h>
+#include "config.h"
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
 extern void ret_from_fork(void);
@@ -166,13 +169,13 @@ void tasking_init(void) {
 task_t* task_create(const char* name, void (*entry_point)(void), 
                     bool is_user_mode, uint32_t user_esp, uint32_t* custom_pdir) {
     
-    uint32_t stack_size = 16384; 
-    uint32_t stack_virt = (uint32_t)kmalloc(stack_size);
-    if (stack_virt == 0) return 0;
+    // 🛡️ [ДЕНЬ 16] FIX: Используем VMM аллокатор с Hardware Guard Page
+    uint32_t stack_top = vmm_alloc_kernel_stack();
+    if (stack_top == 0) return 0;
 
     uint32_t pcb_phys = pmm_alloc_page(); 
     if (pcb_phys == 0) {
-        kfree((void*)stack_virt);
+        vmm_free_kernel_stack(stack_top);
         return 0;
     }
 
@@ -183,8 +186,8 @@ task_t* task_create(const char* name, void (*entry_point)(void),
 
     new_task->pid = next_pid++;
     new_task->state = TASK_READY;
-    new_task->kernel_stack_virt = stack_virt;
-    new_task->reaper_next = NULL; 
+    new_task->kernel_stack_virt = stack_top; // 🛡️ FIX: Теперь это TOP, а не base!
+    new_task->reaper_next = NULL;  
     
     if (is_user_mode) {
         if (custom_pdir) {
@@ -193,7 +196,7 @@ task_t* task_create(const char* name, void (*entry_point)(void),
         } else {
             new_task->pdir_virt = vmm_create_address_space();
             if (!new_task->pdir_virt) {
-                kfree((void*)stack_virt);
+                vmm_free_kernel_stack(stack_top); // 🛡️ FIX: Корректный откат
                 pmm_free_page(pcb_phys);
                 return 0;
             }
@@ -207,20 +210,21 @@ task_t* task_create(const char* name, void (*entry_point)(void),
     int i = 0; while(name[i] && i < 31) { new_task->name[i] = name[i]; i++; }
     new_task->name[i] = '\0';
 
-    uint32_t* stack_top = (uint32_t*)(stack_virt + stack_size);
+    // 🛡️ FIX: Стек растет вниз от stack_top (убрали stack_virt + stack_size)
+    uint32_t* stack_ptr = (uint32_t*)stack_top;
     
-    *(--stack_top) = user_esp;                      
-    *(--stack_top) = (uint32_t)is_user_mode;        
-    *(--stack_top) = (uint32_t)entry_point;         
-    *(--stack_top) = (uint32_t)task_exit;           
+    *(--stack_ptr) = user_esp;                      
+    *(--stack_ptr) = (uint32_t)is_user_mode;        
+    *(--stack_ptr) = (uint32_t)entry_point;         
+    *(--stack_ptr) = (uint32_t)task_exit;           
    
-    *(--stack_top) = (uint32_t)task_entry_trampoline; 
-    *(--stack_top) = 0; // EBX
-    *(--stack_top) = 0; // ESI
-    *(--stack_top) = 0; // EDI
-    *(--stack_top) = 0; // EBP
+    *(--stack_ptr) = (uint32_t)task_entry_trampoline; 
+    *(--stack_ptr) = 0; // EBX
+    *(--stack_ptr) = 0; // ESI
+    *(--stack_ptr) = 0; // EDI
+    *(--stack_ptr) = 0; // EBP
     
-    new_task->esp = (uint32_t)stack_top;
+    new_task->esp = (uint32_t)stack_ptr;
 
     for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) new_task->fd_table[j] = 0;
     task_init_fds(new_task); 
@@ -250,13 +254,14 @@ task_t* task_create(const char* name, void (*entry_point)(void),
 // ============================================================================
 // ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IDLE HLT)
 // ============================================================================
+// ============================================================================
+// ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IDLE HLT)
+// ============================================================================
 void schedule(void) {
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
 
     // 🛡️ REAPER PHASE: Очищаем мертвые задачи ПЕРЕД планированием.
-    // Это гарантирует, что ресурсы освободятся даже если в системе только 1 задача
-    // и switch_context не вызывается (old_task == new_task).
     if (dead_tasks_head != NULL) {
         while (dead_tasks_head != NULL) {
             task_t* dead = dead_tasks_head;
@@ -264,10 +269,9 @@ void schedule(void) {
         
             serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
         
-            // VMA и Address Space уже уничтожены в task_exit / task_kill_current
-            
+            // 🛡️ [ДЕНЬ 16] FIX: Освобождаем стек через VMM (снимает маппинг и Guard Page)
             if (dead->kernel_stack_virt != 0) {
-                kfree((void*)dead->kernel_stack_virt);
+                vmm_free_kernel_stack(dead->kernel_stack_virt);
             }
             
             pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
@@ -303,7 +307,8 @@ void schedule(void) {
     current_task = new_task;
 
     if (new_task->kernel_stack_virt != 0) {
-        tss_set_kernel_stack(0x10, new_task->kernel_stack_virt + 16384);
+        // 🛡️ [ДЕНЬ 16] FIX: kernel_stack_virt теперь уже TOP, + 16384 не нужен!
+        tss_set_kernel_stack(0x10, new_task->kernel_stack_virt);
     }
 
     switch_context(&old_task->esp, new_task->esp, new_task->cr3);
@@ -455,13 +460,13 @@ void task_kill_current(const char* reason) {
 // [ДЕНЬ 14] TASK FORK (Copy-on-Write)
 // ============================================================================
 int task_fork(struct regs* r) {
-    uint32_t stack_size = 16384;
-    uint32_t stack_virt = (uint32_t)kmalloc(stack_size);
-    if (stack_virt == 0) return -ENOMEM;
+    // 🛡️ [ДЕНЬ 16] FIX: VMM аллокатор вместо kmalloc
+    uint32_t stack_top = vmm_alloc_kernel_stack();
+    if (stack_top == 0) return -ENOMEM;
     
     uint32_t pcb_phys = pmm_alloc_page();
     if (pcb_phys == 0) {
-        kfree((void*)stack_virt);
+        vmm_free_kernel_stack(stack_top);
         return -ENOMEM;
     }
     
@@ -470,13 +475,13 @@ int task_fork(struct regs* r) {
     
     child->pid = next_pid++;
     child->state = TASK_READY;
-    child->kernel_stack_virt = stack_virt;
+    child->kernel_stack_virt = stack_top; // 🛡️ FIX: Это TOP
     child->reaper_next = NULL;
     child->sleep_until = 0;
     
     child->pdir_virt = vmm_clone_address_space(current_task->pdir_virt);
     if (!child->pdir_virt) {
-        kfree((void*)stack_virt);
+        vmm_free_kernel_stack(stack_top);
         pmm_free_page(pcb_phys);
         return -ENOMEM;
     }
@@ -484,7 +489,7 @@ int task_fork(struct regs* r) {
     
     if (vma_clone(child, current_task) < 0) {
         vmm_destroy_address_space(child->pdir_virt);
-        kfree((void*)stack_virt);
+        vmm_free_kernel_stack(stack_top);
         pmm_free_page(pcb_phys);
         return -ENOMEM;
     }
@@ -506,27 +511,33 @@ int task_fork(struct regs* r) {
     child->orphan_on_exit = current_task->orphan_on_exit;
     child->monitor_children = current_task->monitor_children;
     
-    k_memcpy((void*)(stack_virt), (void*)(current_task->kernel_stack_virt), stack_size);
+    // 🛡️ [ДЕНЬ 16] FIX: Правильное копирование стека с учетом новой архитектуры (TOP)
+    uint32_t parent_stack_base = current_task->kernel_stack_virt - KERNEL_STACK_USABLE_SIZE;
+    uint32_t child_stack_base = stack_top - KERNEL_STACK_USABLE_SIZE;
     
-    uint32_t offset_from_base = (uint32_t)r - current_task->kernel_stack_virt;
-    struct regs* original_child_r = (struct regs*)(stack_virt + offset_from_base);
+    k_memcpy((void*)child_stack_base, (void*)parent_stack_base, KERNEL_STACK_USABLE_SIZE);
     
+    // Вычисляем смещение regs относительно базы родительского стека
+    uint32_t offset_from_base = (uint32_t)r - parent_stack_base;
+    struct regs* original_child_r = (struct regs*)(child_stack_base + offset_from_base);
+    
+    // Сдвигаем regs вниз на 32 байта для нового стекового фрейма ret_from_fork
     uint32_t shift = 32;
     struct regs* child_r = (struct regs*)((uint32_t)original_child_r - shift);
     k_memcpy(child_r, original_child_r, sizeof(struct regs));
     
-    child_r->eax = 0; 
+    child_r->eax = 0; // Ребенок видит 0 как результат fork()
     
-    uint32_t* child_stack_top = (uint32_t*)child_r;
+    uint32_t* child_stack_ptr = (uint32_t*)child_r;
     
-    *(--child_stack_top) = (uint32_t)child_r;
-    *(--child_stack_top) = (uint32_t)ret_from_fork;
-    *(--child_stack_top) = 0; 
-    *(--child_stack_top) = 0; 
-    *(--child_stack_top) = 0; 
-    *(--child_stack_top) = 0; 
+    *(--child_stack_ptr) = (uint32_t)child_r;
+    *(--child_stack_ptr) = (uint32_t)ret_from_fork;
+    *(--child_stack_ptr) = 0; 
+    *(--child_stack_ptr) = 0; 
+    *(--child_stack_ptr) = 0; 
+    *(--child_stack_ptr) = 0; 
     
-    child->esp = (uint32_t)child_stack_top;
+    child->esp = (uint32_t)child_stack_ptr;
     
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));

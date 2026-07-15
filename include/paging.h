@@ -63,4 +63,15 @@ void vmm_protect_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t flags);
 // Возвращает виртуальный адрес нового Page Directory или NULL при OOM.
 uint32_t* vmm_clone_address_space(uint32_t* parent_pd_virt);
 
+// ============================================================================
+// [ДЕНЬ 16] KERNEL STACK ALLOCATOR (Hardware Guard Page)
+// ============================================================================
+// Выделяет 16 KB стека ядра с 4 KB Guard Page снизу.
+// Возвращает виртуальный адрес ВЕРШИНЫ стека (top) или 0 при OOM.
+uint32_t vmm_alloc_kernel_stack(void);
+
+// Освобождает стек ядра и возвращает физические страницы в PMM.
+// Принимает виртуальный адрес ВЕРШИНЫ стека (top).
+void vmm_free_kernel_stack(uint32_t stack_top);
+
 #endif // PAGING_H

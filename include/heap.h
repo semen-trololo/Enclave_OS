@@ -31,5 +31,6 @@ int32_t  heap_check_balance(void); // Возвращает (allocs - frees). Д�
 // ============================================================================
 void heap_print_status(void);
 void heap_run_tests(void);
+void heap_print_fragmentation(void);
 
 #endif // HEAP_H

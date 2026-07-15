@@ -1,3 +1,5 @@
+//vfs.c
+
 #include "vfs.h"
 #include "heap.h"
 #include "klib.h"
@@ -169,6 +171,7 @@ vfs_node_t* vfs_findnode(const char* path) {
     vfs_node_t* current = vfs_root;
     char token[VFS_MAX_FILENAME];
     int i = 1;
+    int hops = 0;
     
     while (path[i] != '\0') {
         while (path[i] == '/') i++;
@@ -180,15 +183,33 @@ vfs_node_t* vfs_findnode(const char* path) {
         }
         token[t_idx] = '\0';
         
-        if (current->flags & FS_MOUNTPOINT) {
+        // 🛡️ Mountpoint Teleportation with Hop Limit
+        while (current && (current->flags & FS_MOUNTPOINT)) {
+            if (++hops > MAX_MOUNT_HOPS) {
+                serial_print("[VFS] ELOOP: Max mount hops exceeded!\n");
+                return 0; 
+            }
             current = current->mountpoint_node;
-            if (!current) return 0;
         }
+        if (!current) return 0;
         
         if (!current->finddir) return 0;
         current = current->finddir(current, token);
+        // 🛡️ РЕНТГЕН: Логируем каждый шаг поиска
+        // 🛡️ РЕНТГЕН: Логируем каждый шаг поиска
+        //serial_printf("[VFS_FIND] token='%s', found_node=0x%x\n", token, (uint32_t)current);
         if (!current) return 0;
     }
+    
+    // Resolve final node if it's a mountpoint
+    while (current && (current->flags & FS_MOUNTPOINT)) {
+        if (++hops > MAX_MOUNT_HOPS) {
+            serial_print("[VFS] ELOOP: Max mount hops exceeded at final node!\n");
+            return 0;
+        }
+        current = current->mountpoint_node;
+    }
+    
     return current;
 }
 
@@ -211,30 +232,28 @@ int32_t vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_
 // ==========================================
 
 int sys_open(const char* pathname, uint32_t flags, uint32_t mode)  {
-    if (!pathname) return -2; // VFS_ENOENT
+    if (!pathname) return -VFS_ENOENT;
     
     vfs_node_t* node = vfs_findnode(pathname);
+    // 🛡️ РЕНТГЕН: Логируем результат резолва пути
+    //serial_printf("[SYS_OPEN] path='%s', resolved_node=0x%x, flags=0x%x\n", pathname, (uint32_t)node, flags);
     
     if (!node) {
         if (flags & O_CREAT) {
             int len = k_strlen(pathname);
-            if (len == 0 || pathname[0] != '/') return -2;
+            if (len == 0 || pathname[0] != '/') return -VFS_ENOENT;
             
             int last_slash = -1;
             for (int i = len - 1; i >= 0; i--) {
-                if (pathname[i] == '/') {
-                    last_slash = i;
-                    break;
-                }
+                if (pathname[i] == '/') { last_slash = i; break; }
             }
-            if (last_slash == -1) return -2;
+            if (last_slash == -1) return -VFS_ENOENT;
             
             char parent_path[256];
             char file_name[256];
             
             if (last_slash == 0) {
-                parent_path[0] = '/';
-                parent_path[1] = '\0';
+                parent_path[0] = '/'; parent_path[1] = '\0';
             } else {
                 k_memcpy(parent_path, pathname, last_slash);
                 parent_path[last_slash] = '\0';
@@ -244,29 +263,36 @@ int sys_open(const char* pathname, uint32_t flags, uint32_t mode)  {
             file_name[255] = '\0';
             
             vfs_node_t* parent = vfs_findnode(parent_path);
-            if (!parent) return -2;
+            if (!parent) return -VFS_ENOENT;
             
-            // 🛡️ CRITICAL: Mountpoint Resolution (Teleportation)
-            if (parent->flags & FS_MOUNTPOINT) {
-                parent = parent->mountpoint_node;
-                if (!parent) return -2;
-            }
+            while (parent && (parent->flags & FS_MOUNTPOINT)) parent = parent->mountpoint_node;
+            if (!parent) return -VFS_ENOENT;
             
-            if (!(parent->flags & FS_DIRECTORY)) return -13; // EACCES
-            if (!parent->create) return -13;                 // ENOSYS
+            if (!(parent->flags & FS_DIRECTORY)) return -VFS_EACCES;
+            if (!parent->create) return -VFS_EACCES;
             
             node = parent->create(parent, file_name, mode);
-            if (!node) return -12; // ENOMEM
+            if (!node) return -VFS_ENOMEM;
         } else {
-            return -2; // ENOENT (файла нет и O_CREAT не указан)
+            return -VFS_ENOENT;
         }
     }
     
-    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) return -13;
-    if (node->open && node->open(node, flags) != 0) return -13;
+    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) return -VFS_EACCES;
+    if (node->open && node->open(node, flags) != 0) return -VFS_EACCES;
+    
+    // 🛡️ CRITICAL: Increment inode ref_count under cli/sti
+    __asm__ volatile("cli");
+    node->ref_count++;
+    __asm__ volatile("sti");
     
     open_file_t* of = (open_file_t*)kmalloc(sizeof(open_file_t));
-    if (!of) return -12;
+    if (!of) {
+        __asm__ volatile("cli");
+        node->ref_count--;
+        __asm__ volatile("sti");
+        return -VFS_ENOMEM;
+    }
     
     of->node = node;
     of->offset = 0;
@@ -281,31 +307,29 @@ int sys_open(const char* pathname, uint32_t flags, uint32_t mode)  {
     }
     
     kfree(of);
-    return -12; // EMFILE (Too many open files)
+    __asm__ volatile("cli");
+    node->ref_count--;
+    __asm__ volatile("sti");
+    return -VFS_ENOMEM; // EMFILE
 }
 
-// ✅ ДОБАВЛЕНО: Удаление файлов
 int sys_unlink(const char* pathname) {
-    if (!pathname) return -2;
+    if (!pathname) return -VFS_ENOENT;
     
     int len = k_strlen(pathname);
-    if (len == 0 || pathname[0] != '/') return -2;
+    if (len == 0 || pathname[0] != '/') return -VFS_ENOENT;
     
     int last_slash = -1;
     for (int i = len - 1; i >= 0; i--) {
-        if (pathname[i] == '/') {
-            last_slash = i;
-            break;
-        }
+        if (pathname[i] == '/') { last_slash = i; break; }
     }
-    if (last_slash == -1) return -2;
+    if (last_slash == -1) return -VFS_ENOENT;
     
     char parent_path[256];
     char file_name[256];
     
     if (last_slash == 0) {
-        parent_path[0] = '/';
-        parent_path[1] = '\0';
+        parent_path[0] = '/'; parent_path[1] = '\0';
     } else {
         k_memcpy(parent_path, pathname, last_slash);
         parent_path[last_slash] = '\0';
@@ -315,31 +339,71 @@ int sys_unlink(const char* pathname) {
     file_name[255] = '\0';
     
     vfs_node_t* parent = vfs_findnode(parent_path);
-    if (!parent) return -2;
+    if (!parent) return -VFS_ENOENT;
     
-    // 🛡️ Mountpoint Resolution (как и в sys_open)
-    if (parent->flags & FS_MOUNTPOINT) {
-        parent = parent->mountpoint_node;
-        if (!parent) return -2;
+    while (parent && (parent->flags & FS_MOUNTPOINT)) parent = parent->mountpoint_node;
+    if (!parent) return -VFS_ENOENT;
+    
+    if (!(parent->flags & FS_DIRECTORY)) return -VFS_EACCES;
+    if (!parent->unlink) return -VFS_EACCES;
+    
+    __asm__ volatile("cli");
+    
+    // Find the target node BEFORE calling FS unlink
+    vfs_node_t* target = parent->finddir ? parent->finddir(parent, file_name) : NULL;
+    if (!target) {
+        __asm__ volatile("sti");
+        return -VFS_ENOENT;
+    }
+    //serial_printf("[SYS_UNLINK] Calling FS unlink on parent=0x%x (flags=0x%x)\n", 
+                //  (uint32_t)parent, parent->flags);
+    int ret = parent->unlink(parent, file_name);
+    
+    if (ret == 0) {
+        // 🛡️ ORPHAN NODE: Mark as unlinked, but DO NOT free if ref_count > 0
+        target->is_unlinked = true;
+        
+        // If no one has it open, free it immediately
+        if (target->ref_count == 0) {
+            if (target->close) target->close(target);
+            kfree(target);
+        }
     }
     
-    if (!(parent->flags & FS_DIRECTORY)) return -13;
-    if (!parent->unlink) return -13;
-    
-    return parent->unlink(parent, file_name);
+    __asm__ volatile("sti");
+    return ret;
 }
 
 int sys_close(int fd) {
     if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) return -1;
-    open_file_t* of = current_task->fd_table[fd];
-    if (!of) return -1;
     
-    of->ref_count--;
-    if (of->ref_count == 0) {
-        if (of->node && of->node->close) of->node->close(of->node);
-        kfree(of);
+    __asm__ volatile("cli");
+    open_file_t* of = current_task->fd_table[fd];
+    if (!of) {
+        __asm__ volatile("sti");
+        return -1;
     }
+    
     current_task->fd_table[fd] = 0;
+    of->ref_count--;
+    
+    if (of->ref_count == 0) {
+        vfs_node_t* node = of->node;
+        kfree(of);
+        
+        if (node) {
+            node->ref_count--;
+            if (node->ref_count == 0) {
+                if (node->close) node->close(node);
+                
+                // 🛡️ TRUE UNLINK: Free the inode if it was unlinked from the tree
+                if (node->is_unlinked) {
+                    kfree(node);
+                }
+            }
+        }
+    }
+    __asm__ volatile("sti");
     return 0;
 }
 

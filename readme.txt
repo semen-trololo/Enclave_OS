@@ -874,14 +874,35 @@ TinyCC использует `mmap` для code generation. Мы уже реал�
     ✅ Хорошо: VMA validation, argv isolation, OOM protection
     ❌ Плохо: Нет защиты от kernel stack overflow, infinite PF loop, stack underflow
 
-Это не отменяет сделанную работу, но требует Security Hardening перед тем, как мы пустим TinyCC в production. TinyCC — это ~150KB кода, и он обязательно найдет эти edge cases.
-Рекомендуемый план:
-День 17.5 (Security Hardening Sprint):
+Твоя интуиция снова правильная. VFS/syscall layer имеет 2 критические уязвимости (Use-After-Free), которые могут привести к:
 
-    Рефакторинг sys_exec_handler: k_argv_buf → kmalloc
-    Фикс page_fault_handler: проверка VMA_WRITE для Ring 0 writes
-    Добавление stack_bottom bounds checking в Stack Forging
-    cli/sti wrapping для критических секций
+    Kernel Panic (если ядро обратится к freed memory)
+    Privilege Escalation (если Ring 3 процесс сможет манипулировать freed pointers)
+    Data Corruption (если freed memory будет переиспользована)
+
+    Добавить ref_count в vfs_node_t
+    Рефакторинг sys_close с CLI/STI wrapping
+    Рефакторинг sys_unlink с orphan node support
+    Добавить overflow checks в tmpfs_write
+    Добавить MAX_MOUNT_HOPS в vfs_findnode
+    Добавить task->vfs_root для будущего chroot
+    
+Это не отменяет сделанную работу, но требует Security Hardening перед тем, как мы пустим TinyCC в production. TinyCC — это ~150KB кода, и он обязательно найдет эти edge cases.
+
+🏁 Статус: VFS Security Hardening Завершен!
+Мы успешно закрыли все критические уязвимости VFS:
+✅ Use-After-Free (UAF) — устранен через ref_count и Orphan Nodes
+✅ Kernel Stack Overflow — устранен через MAX_MOUNT_HOPS = 16
+✅ Race Conditions — устранены через cli/sti в критических секциях
+✅ OOM Write Bombs — устранены через квоту 40 МБ на файл
+✅ POSIX Compliance — unlink работает с открытыми файлами (orphan semantics)  
+
+    ✅ Выдерживает POSIX unlink (Orphan Nodes).
+    ✅ Защищена от Race Conditions (cli/sti + ref_count).
+    ✅ Защищена от Kernel Stack Overflow (MAX_MOUNT_HOPS).
+    ✅ Имеет атомарное создание файлов (нет Use-After-Free при OOM).
+    ✅ Gracefully обрабатывает нехватку памяти (тесты адаптируются и убирают за собой мусор).
+    ✅ Обладает нулевой фрагментацией после жесточайшего стресса.
 
 После этого можно безопасно переходить к TinyCC.
 ---

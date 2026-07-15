@@ -14,8 +14,8 @@
 
 #define HEAP_PAGES (HEAP_SIZE / 4096)  
 
-#define MAX_ORDER 13   
-#define TREE_SIZE  16384 
+#define MAX_ORDER 15   // 2^15 * 4096 = 128 MB max block
+#define TREE_SIZE  65536  // 2^(MAX_ORDER + 1) nodes in implicit binary tree
 
 #define NODE_UNUSED 0 
 #define NODE_FREE   1 
@@ -220,6 +220,65 @@ int32_t heap_check_balance(void) {
 // ============================================================================
 // ДИАГНОСТИКА
 // ============================================================================
+void heap_print_fragmentation(void) {
+    uint32_t free_blocks[MAX_ORDER + 1] = {0};
+    uint32_t alloc_blocks[MAX_ORDER + 1] = {0};
+    
+    // Проходим по всему дереву Buddy System
+    for (int i = 1; i < TREE_SIZE; i++) {
+        if (tree[i] == NODE_FREE || tree[i] == NODE_ALLOC) {
+            int depth = get_depth(i);
+            int level = MAX_ORDER - depth;
+            if (level >= 0 && level <= MAX_ORDER) {
+                if (tree[i] == NODE_FREE) free_blocks[level]++;
+                else alloc_blocks[level]++;
+            }
+        }
+    }
+    
+    k_printf("\n--- [ Kernel Heap Fragmentation Matrix ] ---\n");
+    k_printf(" Block Size | Free Blocks | Alloc Blocks\n");
+    k_printf("--------------------------------------------\n");
+    serial_printf("\n--- [ Kernel Heap Fragmentation Matrix ] ---\n");
+    serial_printf(" Block Size | Free Blocks | Alloc Blocks\n");
+    serial_printf("--------------------------------------------\n");
+    
+    uint32_t total_free_kb = 0;
+    uint32_t total_alloc_kb = 0;
+    
+    for (int level = 0; level <= MAX_ORDER; level++) {
+        uint32_t size_kb = (4096 << level) / 1024;
+        
+        if (free_blocks[level] > 0 || alloc_blocks[level] > 0) {
+            // 🛡️ FIX: Используем только простые %u без модификаторов ширины
+            k_printf(" %u KB | %u | %u\n", 
+                     size_kb, free_blocks[level], alloc_blocks[level]);
+            serial_printf(" %u KB | %u | %u\n", 
+                     size_kb, free_blocks[level], alloc_blocks[level]);
+            total_free_kb += free_blocks[level] * size_kb;
+            total_alloc_kb += alloc_blocks[level] * size_kb;
+        }
+    }
+    k_printf("--------------------------------------------\n");
+    k_printf(" Total Free:  %u KB (%u MB)\n", total_free_kb, total_free_kb / 1024);
+    k_printf(" Total Alloc: %u KB (%u MB)\n", total_alloc_kb, total_alloc_kb / 1024);
+    serial_printf("--------------------------------------------\n");
+    serial_printf(" Total Free:  %u KB (%u MB)\n", total_free_kb, total_free_kb / 1024);
+    serial_printf(" Total Alloc: %u KB (%u MB)\n", total_alloc_kb, total_alloc_kb / 1024);
+    
+    // Оценка фрагментации
+    if (free_blocks[MAX_ORDER] == 0 && free_blocks[MAX_ORDER-1] == 0 && 
+        free_blocks[MAX_ORDER-2] == 0 && total_free_kb > 1024) {
+        k_printf(" [WARNING] Severe fragmentation! No large contiguous blocks.\n");
+        serial_printf(" [WARNING] Severe fragmentation! No large contiguous blocks.\n");
+    } else {
+        k_printf(" [OK] Heap is relatively healthy.\n");
+        serial_printf(" [OK] Heap is relatively healthy.\n");
+    }
+    k_printf("--------------------------------------------\n\n");
+    serial_printf("--------------------------------------------\n\n");
+}
+
 void heap_print_status(void) {
     uint32_t free_bytes = 0;
     uint32_t alloc_bytes = 0;
@@ -251,6 +310,14 @@ void heap_print_status(void) {
     k_printf(" Allocated: %u KB\n", alloc_kb);
     k_set_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     k_printf("----------------------------\n\n");
+
+    
+    serial_printf("\n--- [ Kernel Heap Status ] ---\n");
+    serial_printf(" Base:      0x%x\n", HEAP_START);
+    serial_printf(" Total:     %u KB (%u MB)\n", total_kb, total_kb / 1024);
+    serial_printf(" Free:      %u KB\n", free_kb);
+    serial_printf(" Allocated: %u KB\n", alloc_kb);
+    serial_printf("----------------------------\n\n");
 }
 
 void heap_run_tests(void) {

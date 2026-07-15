@@ -1,3 +1,5 @@
+//paging.c
+
 #include "paging.h"
 #include "pmm.h"
 #include "klib.h"
@@ -17,6 +19,91 @@ extern uint8_t boot_stack_top[];
 
 extern uint8_t _kernel_start[];
 extern uint8_t _kernel_end[];
+
+// ============================================================================
+// [ДЕНЬ 16] KERNEL STACK ALLOCATOR (Hardware Guard Page)
+// ============================================================================
+#define KERNEL_STACK_SLOTS (KERNEL_STACK_POOL_SIZE / (KERNEL_STACK_SLOT_PAGES * 4096))
+static uint8_t kstack_bitmap[KERNEL_STACK_SLOTS / 8 + 1];
+
+uint32_t vmm_alloc_kernel_stack(void) {
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    
+    for (int i = 0; i < KERNEL_STACK_SLOTS; i++) {
+        if (!(kstack_bitmap[i / 8] & (1 << (i % 8)))) {
+            kstack_bitmap[i / 8] |= (1 << (i % 8));
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            
+            uint32_t base_virt = KERNEL_STACK_POOL_START + i * (KERNEL_STACK_SLOT_PAGES * 4096);
+            
+            // Page 0 is Guard (unmapped). Ensure it's clear.
+            uint32_t* pd = (uint32_t*)PHYS_TO_VIRT((uint32_t)boot_page_directory);
+            vmm_unmap_page_in_pd(pd, base_virt);
+            
+            // Map Pages 1-4 (Data)
+            for (int p = 1; p <= 4; p++) {
+                uint32_t phys = pmm_alloc_page();
+                if (phys == 0) {
+                    // Rollback on OOM
+                    for (int q = 1; q < p; q++) {
+                        uint32_t v = base_virt + q * 4096;
+                        uint32_t dir_index = v >> 22;
+                        uint32_t table_index = (v >> 12) & 0x3FF;
+                        uint32_t pt_phys = pd[dir_index] & 0xFFFFF000;
+                        uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
+                        if (pt[table_index] & PAGE_PRESENT) {
+                            pmm_free_page(pt[table_index] & 0xFFFFF000);
+                            pt[table_index] = 0;
+                            __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+                        }
+                    }
+                    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+                    kstack_bitmap[i / 8] &= ~(1 << (i % 8));
+                    __asm__ volatile("push %0; popf" : : "r"(eflags));
+                    return 0;
+                }
+                // Map as Kernel Only (NO PAGE_USER)
+                vmm_map_page(base_virt + p * 4096, phys, PAGE_PRESENT | PAGE_WRITE);
+            }
+            
+            return base_virt + (KERNEL_STACK_SLOT_PAGES * 4096); // Return TOP of stack
+        }
+    }
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    return 0;
+}
+
+void vmm_free_kernel_stack(uint32_t stack_top) {
+    if (stack_top == 0) return;
+    
+    uint32_t base_virt = stack_top - (KERNEL_STACK_SLOT_PAGES * 4096);
+    int i = (base_virt - KERNEL_STACK_POOL_START) / (KERNEL_STACK_SLOT_PAGES * 4096);
+    
+    if (i < 0 || i >= KERNEL_STACK_SLOTS) return;
+    
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    kstack_bitmap[i / 8] &= ~(1 << (i % 8));
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    
+    uint32_t* pd = (uint32_t*)PHYS_TO_VIRT((uint32_t)boot_page_directory);
+    for (int p = 1; p <= 4; p++) {
+        uint32_t v = base_virt + p * 4096;
+        uint32_t dir_index = v >> 22;
+        uint32_t table_index = (v >> 12) & 0x3FF;
+        
+        if (pd[dir_index] & PAGE_PRESENT) {
+            uint32_t pt_phys = pd[dir_index] & 0xFFFFF000;
+            uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
+            if (pt[table_index] & PAGE_PRESENT) {
+                pmm_free_page(pt[table_index] & 0xFFFFF000);
+                pt[table_index] = 0;
+                __asm__ volatile("invlpg (%0)" : : "r"(v) : "memory");
+            }
+        }
+    }
+}
 
 // ============================================================================
 // IRQ SAFETY HELPERS (Для защиты критических секций в Page Fault Handler)
@@ -67,9 +154,17 @@ void page_fault_handler(struct regs* r) {
         task_kill_current("Attempted access to Kernel Space");
     }
     
-       // 3. Kernel Heap Lazy Allocation + User Space Demand Paging from Ring 0
+    // 3. Kernel Space Faults (Ring 0)
     if (!us) {
-        // 3.1. Стандартный Kernel Heap (0xD0000000 - 0xE0000000)
+        // 🛡️ [ДЕНЬ 16] 3.3 Kernel Stack Overflow Guard
+        if (faulting_address >= KERNEL_STACK_POOL_START && 
+            faulting_address < KERNEL_STACK_POOL_START + KERNEL_STACK_POOL_SIZE) {
+            serial_printf("\n[PF] === FATAL: Kernel Stack Overflow in PID %d ===\n", current_task->pid);
+            serial_printf("[PF] Address: 0x%x | EIP: 0x%x\n", faulting_address, r->eip);
+            task_kill_current("Kernel Stack Overflow");
+        }
+
+        // 3.1 Стандартный Kernel Heap (0xD0000000 - 0xE0000000)
         if (!present && !reserved && faulting_address >= KERNEL_HEAP_VIRT && 
             faulting_address < KERNEL_HEAP_END) {
             uint32_t phys = pmm_alloc_page();
@@ -84,14 +179,13 @@ void page_fault_handler(struct regs* r) {
             }
         }
         
-        // 🔧 NEW: Allow Ring 0 to trigger Demand Paging for User Space VMA!
-        // Это критически важно для sys_exec (Stack Forging) и будущих copy_to_user.
+        // 🛡️ [ДЕНЬ 16] 3.2 Ring 0 -> User Space Demand Paging (Strict Error Propagation)
         if (!present && faulting_address < KERNEL_SPACE_START) {
             vma_node_t* vma = vma_find(current_task, faulting_address);
             if (vma) {
                 uint32_t phys = pmm_alloc_page();
                 if (phys == 0) {
-                    serial_printf("[PF] OOM Kill: Physical memory exhausted in PID %d (Kernel writing to User Space)\n", current_task->pid);
+                    serial_printf("[PF] OOM Kill: Physical memory exhausted in PID %d\n", current_task->pid);
                     task_kill_current("Out of Memory (OOM Kill)");
                 }
                 
@@ -105,10 +199,12 @@ void page_fault_handler(struct regs* r) {
                     pmm_free_page(phys);
                     task_kill_current("Out of Memory (VMM PT Alloc Failed)");
                 }
-                
-                serial_printf("[PF] Demand paging (Ring 0 -> User): Virt 0x%x -> Phys 0x%x (PID %d)\n", 
-                              virt_page, phys, current_task->pid);
                 return;
+            } else {
+                // 🛡️ FIX: Kernel wrote to unmapped User Space (e.g. sys_exec Stack Underflow)
+                serial_printf("[PF] SIGSEGV: Kernel accessed unmapped user memory (0x%x) in PID %d\n", 
+                              faulting_address, current_task->pid);
+                task_kill_current("Kernel accessed unmapped user memory");
             }
         }
         
@@ -120,9 +216,6 @@ void page_fault_handler(struct regs* r) {
     }
     
     // 4. [ДЕНЬ 14] Copy-on-Write Page Fault
-    // Если была операция записи (rw=1) и страница УЖЕ присутствует (present=1),
-    // но мы все равно получили Page Fault — это нарушение прав доступа.
-    // В нашей архитектуре это означает срабатывание механизма Copy-on-Write (PAGE_COW).
     if (rw && present) {
         uint32_t dir_index = faulting_address >> 22;
         uint32_t table_index = (faulting_address >> 12) & 0x3FF;
@@ -139,26 +232,19 @@ void page_fault_handler(struct regs* r) {
                 uint32_t flags = read_eflags();
                 disable_interrupts();
             
-                // ✅ ОПТИМИЗАЦИЯ: Проверяем refcount через API PMM (Layering Compliance)
                 if (pmm_get_refcount(old_phys) == 1) {
-                    // Единственный владелец - снимаем CoW, возвращаем WRITE
                     uint32_t new_flags = (pte & 0xFFF) & ~PAGE_COW;
                     new_flags |= PAGE_WRITE;
                     pt[table_index] = old_phys | new_flags;
                     
                     __asm__ volatile("invlpg (%0)" : : "r"(faulting_address) : "memory");
                     load_eflags(flags);
-                    
-                    serial_printf("[PF] CoW Optimization: Virt 0x%x restored WRITE (PID %d)\n", 
-                                  faulting_address & 0xFFFFF000, current_task->pid);
                     return;
                 }
             
-                // Refcount > 1 - выделяем новую страницу и копируем
                 uint32_t new_phys = pmm_alloc_page();
                 if (new_phys == 0) {
                     load_eflags(flags);
-                    serial_printf("[PF] OOM Kill: CoW allocation failed in PID %d\n", current_task->pid);
                     task_kill_current("Out of Memory (CoW Failed)");
                 }
             
@@ -170,36 +256,25 @@ void page_fault_handler(struct regs* r) {
             
                 pt[table_index] = new_phys | new_flags;
                 __asm__ volatile("invlpg (%0)" : : "r"(faulting_address) : "memory");
-            
                 load_eflags(flags);
-            
-                serial_printf("[PF] CoW: Virt 0x%x -> New Phys 0x%x (PID %d)\n", 
-                              faulting_address & 0xFFFFF000, new_phys, current_task->pid);
                 return;
             }
         }
     }
     
     // 5. User Space Demand Paging (Zero Trust Sandbox)
-    // Сюда мы попадаем, если страница отсутствует (present=0) или было чтение (rw=0).
-    // Это стандартный On-Demand Paging.
     vma_node_t* vma = vma_find(current_task, faulting_address);
     
     if (!vma) {
-        serial_printf("[PF] SIGSEGV: Access to unmapped memory (0x%x) in PID %d\n", 
-                      faulting_address, current_task->pid);
         task_kill_current("Access to unmapped memory (No VMA)");
     }
     
     if (rw && !(vma->flags & VMA_WRITE)) {
-        serial_printf("[PF] SIGSEGV: Write to Read-Only memory (0x%x) in PID %d\n", 
-                      faulting_address, current_task->pid);
         task_kill_current("Write to Read-Only memory (W^X violation)");
     }
     
     uint32_t phys = pmm_alloc_page();
     if (phys == 0) {
-        serial_printf("[PF] OOM Kill: Physical memory exhausted in PID %d\n", current_task->pid);
         task_kill_current("Out of Memory (OOM Kill)");
     }
     
@@ -213,9 +288,6 @@ void page_fault_handler(struct regs* r) {
         pmm_free_page(phys);
         task_kill_current("Out of Memory (VMM PT Alloc Failed)");
     }
-    
-    serial_printf("[PF] Demand paging: Virt 0x%x -> Phys 0x%x (PID %d)\n", 
-                  virt_page, phys, current_task->pid);
 }
 
 // ============================================================================

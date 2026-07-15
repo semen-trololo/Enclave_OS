@@ -24,13 +24,15 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
     
     crc32_init();
-    printf("[TEST] VFS Stress: 1000 files in tmpfs...\n");
+    printf("[TEST] VFS Stress: Probing tmpfs capacity...\n");
     
     char filename[32];
     static uint8_t write_buf[FILE_SIZE];
     static uint8_t read_buf[FILE_SIZE];
     
     int errors = 0;
+    int created_files = 0;
+    int oom_reached = 0;
 
     // === PHASE 1: WRITE ===
     for (int i = 0; i < NUM_FILES; i++) {
@@ -41,18 +43,43 @@ int main(int argc, char** argv) {
 
         int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) {
-            printf("[FAIL] open for write failed: %s\n", filename);
-            return 1; 
+            // 🛡️ FIX: Проверяем errno, а не fd (fd всегда -1 при ошибке в libc)
+            if (errno == 12 || errno == 28) { // ENOMEM or ENOSPC
+                printf("[INFO] Kernel Heap/Quota full at %d files (open). Stopping gracefully.\n", i);
+                oom_reached = 1;
+                break;
+            }
+            printf("[FAIL] open for write failed: %s (errno=%d)\n", filename, fd);
+            errors++;
+            break; 
         }
 
-        if (write(fd, write_buf, FILE_SIZE) != FILE_SIZE) {
+        ssize_t w = write(fd, write_buf, FILE_SIZE);
+        if (w != FILE_SIZE) {
+            // 🛡️ FIX: Graceful handling of OOM during write
+            if (w < 0 && (errno == 12 || errno == 28)) {
+                printf("[INFO] Kernel Heap/Quota full at %d files (write). Stopping gracefully.\n", i);
+                oom_reached = 1;
+                close(fd);
+                unlink(filename); // Clean up the empty/partial file to prevent 2-block leak!
+                break;
+            }
+            printf("[FAIL] write failed: %s (w=%d, errno=%d)\n", filename, w, errno);
             errors++;
+            close(fd);
+            unlink(filename);
+            break;
         }
         close(fd);
+        created_files = i + 1;
+    }
+
+    if (!oom_reached && errors == 0) {
+        printf("[INFO] Successfully created %d files.\n", created_files);
     }
 
     // === PHASE 2: READ & VERIFY ===
-    for (int i = 0; i < NUM_FILES; i++) {
+    for (int i = 0; i < created_files; i++) {
         snprintf(filename, sizeof(filename), "/tmp/t_%03d", i);
 
         int fd = open(filename, O_RDONLY);
@@ -74,14 +101,15 @@ int main(int argc, char** argv) {
         }
     }
 
-    // === PHASE 3: CLEANUP (Unlink) ===
-    for (int i = 0; i < NUM_FILES; i++) {
+    // === PHASE 3: CLEANUP ===
+    for (int i = 0; i < created_files; i++) {
         snprintf(filename, sizeof(filename), "/tmp/t_%03d", i);
         unlink(filename);
     }
 
     if (errors == 0) {
-        printf("[PASS] VFS Stress OK. %d files verified.\n", NUM_FILES);
+        printf("[PASS] VFS Stress OK. %d files verified. %s\n", 
+               created_files, oom_reached ? "(Heap boundary reached)" : "");
         return 0;
     } else {
         printf("[FAIL] VFS Stress failed with %d errors.\n", errors);

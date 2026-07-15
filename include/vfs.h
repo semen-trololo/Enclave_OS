@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#define MAX_MOUNT_HOPS 16
+
 // ==========================================
 // КОНСТАНТЫ И ФЛАГИ (БИТОВЫЕ МАСКИ)
 // ==========================================
@@ -32,9 +34,10 @@
 #define VFS_MAX_FILENAME 128
 #define VFS_MAX_OPEN_FILES 16
 
-#define VFS_ENOENT -2
-#define VFS_EACCES -13
-#define VFS_ENOMEM -12
+#define VFS_ENOENT 2
+#define VFS_EACCES 13
+#define VFS_ENOMEM 12
+#define VFS_ELOOP  40
 
 // ==========================================
 // СТРУКТУРЫ ДАННЫХ
@@ -88,6 +91,9 @@ typedef struct vfs_node {
     struct vfs_node* next_sibling;
 
     struct vfs_node* mountpoint_node;
+    // 🛡️ SECURITY HARDENING: Reference Counting & Orphan Tracking
+    uint32_t ref_count;   // Количество open_file_t, указывающих на эту ноду
+    bool is_unlinked;     // True, если файл удален из дерева, но еще открыт
 } vfs_node_t;
 
 // ✅ ИСПРАВЛЕНО: Перемещено ПОСЛЕ определения vfs_node_t
