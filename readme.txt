@@ -869,26 +869,6 @@ TinyCC использует `mmap` для code generation. Мы уже реал�
     Kernel stack safety (никаких больших static arrays)
     Atomicity (cli/sti для критических секций)"
 
-Изменения частично противоречат Zero Trust Sandbox:
-
-    ✅ Хорошо: VMA validation, argv isolation, OOM protection
-    ❌ Плохо: Нет защиты от kernel stack overflow, infinite PF loop, stack underflow
-
-Твоя интуиция снова правильная. VFS/syscall layer имеет 2 критические уязвимости (Use-After-Free), которые могут привести к:
-
-    Kernel Panic (если ядро обратится к freed memory)
-    Privilege Escalation (если Ring 3 процесс сможет манипулировать freed pointers)
-    Data Corruption (если freed memory будет переиспользована)
-
-    Добавить ref_count в vfs_node_t
-    Рефакторинг sys_close с CLI/STI wrapping
-    Рефакторинг sys_unlink с orphan node support
-    Добавить overflow checks в tmpfs_write
-    Добавить MAX_MOUNT_HOPS в vfs_findnode
-    Добавить task->vfs_root для будущего chroot
-    
-Это не отменяет сделанную работу, но требует Security Hardening перед тем, как мы пустим TinyCC в production. TinyCC — это ~150KB кода, и он обязательно найдет эти edge cases.
-
 🏁 Статус: VFS Security Hardening Завершен!
 Мы успешно закрыли все критические уязвимости VFS:
 ✅ Use-After-Free (UAF) — устранен через ref_count и Orphan Nodes
@@ -897,14 +877,18 @@ TinyCC использует `mmap` для code generation. Мы уже реал�
 ✅ OOM Write Bombs — устранены через квоту 40 МБ на файл
 ✅ POSIX Compliance — unlink работает с открытыми файлами (orphan semantics)  
 
-    ✅ Выдерживает POSIX unlink (Orphan Nodes).
-    ✅ Защищена от Race Conditions (cli/sti + ref_count).
-    ✅ Защищена от Kernel Stack Overflow (MAX_MOUNT_HOPS).
-    ✅ Имеет атомарное создание файлов (нет Use-After-Free при OOM).
-    ✅ Gracefully обрабатывает нехватку памяти (тесты адаптируются и убирают за собой мусор).
-    ✅ Обладает нулевой фрагментацией после жесточайшего стресса.
+✅ Выдерживает POSIX unlink (Orphan Nodes).
+✅ Защищена от Race Conditions (cli/sti + ref_count).
+✅ Защищена от Kernel Stack Overflow (MAX_MOUNT_HOPS).
+✅ Имеет атомарное создание файлов (нет Use-After-Free при OOM).
+✅ Gracefully обрабатывает нехватку памяти (тесты адаптируются и убирают за собой мусор).
+✅ Обладает нулевой фрагментацией после жесточайшего стресса.
 
-После этого можно безопасно переходить к TinyCC.
+Официальное закрытие этапа
+Security Hardening Pack (Kernel Stack Guard Pages + PF Strictness + sys_exec Heap)
+официально влит в ядро и валидирован. Архитектура «Бессмертной Крепости» 
+теперь защищена от Kernel Stack Overflow, Infinite PF Loop и argv-бомб. 
+
 ---
 ### День 18: TinyCC Adaptation Layer
 **Цель:** Создать слой адаптации для работы TinyCC в Bare Metal OS.
@@ -921,6 +905,7 @@ TinyCC использует `mmap` для code generation. Мы уже реал�
 - stderr → fd 2
 - ✅ Добавить `errno` глобальную переменную
 - ✅ Убрать зависимости от dynamic linking (флаг -static)
+
 **Архитектурное решение:**
 FILE* — это простая структура с `int fd` и `int eof`. Это достаточно для TinyCC, который не использует сложные buffering стратегии.
 **Тесты:**
@@ -928,6 +913,23 @@ FILE* — это простая структура с `int fd` и `int eof`. Э�
 - fprintf(stdout, "Test %d
 ", 42)
 - errno после неудачного fopen
+
+Подтверди, пожалуйста, что ты согласен с планом:
+
+    ✅ Создаем user_src/setjmp.asm (setjmp/longjmp в NASM, ~40 строк)
+    ✅ Создаем user_src/tcc_baremetal.c (10 недостающих функций, ~400 строк)
+    ✅ qsort реализуем как heapsort (без рекурсии, безопасный для стека)
+    ✅ strerror — минимальная таблица из 15 ошибок
+    ✅ getcwd → return "/", chdir → return -1 (заглушки)
+    ✅ Обновляем Makefile для линковки setjmp.o + tcc_baremetal.o
+    ✅ Добавляем прототипы в user_libc.h
+
+Или предложи свои корректировки (например, патчить исходники TinyCC вместо
+ адаптационного слоя, или другой подход к include paths).
+
+Сборка прошла успешно! День 18 ЗАКРЫТ
+Все 11 user-space программ скомпилированы и слинкованы с новыми объектами
+ tcc_lib_os.o и setjmp.o . Ядро собрано, initrd упакован, ISO готов.
 ---
 ### День 19: TinyCC Compilation
 **Цель:** Скомпилировать TinyCC кросс-компилятором и интегрировать в ISO.

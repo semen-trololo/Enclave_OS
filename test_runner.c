@@ -384,6 +384,10 @@ void test_init(void) {
     run_elf_test("/bin/test_vfs_stress.elf", "VFS tmpfs 1000 files", 0);
     run_elf_test("/bin/test_memory_torture.elf", "Memory Torture", 0);
     run_elf_test("/bin/test_mmap.elf"," Test MMAP", 0);
+    run_elf_test("/bin/test_fork.elf"," Test FORK", 0);
+    run_elf_test("/bin/test_tinycc.elf"," Test tiny", 0);
+    run_elf_test("/bin/test_vfs_hardened.elf"," Test tiny", 0);
+
 
     k_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     k_print("\n========================================\n");

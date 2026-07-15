@@ -724,6 +724,8 @@ int printf(const char* fmt, ...) {
 // PROCESS CONTROL
 // ============================================================================
 void exit(int status) {
+    // Запускаем atexit handlers перед завершением
+    __run_atexit_handlers();
     sys_exit(status);
     __builtin_unreachable();
 }

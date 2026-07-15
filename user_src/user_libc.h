@@ -252,4 +252,78 @@ void* dlsym(void* handle, const char* symbol);
 int dlclose(void* handle);
 char* dlerror(void);
 
+// ============================================================================
+// Non-local Jumps (для TinyCC error recovery)
+// ============================================================================
+typedef int jmp_buf[6];  // 6 регистров: EBX, ESI, EDI, EBP, ESP, EIP
+
+int setjmp(jmp_buf env);
+void longjmp(jmp_buf env, int val) __attribute__((noreturn));
+
+// ============================================================================
+// Sorting & Searching (для TinyCC symbol tables)
+// ============================================================================
+void qsort(void* base, size_t nmemb, size_t size, 
+           int (*cmp)(const void*, const void*));
+void* bsearch(const void* key, const void* base, size_t nmemb, size_t size,
+              int (*cmp)(const void*, const void*));
+
+// ============================================================================
+// Error Strings
+// ============================================================================
+char* strerror(int errnum);
+
+// ============================================================================
+// Terminal Detection
+// ============================================================================
+int isatty(int fd);
+
+// ============================================================================
+// Path Operations (упрощенные заглушки)
+// ============================================================================
+char* getcwd(char* buf, size_t size);
+int chdir(const char* path);
+char* realpath(const char* path, char* resolved_path);
+
+// ============================================================================
+// String Duplication
+// ============================================================================
+char* strdup(const char* s);
+char* strndup(const char* s, size_t n);
+
+// ============================================================================
+// Process Termination
+// ============================================================================
+void abort(void) __attribute__((noreturn));
+int atexit(void (*func)(void));
+
+// Внутренняя функция: вызывается из exit() для atexit handlers
+void __run_atexit_handlers(void);
+
+// ============================================================================
+// Time (обертки над gettimeofday)
+// ============================================================================
+typedef uint32_t clock_t;
+typedef uint32_t time_t;
+
+#define CLOCKS_PER_SEC 1000000
+
+clock_t clock(void);
+time_t time(time_t* tloc);
+
+// ============================================================================
+// Assertions
+// ============================================================================
+void __assert_fail(const char* assertion, const char* file, 
+                   unsigned int line, const char* function) 
+                   __attribute__((noreturn));
+
+// Стандартный assert макрос
+#ifdef NDEBUG
+#define assert(expr) ((void)0)
+#else
+#define assert(expr) \
+    ((expr) ? (void)0 : __assert_fail(#expr, __FILE__, __LINE__, __func__))
+#endif
+
 #endif // USER_LIBC_H

@@ -1,6 +1,6 @@
 # ==============================================================================
 # BARE METAL OS — Makefile (Single Source of Truth)
-# Версия: Day 17+ (TinyCC Ready, crt0.asm NASM Integration)
+# Версия: Day 18+ (TinyCC Adaptation Layer, setjmp/longjmp, tcc_baremetal)
 # ==============================================================================
 
 # ==============================================================================
@@ -55,6 +55,7 @@ DEPS = $(C_OBJS:.o=.d)
 # ==============================================================================
 # USER-SPACE ИСХОДНИКИ (С разделением библиотеки, crt0 и тестов)
 # ==============================================================================
+
 # 1. Библиотека libc (компилируется один раз, линкуется ко всем тестам)
 USER_LIBC_SRC = $(USER_SRC_DIR)/user_libc.c
 USER_LIBC_OBJ = $(BUILD_DIR)/user_libc.o
@@ -63,18 +64,37 @@ USER_LIBC_OBJ = $(BUILD_DIR)/user_libc.o
 USER_CRT0_SRC = $(USER_SRC_DIR)/crt0.asm
 USER_CRT0_OBJ = $(BUILD_DIR)/crt0.o
 
-# 2. ASM исходники user-space (ИСКЛЮЧАЕМ crt0.asm через filter-out)
-#    🛡️ ВАЖНО: без filter-out crt0.asm попал бы в USER_ELFS как отдельный бинарник!
-USER_ASM_SOURCES = $(filter-out $(USER_CRT0_SRC),$(wildcard $(USER_SRC_DIR)/*.asm))
+# ✅ [ДЕНЬ 18] setjmp/longjmp (NASM, критично для TinyCC error recovery)
+USER_SETJMP_SRC = $(USER_SRC_DIR)/setjmp.asm
+USER_SETJMP_OBJ = $(BUILD_DIR)/setjmp.o
+
+# ✅ [ДЕНЬ 18] TinyCC Adaptation Layer (qsort, bsearch, strerror, isatty, etc.)
+USER_TCC_BM_SRC = $(USER_SRC_DIR)/tcc_lib_os.c
+USER_TCC_BM_OBJ = $(BUILD_DIR)/tcc_lib_os.o
+
+# ✅ [ДЕНЬ 18] Список "библиотечных" .c файлов user-space (НЕ компилируются как ELF)
+#    Все файлы в этом списке исключаются из USER_TEST_C_SOURCES через filter-out.
+USER_LIB_C_SOURCES = $(USER_LIBC_SRC) $(USER_TCC_BM_SRC)
+
+# ✅ [ДЕНЬ 18] Список "библиотечных" .asm файлов user-space (НЕ компилируются как ELF)
+USER_LIB_ASM_SOURCES = $(USER_CRT0_SRC) $(USER_SETJMP_SRC)
+
+# 2. ASM исходники user-space (ИСКЛЮЧАЕМ crt0.asm и setjmp.asm через filter-out)
+#    🛡️ ВАЖНО: без filter-out они попали бы в USER_ELFS как отдельные бинарники!
+USER_ASM_SOURCES = $(filter-out $(USER_LIB_ASM_SOURCES),$(wildcard $(USER_SRC_DIR)/*.asm))
 USER_ASM_OBJS = $(patsubst $(USER_SRC_DIR)/%.asm,$(BUILD_DIR)/user_%.o,$(USER_ASM_SOURCES))
 
-# 3. Тестовые C-исходники (ИСКЛЮЧАЕМ user_libc.c через filter-out)
-USER_TEST_C_SOURCES = $(filter-out $(USER_LIBC_SRC),$(wildcard $(USER_SRC_DIR)/*.c))
+# 3. Тестовые C-исходники (ИСКЛЮЧАЕМ user_libc.c и tcc_lib_os.c через filter-out)
+USER_TEST_C_SOURCES = $(filter-out $(USER_LIB_C_SOURCES),$(wildcard $(USER_SRC_DIR)/*.c))
 USER_TEST_C_OBJS = $(patsubst $(USER_SRC_DIR)/%.c,$(BUILD_DIR)/user_%.o,$(USER_TEST_C_SOURCES))
 
-# 4. Финальные ELF бинарники (только тесты + asm программы, БЕЗ crt0.elf)
+# 4. Финальные ELF бинарники (только тесты + asm программы, БЕЗ crt0.elf и setjmp.elf)
 USER_ELFS = $(patsubst $(USER_SRC_DIR)/%.c,$(USER_BIN_DIR)/%.elf,$(USER_TEST_C_SOURCES)) \
             $(patsubst $(USER_SRC_DIR)/%.asm,$(USER_BIN_DIR)/%.elf,$(USER_ASM_SOURCES))
+
+# ✅ [ДЕНЬ 18] Полная цепочка библиотечных объектов для линковки (порядок важен!)
+#    crt0.o ПЕРВЫМ (_start), затем тест, затем libc, затем tcc_lib_os, затем setjmp
+USER_LIB_OBJS = $(USER_CRT0_OBJ) $(USER_LIBC_OBJ) $(USER_TCC_BM_OBJ) $(USER_SETJMP_OBJ)
 
 # ==============================================================================
 # ГЛАВНЫЕ ТАРГЕТЫ
@@ -108,22 +128,33 @@ $(USER_LIBC_OBJ): $(USER_LIBC_SRC) $(USER_SRC_DIR)/user_libc.h $(USER_SRC_DIR)/u
 	@echo "[USER LIB] $< -> $@"
 	@$(USER_CC) $(USER_CFLAGS) -c $< -o $@
 
+# ✅ [ДЕНЬ 18] Компиляция TinyCC Adaptation Layer
+$(USER_TCC_BM_OBJ): $(USER_TCC_BM_SRC) $(USER_SRC_DIR)/user_libc.h | $(BUILD_DIR)
+	@echo "[USER ADAPT] $< -> $@"
+	@$(USER_CC) $(USER_CFLAGS) -c $< -o $@
+
 # ✅ Компиляция crt0.asm через NASM (Intel Syntax, консистентность с остальным ASM)
 $(USER_CRT0_OBJ): $(USER_CRT0_SRC) | $(BUILD_DIR)
 	@echo "[USER AS-NASM] $< -> $@"
 	@$(AS) $(ASFLAGS) $< -o $@
 
-# ✅ Линковка C-тестов с crt0.o ПЕРВЫМ (POSIX ABI _start)
-$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.c $(USER_LIBC_OBJ) $(USER_CRT0_OBJ) | $(USER_BIN_DIR)
+# ✅ [ДЕНЬ 18] Компиляция setjmp/longjmp через NASM
+$(USER_SETJMP_OBJ): $(USER_SETJMP_SRC) | $(BUILD_DIR)
+	@echo "[USER AS-NASM] $< -> $@"
+	@$(AS) $(ASFLAGS) $< -o $@
+
+# ✅ [ДЕНЬ 18] Линковка C-тестов с ПОЛНОЙ цепочкой библиотечных объектов
+#    Порядок: crt0.o → test.o → user_libc.o → tcc_baremetal.o → setjmp.o
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.c $(USER_LIB_OBJS) | $(USER_BIN_DIR)
 	@echo "[USER CC] $< -> $@"
 	@$(USER_CC) $(USER_CFLAGS) -c $< -o $(BUILD_DIR)/user_$*.o
-	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(USER_CRT0_OBJ) $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(USER_CRT0_OBJ) $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ) $(USER_TCC_BM_OBJ) $(USER_SETJMP_OBJ)
 
-# ✅ Линковка ASM-тестов (тоже линкуем с libc + crt0)
-$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.asm $(USER_LIBC_OBJ) $(USER_CRT0_OBJ) | $(USER_BIN_DIR)
+# ✅ [ДЕНЬ 18] Линковка ASM-тестов (тоже линкуем с полной цепочкой)
+$(USER_BIN_DIR)/%.elf: $(USER_SRC_DIR)/%.asm $(USER_LIB_OBJS) | $(USER_BIN_DIR)
 	@echo "[USER AS] $< -> $@"
 	@$(AS) -f elf32 $< -o $(BUILD_DIR)/user_$*.o
-	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(USER_CRT0_OBJ) $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ)
+	@$(USER_CC) $(USER_LDFLAGS) -o $@ $(USER_CRT0_OBJ) $(BUILD_DIR)/user_$*.o $(USER_LIBC_OBJ) $(USER_TCC_BM_OBJ) $(USER_SETJMP_OBJ)
 
 $(USER_BIN_DIR):
 	@mkdir -p $(USER_BIN_DIR)
