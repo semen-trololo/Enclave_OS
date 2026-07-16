@@ -13,6 +13,7 @@
 # Файлы сборки
 build/
 isodir/
+external/
 
 # Системные файлы
 .DS_Store
