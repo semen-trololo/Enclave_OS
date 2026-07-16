@@ -13,6 +13,7 @@
 #include "heap.h"
 #include <stdbool.h>
 #include "config.h"
+#include "elf.h"
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
 extern void ret_from_fork(void);
@@ -250,13 +251,67 @@ task_t* task_create(const char* name, void (*entry_point)(void),
                   new_task->pid, name, is_user_mode ? "USER" : "KERNEL");
     return new_task;
 }
+// ============================================================================
+// [ДЕНЬ 24] RESPAWN INIT TASK (PID 1)
+// Если Init упал, ядро автоматически перезапускает его из Reaper Phase.
+// Это реализует принцип "Let it crash" для корневого процесса.
+// ============================================================================
+static void respawn_init_task(void) {
+    serial_print("[REAPER] ⚠️ PID 1 (Init) died! Respawning...\n");
+    
+    vfs_node_t* init_node = vfs_findnode("/sbin/init.elf");
+    if (!init_node) {
+        serial_print("[REAPER] FATAL: /sbin/init.elf not found! Cannot respawn.\n");
+        return;
+    }
 
+    uint32_t* new_pdir = vmm_create_address_space();
+    if (!new_pdir) {
+        serial_print("[REAPER] FATAL: OOM creating address space for Init!\n");
+        return;
+    }
+
+    task_t temp_task;
+    temp_task.pdir_virt = new_pdir;
+    temp_task.vma_head = NULL;
+
+    uint32_t entry = elf_load(init_node, &temp_task);
+    if (entry == 0) {
+        serial_print("[REAPER] FATAL: Failed to load /sbin/init.elf!\n");
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(new_pdir);
+        return;
+    }
+
+    uint32_t stack_top = USER_STACK_VIRT_TOP - 16;
+    
+    // 🛡️ CRITICAL: Защищаем создание задачи от прерываний PIT
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    
+    task_t* new_init = task_create("/sbin/init.elf", (void (*)(void))entry, true, stack_top, new_pdir);
+    if (!new_init) {
+        serial_print("[REAPER] FATAL: Failed to create Init task!\n");
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(new_pdir);
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        return;
+    }
+
+    new_init->vma_head = temp_task.vma_head;
+    new_init->orphan_on_exit = 1; // Новый init усыновляет сирот
+
+    vma_add(new_init, stack_top - USER_STACK_SIZE, stack_top, VMA_READ | VMA_WRITE);
+    vma_add(new_init, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE);
+
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
+
+    serial_printf("[REAPER] ✓ Init respawned successfully as PID %d\n", new_init->pid);
+}
 // ============================================================================
 // ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IDLE HLT)
 // ============================================================================
-// ============================================================================
-// ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IDLE HLT)
-// ============================================================================
+
 void schedule(void) {
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
@@ -268,6 +323,11 @@ void schedule(void) {
             dead_tasks_head = dead->reaper_next; 
         
             serial_printf("[REAPER] Cleaning up PID %d (%s)\n", dead->pid, dead->name);
+            
+            // 🛡️ [ДЕНЬ 24] RESPAWN INIT: Если умер PID 1, перезапускаем его
+            if (dead->pid == 1) {
+                respawn_init_task();
+            }
         
             // 🛡️ [ДЕНЬ 16] FIX: Освобождаем стек через VMM (снимает маппинг и Guard Page)
             if (dead->kernel_stack_virt != 0) {
@@ -392,7 +452,19 @@ void task_exit(int exit_code) {
         dead_task->next->prev = dead_task->prev;
     }
     
-    // НЕ добавляем в dead_tasks_head! Это сделает waitpid.
+    // 🛡️ [ДЕНЬ 24] INIT TASK SPECIAL CASE:
+    // У Init Task (PID 1) нет родителя, который бы вызвал waitpid.
+    // Поэтому мы принудительно переводим его в TASK_DEAD и кидаем в Reaper Queue.
+    if (dead_task->pid == 1) {
+        dead_task->state = TASK_DEAD;
+        uint32_t eflags_local;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags_local));
+        dead_task->reaper_next = dead_tasks_head;
+        dead_tasks_head = dead_task;
+        __asm__ volatile("push %0; popf" : : "r"(eflags_local));
+        serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
+    }
+    // Для остальных задач: НЕ добавляем в dead_tasks_head! Это сделает waitpid.
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
@@ -441,14 +513,26 @@ void task_kill_current(const char* reason) {
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
     
-    task_t* dead_task = current_task;
+    task_t* dead_task = current_task; 
 
     if (dead_task->next != dead_task) {
         dead_task->prev->next = dead_task->next;
         dead_task->next->prev = dead_task->prev;
     }
     
-    // НЕ добавляем в dead_tasks_head! Это сделает waitpid.
+    // 🛡️ [ДЕНЬ 24] INIT TASK SPECIAL CASE:
+    // У Init Task (PID 1) нет родителя, который бы вызвал waitpid.
+    // Поэтому мы принудительно переводим его в TASK_DEAD и кидаем в Reaper Queue.
+    if (dead_task->pid == 1) {
+        dead_task->state = TASK_DEAD;
+        uint32_t eflags_local;
+        __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags_local));
+        dead_task->reaper_next = dead_tasks_head;
+        dead_tasks_head = dead_task;
+        __asm__ volatile("push %0; popf" : : "r"(eflags_local));
+        serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
+    }
+    // Для остальных задач: НЕ добавляем в dead_tasks_head! Это сделает waitpid.
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
     

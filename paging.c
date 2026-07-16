@@ -579,8 +579,15 @@ void vmm_destroy_address_space(uint32_t* pdir_virt) {
                 
                 for (uint32_t j = 0; j < 1024; j++) {
                     if (pt_virt[j] & PAGE_PRESENT) {
-                        uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
-                        pmm_dec_ref(page_phys); // ✅ FIX: Корректная работа с Copy-on-Write refcounts
+                    uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
+                    pmm_dec_ref(page_phys);
+        
+                    // 🛡️ [ДЕНЬ 24] COW FIX: Освобождаем физическую страницу ТОЛЬКО если refcount == 0
+                    // pmm_dec_ref() только декрементит счетчик, но не освобождает страницу.
+                    // Мы должны явно проверить refcount и вызвать pmm_free_page().
+                        if (pmm_get_refcount(page_phys) == 0) {
+                        pmm_free_page(page_phys);
+                        }
                     }
                 }
                 pmm_free_page(pt_phys); // Free Page Table

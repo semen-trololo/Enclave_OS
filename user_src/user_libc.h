@@ -17,30 +17,87 @@ typedef int32_t pid_t;    // Process ID (для fork/waitpid/system)
 // ============================================================================
 
 // ============================================================================
-// POSIX errno codes (subset)
+// POSIX errno codes (Linux i386 ABI — Full Set for TinyCC & POSIX Compliance)
 // ============================================================================
-#define EPERM        1
-#define ENOENT       2
-#define ESRCH        3
-#define EINTR        4
-#define EIO          5
-#define ENOMEM      12
-#define EACCES      13
-#define EFAULT      14
-#define EBUSY       16
-#define EEXIST      17
-#define ENODEV      19
-#define ENOTDIR     20
-#define EISDIR      21
-#define EINVAL      22
-#define ENFILE      23
-#define EMFILE      24
-#define ENOSPC      28
-#define ERANGE      34
-#define ENAMETOOLONG 36
-#define ENOSYS      38
-#define ENOTTY      25
-#define EBADF        9
+#define EPERM            1   /* Operation not permitted */
+#define ENOENT           2   /* No such file or directory */
+#define ESRCH            3   /* No such process */
+#define EINTR            4   /* Interrupted system call */
+#define EIO              5   /* I/O error */
+#define ENXIO            6   /* No such device or address */
+#define E2BIG            7   /* Argument list too long */
+#define ENOEXEC          8   /* Exec format error */
+#define EBADF            9   /* Bad file number */
+#define ECHILD          10   /* No child processes */
+#define EAGAIN          11   /* Try again (would block) */
+#define ENOMEM          12   /* Out of memory */
+#define EACCES          13   /* Permission denied */
+#define EFAULT          14   /* Bad address */
+#define ENOTBLK         15   /* Block device required */
+#define EBUSY           16   /* Device or resource busy */
+#define EEXIST          17   /* File exists */
+#define EXDEV           18   /* Cross-device link */
+#define ENODEV          19   /* No such device */
+#define ENOTDIR         20   /* Not a directory */
+#define EISDIR          21   /* Is a directory */
+#define EINVAL          22   /* Invalid argument */
+#define ENFILE          23   /* File table overflow */
+#define EMFILE          24   /* Too many open files */
+#define ENOTTY          25   /* Not a typewriter / Inappropriate ioctl */
+#define ETXTBSY         26   /* Text file busy */
+#define EFBIG           27   /* File too large */
+#define ENOSPC          28   /* No space left on device */
+#define ESPIPE          29   /* Illegal seek */
+#define EROFS           30   /* Read-only file system */
+#define EMLINK          31   /* Too many links */
+#define EPIPE           32   /* Broken pipe */
+#define EDOM            33   /* Math argument out of domain of func */
+#define ERANGE          34   /* Math result not representable */
+#define EDEADLK         35   /* Resource deadlock would occur */
+#define ENAMETOOLONG    36   /* File name too long */
+#define ENOLCK          37   /* No record locks available */
+#define ENOSYS          38   /* Function not implemented */
+#define ENOTEMPTY       39   /* Directory not empty */
+#define ELOOP           40   /* Too many symbolic links encountered */
+#define EWOULDBLOCK     EAGAIN /* Operation would block */
+#define ENOMSG          42   /* No message of desired type */
+#define EIDRM           43   /* Identifier removed */
+#define ENOSTR          60   /* Device not a stream */
+#define ENODATA         61   /* No data available */
+#define ETIME           62   /* Timer expired */
+#define ENOSR           63   /* Out of streams resources */
+#define ENONET          64   /* Machine is not on the network */
+#define ENOLINK         67   /* Link has been severed */
+#define EPROTO          71   /* Protocol error */
+#define EMULTIHOP       72   /* Multihop attempted */
+#define EBADMSG         74   /* Not a data message */
+#define EOVERFLOW       75   /* Value too large for defined data type */
+#define ENOTUNIQ        76   /* Name not unique on network */
+#define EILSEQ          84   /* Illegal byte sequence */
+#define ENOTSOCK        88   /* Socket operation on non-socket */
+#define EDESTADDRREQ    89   /* Destination address required */
+#define EMSGSIZE        90   /* Message too long */
+#define EPROTOTYPE      91   /* Protocol wrong type for socket */
+#define ENOPROTOOPT     92   /* Protocol not available */
+#define EPROTONOSUPPORT 93   /* Protocol not supported */
+#define EOPNOTSUPP      95   /* Operation not supported on transport endpoint */
+#define EAFNOSUPPORT    97   /* Address family not supported by protocol */
+#define EADDRINUSE      98   /* Address already in use */
+#define EADDRNOTAVAIL   99   /* Cannot assign requested address */
+#define ENETDOWN       100   /* Network is down */
+#define ENETUNREACH    101   /* Network is unreachable */
+#define ENETRESET      102   /* Network dropped connection because of reset */
+#define ECONNABORTED   103   /* Software caused connection abort */
+#define ECONNRESET     104   /* Connection reset by peer */
+#define ENOBUFS        105   /* No buffer space available */
+#define EISCONN        106   /* Transport endpoint is already connected */
+#define ENOTCONN       107   /* Transport endpoint is not connected */
+#define ETIMEDOUT      110   /* Connection timed out */
+#define ECONNREFUSED   111   /* Connection refused */
+#define EHOSTDOWN      112   /* Host is down */
+#define EHOSTUNREACH   113   /* No route to host */
+#define EALREADY       114   /* Operation already in progress */
+#define EINPROGRESS    115   /* Operation now in progress */
 
 // Глобальная errno (TLS в будущем, пока просто global)
 extern int errno;
@@ -82,6 +139,7 @@ extern FILE* stderr;
 #define O_CREAT     0x0040
 #define O_TRUNC     0x0200
 #define O_APPEND    0x0400
+#define O_BINARY    0x0000
 
 // ============================================================================
 // Memory Management (Bump Allocator через sys_brk)
@@ -325,5 +383,59 @@ void __assert_fail(const char* assertion, const char* file,
 #define assert(expr) \
     ((expr) ? (void)0 : __assert_fail(#expr, __FILE__, __LINE__, __func__))
 #endif
+
+// ============================================================================
+// DAY 20: EXTENDED POSIX & GLIBC COMPATIBILITY (Для компиляции TinyCC)
+// ============================================================================
+
+// glibc thread-safe errno accessor (в нашей однопоточной среде просто возвращает адрес)
+int* __errno_location(void);
+
+// C23 compliance (GCC 14+ заменяет strtol на эти функции)
+long __isoc23_strtol(const char* nptr, char** endptr, int base);
+unsigned long __isoc23_strtoul(const char* nptr, char** endptr, int base);
+long long __isoc23_strtoll(const char* nptr, char** endptr, int base);
+unsigned long long __isoc23_strtoull(const char* nptr, char** endptr, int base);
+
+// Extended FILE* API
+int fputs(const char* s, FILE* stream);
+int fseek(FILE* stream, long offset, int whence);
+long ftell(FILE* stream);
+FILE* fdopen(int fd, const char* mode);
+FILE* freopen(const char* path, const char* mode, FILE* stream);
+int remove(const char* pathname);
+
+// String operations
+char* strpbrk(const char* s, const char* accept);
+
+// Process execution (TinyCC использует для запуска внешних утилит)
+int execvp(const char* file, char* const argv[]);
+
+// System configuration
+#define _SC_PAGESIZE 30
+long sysconf(int name);
+
+// Memory protection (обертка над sys_mprotect)
+int mprotect(void* addr, size_t len, int prot);
+
+// Time structures
+struct tm {
+    int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year;
+    int tm_wday, tm_yday, tm_isdst;
+};
+struct tm* localtime(const time_t* timep);
+
+// Math / Float parsing (TinyCC использует для парсинга float literals в C коде)
+double strtod(const char* nptr, char** endptr);
+float strtof(const char* nptr, char** endptr);
+long double strtold(const char* nptr, char** endptr);
+double ldexp(double x, int exp);
+long double ldexpl(long double x, int exp);
+
+// Environment
+extern char** environ;
+
+// setjmp alias (glibc lightweight setjmp)
+int _setjmp(jmp_buf env);
 
 #endif // USER_LIBC_H

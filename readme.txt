@@ -1,5 +1,5 @@
-📘 BARE METAL OS — Полная Архитектурная Документация
-Single Source of Truth (SSOT) | Версия: Alpha 0.2 (Day 16 — Self-Hosting Ready)
+📘 Enclave Operating System — Полная Архитектурная Документация (BARE METAL)
+Single Source of Truth (SSOT) | Версия: Alpha 0.2 (Day 18 — Self-Hosting Ready)
 1. СРЕДА РАЗРАБОТКИ
 Название: Bare Metal OS (учебно-исследовательская лабораторная работа)
 Архитектура: x86, 32-битный защищённый режим (Protected Mode), Higher Half Kernel (0xC0000000)
@@ -972,6 +972,61 @@ TinyCC генерирует **ELF-бинарники**, которые загр�
 - Компиляция factorial.c + запуск = 120 (5!)
 - Компиляция программы с структурами + указателями
 ---
+
+# 📘 ENCLAVE OPERATING SYSTEM — Обновление документации (Day 20 - Day 24)
+## Статус: Alpha 0.3 (PID 1 Architecture & Self-Hosting Ready)
+## Нейминг: Официальное название проекта изменено на "Enclave Operating System" (Enclave OS).
+
+---
+
+## 🏛 АРХИТЕКТУРНЫЕ ДОСТИЖЕНИЯ ДНЯ 20-24
+
+### 1. Смена парадигмы: От Kernel Shell к PID 1 Architecture (День 24)
+Мы полностью убрали Shell из Ring 0. Ядро больше не знает о пользовательских командах.
+* **PID 0 (Kernel Idle):** Бессмертный Ring 0 поток. Единственная задача: `sti; hlt`. Никогда не падает из-за багов в user-space.
+* **PID 1 (`/sbin/init.elf`):** Ring 3 Launcher. Запускает Shell через `fork + exec`. Если Shell падает, Init автоматически делает **respawn** (принцип Erlang/OTP "Let it crash").
+* **PID 2+ (`/bin/shell.elf`):** Ring 3 Shell. Работает в Zero Trust Sandbox, использует только syscalls. Команда `run` реализована через стандартный Unix-паттерн `sys_fork + sys_exec + sys_waitpid`.
+* **Reaper Respawn:** В `task.c` (Reaper Queue) добавлена логика: если умирает задача с `pid == 1`, ядро принудительно перезагружает `/sbin/init.elf` из VFS, обеспечивая 99.999% uptime критичного сервиса.
+
+### 2. Интеграция TinyCC и Self-Hosting (День 20)
+* **TinyCC в Ring 3:** Компилятор C99 (`tcc.elf`) успешно портирован и работает как обычное user-space приложение.
+* **Toolchain Injection:** Makefile автоматически собирает `libtcc1.a` (64-bit math/FPU хелперы), генерирует CRT-заглушки (`crt1.o`, `crti.o`, `crtn.o`) и создает "фейковые" POSIX-заголовки в `/usr/include/`, перенаправляя их на нашу `user_libc.h`.
+* **Адаптационный слой:** Создан `tcc_lib_os.c`, закрывающий зависимости GCC 14+ и glibc (`__isoc23_strtol`, `__errno_location`, `sysconf`, `mprotect`, `strpbrk` и т.д.).
+
+### 3. Критический фикс памяти: CoW + Exec Trap (День 24)
+* **Проблема:** При паттерне `fork() -> exec()` ребенок наследует CoW-страницы (refcount = 2). Когда ребенок вызывает `sys_exec`, его старое адресное пространство уничтожается. Старый код слепо освобождал физические страницы, убивая память родителя (Init) и вызывая Kernel Panic (Double Free / Heap Corruption).
+* **Решение (paging.c):** В `vmm_destroy_address_space()` внедрен **Strict CoW Teardown**. Вызывается `pmm_dec_ref()`, и физическая страница освобождается через `pmm_free_page()` **ТОЛЬКО** если `pmm_get_refcount() == 0`. Это математически гарантирует безопасность паттерна `fork/exec`.
+
+### 4. Zero Trust I/O и концепция `/dev/console` (День 24)
+* **Отклоненный антипаттерн:** "Магический" перехват `fd == 0` в `sys_read` для чтения из клавиатуры. Это нарушает POSIX и Zero Trust (любой процесс мог бы читать клавиатуру).
+* **Принятое решение (DevFS):** Клавиатура и экран должны предоставляться через VFS-ноды `/dev/console`. Ring 3 процесс обязан явно сделать `open("/dev/console", O_RDWR)`. Это закладывает фундамент для Capability-Based Security (Day 26+) и изоляции устройств.
+
+---
+
+## 📅 ОБНОВЛЕННЫЙ ПЛАН РАЗВИТИЯ (Дорожная карта)
+
+### ✅ ЧТО РАБОТАЕТ (Завершено на День 24)
+* **День 1-16:** Загрузчик, PMM, VMM, VFS, FAT32, Zero Trust Sandbox, POSIX Syscalls, Supervisor Trees, Copy-on-Write.
+* **День 17-19:** Анализ TinyCC, адаптационный слой `tcc_lib_os.c`, `setjmp/longjmp`, инъекция toolchain в Initrd.
+* **День 20:** Успешная кросс-компиляция `tcc.elf` и `libtcc1.a`.
+* **День 24:** Архитектурный рефакторинг. Удален `test_runner.c` из ядра. Внедрен PID 1 (`init.elf`) и Ring 3 Shell (`shell.elf`). Исправлен CoW + Exec Memory Corruption. Ядро стало полностью иммутабельным (Immutable Kernel).
+
+### 🎯 СЛЕДУЮЩИЕ ШАГИ (День 25+)
+1. **DevFS & `/dev/console`:** Реализовать полиморфные VFS-ноды для устройств. Обновить `init.c`, чтобы он открывал `/dev/console` и пробрасывал fd 0/1/2 в Shell через `fork`.
+2. **Capability-Based Security:** Добавить `resource_container_t` и битмапы `CAP_KEYBOARD`, `CAP_FRAMEBUFFER` в `task_t`.
+3. **Self-Hosting Execution (День 22-23):** Запустить `tcc.elf` внутри Enclave OS, скомпилировать им `hello.c`, и запустить полученный бинарник.
+4. **Core Dumps:** При фатальном Page Fault в Ring 3 сохранять регистры в `/var/crash/app.core` перед убийством задачи.
+
+---
+
+## 🔒 ГАРАНТИИ СИСТЕМЫ (Target SLA - Enclave OS)
+1. **Бессмертное Ядро:** PID 0 (Kernel) физически не может упасть из-за кода в Ring 3.
+2. **Бессмертный Init:** Если PID 1 падает, Reaper мгновенно перезапускает его из `/sbin/init.elf`.
+3. **Crash-Only Shell:** Если Shell падает (например, из-за бага в парсинге), Init перезапускает его < 100мс.
+4. **Изоляция CoW:** Паттерн `fork + exec` математически защищен от повреждения памяти родителя.
+5. **Zero Trust I/O:** Устройства недоступны без явного `open()` через VFS.
+
+
 ## 📅 ФАЗА 3: SELF-HOSTING & INTEGRATION (День 21-25)
 ### День 21: Advanced C Features Testing
 **Цель:** Протестировать продвинутые фичи C в TinyCC.

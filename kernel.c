@@ -4,7 +4,7 @@
 #include "gdt.h"
 #include "idt.h"
 #include "keyboard.h"
-#include "shell.h"
+// #include "shell.h"  <-- ❌ УБРАНО: Ядро больше не запускает Shell напрямую
 #include "timer.h"
 #include "pmm.h"
 #include "paging.h"
@@ -20,17 +20,14 @@
 #include "ata.h"
 #include "fat32.h"
 #include "tmpfs.h"
+#include "elf.h"     // ✅ НОВОЕ: Для загрузки /sbin/init.elf
+#include "vma.h"     // ✅ НОВОЕ: Для создания VMA стека/кучи
+#include "config.h"  // ✅ НОВОЕ: Для USER_STACK_VIRT_TOP и USER_HEAP_START
 
 // ==========================================
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ
 // ==========================================
 #define MULTIBOOT_MAGIC_EXPECTED 0x2BADB002
-#define USER_STACK_VIRT_ADDR     0xBFFFE000 // Guard page перед 0xC0000000
-#define LAZY_ALLOC_TEST_ADDR_1   0xD0000000
-#define LAZY_ALLOC_TEST_ADDR_2   0xD0001004
-
-// Раскомментируй, чтобы включить стресс-тесты при загрузке
-#define RUN_KERNEL_TESTS 1 
 
 // ==========================================
 // ВНЕШНИЕ СИМВОЛЫ (из boot.asm)
@@ -48,11 +45,10 @@ extern void enter_usermode(uint32_t entry_point, uint32_t user_esp);
 static void init_early_hardware(void) {
     serial_print("[BOOT] Phase 1: Early Hardware Init...\n");
 
-    // Первичная инициализация видео (физические адреса)
     fb_init(&fb_params);
     if (fb_is_available()) {
         fb_clear(COLOR_BLACK);
-        asm volatile("wbinvd"); // Сброс кэшей
+        asm volatile("wbinvd");
     } else {
         vga_init();
         serial_print("[WARN] Framebuffer not available, falling back to VGA.\n");
@@ -73,19 +69,17 @@ static void init_memory_management(void) {
     paging_init();
     serial_print("  [+] VMM (Paging/Higher Half) enabled\n");
 
-    // Воскрешение фреймбуфера (виртуальные адреса)
     fb_init(&fb_params); 
     if (fb_is_available()) {
         fb_clear(COLOR_BLACK); 
         asm volatile("wbinvd"); 
-        fb_set_color(0x0000FF00, 0x00000000); // Green on Black
+        fb_set_color(0x0000FF00, 0x00000000);
     }
     serial_print("  [+] Framebuffer resurrected in Higher Half\n");
 
     heap_init();
     serial_print("  [+] Kernel Heap (Buddy System) online\n");
 
-    // Включаем Double Buffering и шрифты (требуют Heap)
     fb_enable_double_buffering(); 
     fb_init_font(Uni2_VGA16_psf, Uni2_VGA16_psf_len);
     serial_print("  [+] Double Buffering & PSF1 Font loaded\n");
@@ -108,13 +102,10 @@ static void init_subsystems(void) {
     serial_print("  [+] Task Scheduler (Round-Robin) ready\n");
 
     keyboard_install();
-    timer_init(1000); // 1000 Hz
+    timer_init(1000);
     serial_print("  [+] IRQs (Keyboard/PIT) enabled\n");
 }
 
-// ==========================================
-// НОВАЯ ФАЗА: STORAGE INITIALIZATION (Day 8.2)
-// ==========================================
 static void init_storage(void) {
     serial_print("[BOOT] Phase 2.5: Storage Subsystem (ATA PIO)...\n");
     
@@ -125,7 +116,6 @@ static void init_storage(void) {
     int identify_result = ata_identify(&identify_data);
     
     if (identify_result == 0) {
-        // ИСПРАВЛЕНО: используем %s вместо %.40s (serial_printf не поддерживает модификаторы)
         serial_printf("  [+] Disk: %s\n", identify_data.model);
         serial_printf("  [+] Serial: %s\n", identify_data.serial);
         serial_printf("  [+] Firmware: %s\n", identify_data.firmware);
@@ -162,7 +152,6 @@ static void init_storage(void) {
         for (int i = 0; i < MAX_PARTITIONS; i++) {
             partition_info_t* p = partition_get(i);
             if (p && p->active) {
-                // ИСПРАВЛЕНО: используем %x вместо %02X
                 serial_printf("      [Part %d] Type: 0x%x, LBA: %u, Size: %u MB\n",
                               i, p->type, p->lba_start, p->sector_count / 2048);
             }
@@ -172,41 +161,28 @@ static void init_storage(void) {
     }
 }
 
-
 // ==========================================
 // ТОЧКА ВХОДА
 // ==========================================
 void kernel_main(void) {
-    serial_init(); // Инициализация COM1 для headless debug
+    serial_init();
     serial_print("\n================================================\n");
-    serial_print("       BARE METAL OS - KERNEL BOOT SEQUENCE       \n");
+    serial_print("       ENCLAVE OS - KERNEL BOOT SEQUENCE          \n");
     serial_print("================================================\n\n");
 
-    // 1. Проверка загрузчика
     if (multiboot_magic_val != MULTIBOOT_MAGIC_EXPECTED) {
         serial_printf("[FATAL] Invalid Multiboot Magic: 0x%x (Expected 0x%x)\n", 
                       multiboot_magic_val, MULTIBOOT_MAGIC_EXPECTED);
-        // В реальной ОС здесь был бы k_panic(), пока просто halt
         while(1) { asm volatile("cli; hlt"); }
     }
     serial_print("[OK] Multiboot magic verified.\n");
 
-    // 2. Инициализация по фазам
     init_early_hardware();
     init_memory_management();
-    init_storage();        // ← НОВАЯ ФАЗА: ATA PIO + MBR
+    init_storage();
     init_subsystems();
 
-    // 3. Вывод на экран (UX) - только самое важное
-    if (fb_is_available()) {
-        fb_set_color(COLOR_GREEN, COLOR_BLACK);
-        fb_print("  ____                 __  __      _   _       _       ___  ____  \n");
-        fb_print(" |  _ \\               |  \\/  |    | | | |     | |     / _ \\/ ___| \n");
-        fb_print(" | |_) | __ _ _ __ ___| \\  / | ___| |_| | ___ | |    | | | \\___ \\ \n");
-        fb_print(" |  _ < / _` | '__/ _ \\ |\\/| |/ _ \\ __| |/ _ \\| |    | | | |___) |\n");
-        fb_print(" | |_) | (_| | | |  __/ |  | |  __/ |_| | (_) | |____| |_| |____/ \n");
-        fb_print(" |____/ \\__,_|_|  \\___|_|  |_|\\___|\\__|_|\\___/|______|\\___/|____/ \n\n");
-        
+    if (fb_is_available()) {        
         fb_set_color(COLOR_LIGHT_GREY, COLOR_BLACK);
         fb_print(" [ OK ] Core systems initialized. Higher Half active.\n");
         fb_print(" [ OK ] VFS & Initrd mounted. Multitasking enabled.\n");
@@ -214,10 +190,73 @@ void kernel_main(void) {
         fb_flush();
     }
     
-    // 5. Запуск пользовательских задач
-    // task_create("Task_A", thread_a, false, 0, NULL);
+    // ========================================================================
+    // DAY 24: LAUNCH PID 1 (Ring 3 Init Process)
+    // Ядро больше не запускает shell_run(). Оно создает Ring 3 процесс
+    // /sbin/init.elf и уходит в бесконечный Idle Loop (sti; hlt).
+    // Планировщик (PIT) сам подхватит PID 1 и передаст ему CPU.
+    // ========================================================================
+    serial_print("[BOOT] Launching PID 1 (/sbin/init.elf)...\n");
+    
+    vfs_node_t* init_node = vfs_findnode("/sbin/init.elf");
+    if (!init_node) {
+        serial_print("[FATAL] /sbin/init.elf not found in VFS!\n");
+        serial_print("[FATAL] System halted. Check initrd.\n");
+        if (fb_is_available()) {
+            fb_set_color(COLOR_RED, COLOR_BLACK);
+            fb_print(" [FATAL] /sbin/init.elf not found! System halted.\n");
+            fb_flush();
+        }
+        while(1) { asm volatile("cli; hlt"); }
+    }
 
-    // 6. Передача управления CLI
-    serial_print("[BOOT] Handover to Shell. Have fun! ;)\n\n");
-    shell_run();
+    // Создаем изолированный Address Space для PID 1
+    uint32_t* init_pdir = vmm_create_address_space();
+    if (!init_pdir) {
+        serial_print("[FATAL] Failed to create address space for Init!\n");
+        while(1) { asm volatile("cli; hlt"); }
+    }
+
+    // Временная структура для elf_load (он требует task_t для VMA)
+    task_t temp_task;
+    temp_task.pdir_virt = init_pdir;
+    temp_task.vma_head = NULL;
+
+    uint32_t init_entry = elf_load(init_node, &temp_task);
+    if (init_entry == 0) {
+        serial_print("[FATAL] Failed to load /sbin/init.elf!\n");
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(init_pdir);
+        while(1) { asm volatile("cli; hlt"); }
+    }
+
+    // Создаем Ring 3 задачу
+    uint32_t stack_top_init = USER_STACK_VIRT_TOP - 16;
+    task_t* init_task = task_create("/sbin/init.elf", (void (*)(void))init_entry, true, stack_top_init, init_pdir);
+    if (!init_task) {
+        serial_print("[FATAL] Failed to create Init task!\n");
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(init_pdir);
+        while(1) { asm volatile("cli; hlt"); }
+    }
+
+    // Переносим VMA из temp_task в реальную задачу
+    init_task->vma_head = temp_task.vma_head;
+    init_task->pid = 1; // ✅ Принудительно устанавливаем PID 1
+
+    // Добавляем VMA для стека и кучи (Demand Paging подхватит при первом обращении)
+    vma_add(init_task, stack_top_init - USER_STACK_SIZE, stack_top_init, VMA_READ | VMA_WRITE);
+    vma_add(init_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE);
+
+    serial_printf("[BOOT] ✓ PID 1 (/sbin/init.elf) ready. Entry: 0x%x\n", init_entry);
+    serial_print("[BOOT] Entering Kernel Idle Loop (PID 0)...\n\n");
+
+    // ========================================================================
+    // KERNEL IDLE LOOP (PID 0)
+    // Ядро НИКОГДА не должно выходить из этого цикла.
+    // Если init.elf упадет, task.c (Reaper) заметит это и перезапустит его.
+    // ========================================================================
+    while (1) {
+        asm volatile("sti; hlt; cli");
+    }
 }
