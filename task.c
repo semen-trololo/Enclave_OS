@@ -410,16 +410,30 @@ void task_exit(int exit_code) {
             task_t* next = child->next_sibling;
             if (child->state != TASK_ZOMBIE && child->state != TASK_DEAD) {
                 serial_printf("[TASK] Killing child PID %d (Supervisor Tree)\n", child->pid);
-                child->state = TASK_ZOMBIE;
+                
+                // 🛡️ ФИКС: Освобождаем память ребенка сразу, так как родитель умирает
+                // и не сможет вызвать waitpid.
+                vma_destroy_all(child);
+                if (child->pdir_virt && child->pdir_virt != boot_page_directory) {
+                    vmm_destroy_address_space(child->pdir_virt);
+                    child->pdir_virt = NULL;
+                }
+                
+                child->state = TASK_DEAD;
                 child->exit_code = -1;
                 
+                // Удаляем из Run Queue
                 if (child->next != child) {
                     child->prev->next = child->next;
                     child->next->prev = child->prev;
                 }
                 
-                // 🛡️ ФИКС: Зомби-дети должны пройти через waitpid, а не сразу в Reaper
-                // Оставляем их в списке детей, чтобы родитель (или init) их забрал
+                // 🛡️ ФИКС: Отправляем напрямую в Reaper Queue, чтобы избежать Zombie Leak
+                uint32_t eflags_child;
+                __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags_child));
+                child->reaper_next = dead_tasks_head;
+                dead_tasks_head = child;
+                __asm__ volatile("push %0; popf" : : "r"(eflags_child));
             }
             child = next;
         }
@@ -447,24 +461,27 @@ void task_exit(int exit_code) {
     
     task_t* dead_task = current_task; 
 
-    if (dead_task->next != dead_task) {
-        dead_task->prev->next = dead_task->next;
-        dead_task->next->prev = dead_task->prev;
-    }
+    // 🛡️ CRITICAL FIX: НЕ УДАЛЯЕМ обычные Зомби из Run Queue!
+    // Если задача удалит себя отсюда, old_task в schedule() окажется вне очереди,
+    // что приведет к бесконечному циклу обхода, если все остальные задачи спят.
+    // Задача останется в Run Queue как TASK_ZOMBIE, пока waitpid не уберет её.
     
     // 🛡️ [ДЕНЬ 24] INIT TASK SPECIAL CASE:
     // У Init Task (PID 1) нет родителя, который бы вызвал waitpid.
-    // Поэтому мы принудительно переводим его в TASK_DEAD и кидаем в Reaper Queue.
+    // Поэтому мы принудительно переводим его в TASK_DEAD, УДАЛЯЕМ из Run Queue
+    // и кидаем в Reaper Queue.
     if (dead_task->pid == 1) {
+        if (dead_task->next != dead_task) {
+            dead_task->prev->next = dead_task->next;
+            dead_task->next->prev = dead_task->prev;
+        }
         dead_task->state = TASK_DEAD;
-        uint32_t eflags_local;
-        __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags_local));
         dead_task->reaper_next = dead_tasks_head;
         dead_tasks_head = dead_task;
-        __asm__ volatile("push %0; popf" : : "r"(eflags_local));
         serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
     }
-    // Для остальных задач: НЕ добавляем в dead_tasks_head! Это сделает waitpid.
+    // Для остальных задач: НЕ удаляем из Run Queue и НЕ добавляем в dead_tasks_head! 
+    // Это сделает waitpid.
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
@@ -515,24 +532,20 @@ void task_kill_current(const char* reason) {
     
     task_t* dead_task = current_task; 
 
-    if (dead_task->next != dead_task) {
-        dead_task->prev->next = dead_task->next;
-        dead_task->next->prev = dead_task->prev;
-    }
+    // 🛡️ CRITICAL FIX: НЕ УДАЛЯЕМ обычные Зомби из Run Queue!
+    // Задача останется в Run Queue как TASK_ZOMBIE, пока waitpid не уберет её.
     
     // 🛡️ [ДЕНЬ 24] INIT TASK SPECIAL CASE:
-    // У Init Task (PID 1) нет родителя, который бы вызвал waitpid.
-    // Поэтому мы принудительно переводим его в TASK_DEAD и кидаем в Reaper Queue.
     if (dead_task->pid == 1) {
+        if (dead_task->next != dead_task) {
+            dead_task->prev->next = dead_task->next;
+            dead_task->next->prev = dead_task->prev;
+        }
         dead_task->state = TASK_DEAD;
-        uint32_t eflags_local;
-        __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags_local));
         dead_task->reaper_next = dead_tasks_head;
         dead_tasks_head = dead_task;
-        __asm__ volatile("push %0; popf" : : "r"(eflags_local));
         serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
     }
-    // Для остальных задач: НЕ добавляем в dead_tasks_head! Это сделает waitpid.
     
     __asm__ volatile("push %0; popf" : : "r"(eflags));
     
@@ -717,6 +730,7 @@ int task_waitpid(int pid, int* status, int options) {
             
             uint32_t zombie_pid = zombie->pid;
             
+            // Удаляем из списка детей
             if (current_task->children == zombie) {
                 current_task->children = zombie->next_sibling;
             } else {
@@ -729,11 +743,18 @@ int task_waitpid(int pid, int* status, int options) {
                 }
             }
             
-            zombie->state = TASK_DEAD;
-            
             uint32_t eflags;
             __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
             
+            // 🛡️ CRITICAL FIX: Удаляем Зомби из Run Queue ПЕРЕД отправкой в Reaper.
+            // Это безопасно, так как текущая задача (родитель) находится в Run Queue,
+            // и schedule() корректно обойдет очередь без бесконечных циклов.
+            if (zombie->next != zombie) {
+                zombie->prev->next = zombie->next;
+                zombie->next->prev = zombie->prev;
+            }
+            
+            zombie->state = TASK_DEAD;
             zombie->reaper_next = dead_tasks_head;
             dead_tasks_head = zombie;
             

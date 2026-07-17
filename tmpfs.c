@@ -1,3 +1,5 @@
+//tmpfs.c
+
 #include "tmpfs.h"
 #include "heap.h"
 #include "klib.h"
@@ -37,6 +39,10 @@ static int tmpfs_open(vfs_node_t* node, uint32_t flags) {
         if (fdata) {
             // Обнуляем размер, но оставляем capacity для переиспользования буфера
             fdata->size = 0; 
+            
+            // 🛡️ CRITICAL FIX: Синхронизация с VFS node->size
+            // Без этого sys_lseek(SEEK_END) вернет старый размер файла!
+            node->size = 0;
         }
     }
     return 0;
@@ -82,8 +88,6 @@ static int tmpfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const u
     }
 
     // 🛡️ ADAPTIVE GROWTH STRATEGY:
-    // - Для маленьких файлов (< 1 MB): удваиваем размер (как классический vector)
-    // - Для больших файлов (>= 1 MB): растем на 25% (без фиксированного буфера)
     if (new_size > fdata->capacity) {
         uint32_t new_capacity;
         
@@ -111,8 +115,23 @@ static int tmpfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const u
         fdata->capacity = new_capacity;
     }
 
+    // 🛡️ TRUE POSIX SPARSE FILES: Заполняем "дырки" нулями
+    // Если запись происходит за пределами текущего размера файла (offset > size),
+    // промежуток между старым size и новым offset ДОЛЖЕН быть заполнен нулями.
+    // Без этого чтение "дырки" вернет мусор из kmalloc.
+    if (offset > fdata->size) {
+        k_memset(fdata->data + fdata->size, 0, offset - fdata->size);
+    }
+
     k_memcpy(fdata->data + offset, buffer, size);
-    if (new_size > fdata->size) fdata->size = new_size;
+    if (new_size > fdata->size) {
+        fdata->size = new_size;
+        
+        // 🛡️ CRITICAL FIX: Синхронизация с VFS node->size
+        // Это гарантирует, что sys_lseek(SEEK_END) и sys_fstat(st_size)
+        // всегда видят актуальный размер файла.
+        node->size = new_size;
+    }
 
     return size;
 }

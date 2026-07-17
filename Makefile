@@ -1,6 +1,6 @@
 # ==============================================================================
 # ENCLAVE OPERATING SYSTEM — Makefile (Single Source of Truth)
-# Версия: Day 24 (PID 1 Architecture, Ring 3 Shell, Init Launcher)
+# Версия: Day 25 (Self-Hosting Toolchain Fix + libc.a Injection)
 # ==============================================================================
 
 # ==============================================================================
@@ -46,7 +46,6 @@ C_SOURCES = $(wildcard *.c)
 ASM_SOURCES = $(wildcard *.asm)
 
 # ✅ [ДЕНЬ 24] Исключаем test_runner.c из сборки ядра (файл удалён из архитектуры)
-#    Если файл физически ещё существует, Makefile его проигнорирует.
 KERNEL_EXCLUDE = test_runner.c
 C_SOURCES_FILTERED = $(filter-out $(KERNEL_EXCLUDE),$(C_SOURCES))
 
@@ -90,8 +89,6 @@ SHELL_USER_OBJ = $(BUILD_DIR)/shell_user.o
 SHELL_USER_ELF = $(USER_BIN_DIR)/shell.elf
 
 # ✅ [ДЕНЬ 24] Список "библиотечных" и "системных" .c файлов user-space
-#    Все файлы в этом списке исключаются из USER_TEST_C_SOURCES через filter-out.
-#    init.c и shell_user.c — это не тесты, а системные процессы.
 USER_LIB_C_SOURCES = $(USER_LIBC_SRC) $(USER_TCC_BM_SRC) $(INIT_SRC) $(SHELL_USER_SRC)
 
 # ✅ [ДЕНЬ 18-19] Список "библиотечных" .asm файлов user-space (НЕ компилируются как ELF)
@@ -110,7 +107,6 @@ USER_ELFS = $(patsubst $(USER_SRC_DIR)/%.c,$(USER_BIN_DIR)/%.elf,$(USER_TEST_C_S
             $(patsubst $(USER_SRC_DIR)/%.asm,$(USER_BIN_DIR)/%.elf,$(USER_ASM_SOURCES))
 
 # ✅ Полная цепочка библиотечных объектов для линковки (порядок важен!)
-#    crt0.o ПЕРВЫМ (_start), затем libc, затем tcc_lib_os, затем setjmp
 USER_LIB_OBJS = $(USER_CRT0_OBJ) $(USER_LIBC_OBJ) $(USER_TCC_BM_OBJ) $(USER_SETJMP_OBJ)
 
 # ✅ [ДЕНЬ 20] TinyCC Compiler (компилируем сам TinyCC в user-space ELF)
@@ -250,7 +246,7 @@ user_programs: $(USER_ELFS) $(TCC_ELF) $(INIT_ELF) $(SHELL_USER_ELF)
 	@echo "[ OK ] TinyCC, Init, and Shell compiled"
 
 # ==============================================================================
-# INITRD (АВТОМАТИЧЕСКАЯ УПАКОВКА TAR USTAR + DAY 19 TOOLCHAIN INJECTION)
+# INITRD (АВТОМАТИЧЕСКАЯ УПАКОВКА TAR USTAR + DAY 19/25 TOOLCHAIN INJECTION)
 # ==============================================================================
 $(INITRD_TAR): $(KERNEL_BIN) user_programs | $(INITRD_ROOT)
 	@echo "[INITRD] Preparing initrd root..."
@@ -276,7 +272,7 @@ $(INITRD_TAR): $(KERNEL_BIN) user_programs | $(INITRD_ROOT)
 	fi
 
 	@# =========================================================================
-	@# DAY 19: AUTOMATIC TOOLCHAIN INJECTION (TinyCC Support)
+	@# DAY 19/25: AUTOMATIC TOOLCHAIN INJECTION (TinyCC Support)
 	@# =========================================================================
 	@echo "[TOOLCHAIN] Injecting TinyCC support files into initrd..."
 	@mkdir -p $(INITRD_ROOT)/lib
@@ -297,6 +293,16 @@ $(INITRD_TAR): $(KERNEL_BIN) user_programs | $(INITRD_ROOT)
 	@$(AS) $(ASFLAGS) $(BUILD_DIR)/crtn.asm -o $(INITRD_ROOT)/lib/crtn.o
 	@cp $(INITRD_ROOT)/lib/crti.o $(INITRD_ROOT)/usr/lib/crti.o
 	@cp $(INITRD_ROOT)/lib/crtn.o $(INITRD_ROOT)/usr/lib/crtn.o
+
+	@# =========================================================================
+	@# ✅ DAY 25 FIX: NATIVE ENCLAVE LIBC.A (Missing link for TinyCC Linker)
+	@# Без этого архива TCC внутри Ring 3 не найдет printf, exit, malloc
+	@# и выдаст "unresolved reference". Собираем из наших user-space объектов.
+	@# =========================================================================
+	@echo "[TOOLCHAIN] Archiving user-space libc into libc.a..."
+	@$(AR) rcs $(INITRD_ROOT)/lib/libc.a $(USER_LIBC_OBJ) $(USER_TCC_BM_OBJ) $(USER_SETJMP_OBJ)
+	@cp $(INITRD_ROOT)/lib/libc.a $(INITRD_ROOT)/usr/lib/libc.a
+	@echo "[TOOLCHAIN] libc.a successfully injected into /lib/ and /usr/lib/"
 
 	@# 2. libtcc1.a
 	@if [ -f "external/tcc_src/libtcc1.c" ]; then \

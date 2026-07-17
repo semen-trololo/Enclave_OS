@@ -883,3 +883,34 @@ int dlclose(void* handle) {
 char* dlerror(void) {
     return (char*)"Dynamic linking not supported";
 }
+
+/* ========================================================================
+ * POSIX Memory Mapping (mmap/munmap)
+ * Обертки над sys_mmap/sys_munmap для линкера TinyCC и стресс-тестов
+ * ======================================================================== */
+
+#ifndef MAP_FAILED
+#define MAP_FAILED ((void*)-1)
+#endif
+
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    // sys_mmap определен в user_syscalls.h через inline asm с сохранением EBP
+    void* ret = sys_mmap(addr, length, prot, flags, fd, offset);
+    
+    // Обработка ошибок POSIX (syscall возвращает отрицательный errno)
+    intptr_t err = (intptr_t)ret;
+    if (err < 0 && err > -4096) {
+        errno = (int)-err;
+        return MAP_FAILED;
+    }
+    return ret;
+}
+
+int munmap(void* addr, size_t length) {
+    int ret = sys_munmap(addr, length);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
+}
