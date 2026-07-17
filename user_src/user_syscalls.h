@@ -42,7 +42,7 @@
 #define SYS_MPROTECT  125
 #define SYS_YIELD     158
 #define SYS_SLEEP     230   // ✅ [ДЕНЬ 15] SSOT
-#define SYS_READDIR 141 
+#define SYS_READDIR   141 
 
 // ============================================================================
 // [ДЕНЬ 13] SEEK CONSTANTS (SSOT sync)
@@ -236,14 +236,12 @@ static inline int sys_sleep(uint32_t ms) {
 }
 
 // ============================================================================
-// POSIX DIRENT STRUCTURE (для sys_readdir в Ring 3)
+// POSIX DIRENT STRUCTURE (SSOT sync с include/vfs.h)
 // ============================================================================
 typedef struct {
-    uint32_t d_ino;              // Inode number (unused in tmpfs)
-    uint32_t d_off;              // Offset to next dirent
-    uint16_t d_reclen;           // Length of this record
-    uint8_t  d_type;             // File type (DT_REG, DT_DIR, etc.)
-    char     d_name[256];        // Filename (null-terminated)
+    uint32_t ino;       // Inode number
+    uint32_t type;      // File type (4 = DT_DIR, 8 = DT_REG)
+    char     name[256]; // Filename (null-terminated)
 } dirent_t;
 
 // File type constants (POSIX)

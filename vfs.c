@@ -34,7 +34,6 @@ static int32_t stdin_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint
 // 1. УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ОБХОДА ДЕРЕВА (LCRS)
 // ==========================================
 
-// ✅ ИСПРАВЛЕНО: Убран static, теперь видны из tmpfs.c
 int32_t vfs_generic_readdir(vfs_node_t* node, uint32_t index, dirent_t* entry) {
     if (!node || !entry) return -1;
     vfs_node_t* child = node->first_child;
@@ -43,7 +42,13 @@ int32_t vfs_generic_readdir(vfs_node_t* node, uint32_t index, dirent_t* entry) {
     if (!child) return -1; 
     
     entry->ino = 0; 
-    int j = 0; while(child->name[j] && j < VFS_MAX_FILENAME - 1) { entry->name[j] = child->name[j]; j++; }
+    entry->type = (child->flags & FS_DIRECTORY) ? 4 : 8; // DT_DIR = 4, DT_REG = 8
+    
+    int j = 0; 
+    while(child->name[j] && j < 255) { 
+        entry->name[j] = child->name[j]; 
+        j++; 
+    }
     entry->name[j] = '\0';
     return 0;
 }

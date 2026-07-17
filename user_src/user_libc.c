@@ -724,7 +724,11 @@ int printf(const char* fmt, ...) {
 // PROCESS CONTROL
 // ============================================================================
 void exit(int status) {
-    // Запускаем atexit handlers перед завершением
+    // 🛡️ POSIX COMPLIANCE: Сбрасываем все открытые FILE* буферы перед exit
+    // TinyCC использует buffered I/O (fputc/fwrite), и без fflush данные теряются
+    fflush(stdout);
+    fflush(stderr);
+    
     __run_atexit_handlers();
     sys_exit(status);
     __builtin_unreachable();

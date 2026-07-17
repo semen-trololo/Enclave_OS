@@ -541,13 +541,19 @@ void task_kill_current(const char* reason) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14] TASK FORK (Copy-on-Write)
+// [ДЕНЬ 14 + ДЕНЬ 24] TASK FORK (Copy-on-Write + POSIX FD Inheritance)
+// ============================================================================
+// Создаёт ребёнка с CoW Address Space, клонирует FD Table (с увеличением
+// ref_count для open_file_t и vfs_node_t), VMA List, FPU State.
+// Ребёнок видит 0 как результат fork(), родитель — PID ребёнка.
 // ============================================================================
 int task_fork(struct regs* r) {
     // 🛡️ [ДЕНЬ 16] FIX: VMM аллокатор вместо kmalloc
+    // Возвращает TOP стека (не base!), ниже — Guard Page (unmapped).
     uint32_t stack_top = vmm_alloc_kernel_stack();
     if (stack_top == 0) return -ENOMEM;
     
+    // Выделяем PCB (Process Control Block) — 1 физическая страница
     uint32_t pcb_phys = pmm_alloc_page();
     if (pcb_phys == 0) {
         vmm_free_kernel_stack(stack_top);
@@ -557,12 +563,17 @@ int task_fork(struct regs* r) {
     task_t* child = (task_t*)PHYS_TO_VIRT(pcb_phys);
     k_memset(child, 0, sizeof(task_t));
     
+    // Process Identity
     child->pid = next_pid++;
     child->state = TASK_READY;
-    child->kernel_stack_virt = stack_top; // 🛡️ FIX: Это TOP
+    child->kernel_stack_virt = stack_top; // 🛡️ FIX: Это TOP, не base!
     child->reaper_next = NULL;
     child->sleep_until = 0;
     
+    // 🛡️ [ДЕНЬ 14] Copy-on-Write Address Space Cloning
+    // Создаёт новый Page Directory, клонирует Kernel Space (768-1023) из
+    // boot_page_directory и User Space (0-767) из родителя с флагом PAGE_COW.
+    // Физические страницы НЕ копируются — только PTE помечаются READ-ONLY.
     child->pdir_virt = vmm_clone_address_space(current_task->pdir_virt);
     if (!child->pdir_virt) {
         vmm_free_kernel_stack(stack_top);
@@ -571,6 +582,7 @@ int task_fork(struct regs* r) {
     }
     child->cr3 = VIRT_TO_PHYS((uint32_t)child->pdir_virt);
     
+    // 🛡️ Deep Copy VMA List (каждая нода — отдельный kmalloc)
     if (vma_clone(child, current_task) < 0) {
         vmm_destroy_address_space(child->pdir_virt);
         vmm_free_kernel_stack(stack_top);
@@ -578,15 +590,37 @@ int task_fork(struct regs* r) {
         return -ENOMEM;
     }
     
+    // Копируем имя процесса
     k_strncpy(child->name, current_task->name, sizeof(child->name));
     
+    // ========================================================================
+    // 🛡️ [ДЕНЬ 24] POSIX FILE DESCRIPTOR INHERITANCE (CRITICAL FIX)
+    // ========================================================================
+    // По POSIX при fork() ребёнок наследует открытые FD, разделяя с родителем
+    // Open File Descriptions (open_file_t). Мы ОБЯЗАНЫ увеличить ref_count,
+    // иначе sys_close в ребёнке освободит память, оставив родителя с UAF.
+    // ========================================================================
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         child->fd_table[i] = current_task->fd_table[i];
+        
+        if (child->fd_table[i]) {
+            // Увеличиваем счетчик ссылок на Open File Description
+            child->fd_table[i]->ref_count++;
+            
+            // Увеличиваем счетчик ссылок на Inode (vfs_node_t)
+            if (child->fd_table[i]->node) {
+                __asm__ volatile("cli");
+                child->fd_table[i]->node->ref_count++;
+                __asm__ volatile("sti");
+            }
+        }
     }
     
+    // Копируем FPU state (512 байт, 16-byte aligned — первое поле в task_t)
     k_memcpy(child->fpu_state, current_task->fpu_state, 512);
     child->fpu_initialized = current_task->fpu_initialized;
     
+    // Process Tree: ребёнок становится сыном текущего процесса
     child->parent = current_task;
     child->children = NULL;
     child->next_sibling = current_task->children;
@@ -595,7 +629,13 @@ int task_fork(struct regs* r) {
     child->orphan_on_exit = current_task->orphan_on_exit;
     child->monitor_children = current_task->monitor_children;
     
-    // 🛡️ [ДЕНЬ 16] FIX: Правильное копирование стека с учетом новой архитектуры (TOP)
+    // ========================================================================
+    // 🛡️ [ДЕНЬ 16] KERNEL STACK COPY (с учетом новой архитектуры TOP)
+    // ========================================================================
+    // Копируем kernel stack родителя в stack ребёнка. Это нужно, потому что
+    // regs* r указывает на структуру, сохранённую на kernel stack при syscall.
+    // Мы должны скопировать её в stack ребёнка и модифицировать EAX=0.
+    // ========================================================================
     uint32_t parent_stack_base = current_task->kernel_stack_virt - KERNEL_STACK_USABLE_SIZE;
     uint32_t child_stack_base = stack_top - KERNEL_STACK_USABLE_SIZE;
     
@@ -606,23 +646,38 @@ int task_fork(struct regs* r) {
     struct regs* original_child_r = (struct regs*)(child_stack_base + offset_from_base);
     
     // Сдвигаем regs вниз на 32 байта для нового стекового фрейма ret_from_fork
+    // Это нужно, чтобы ret_from_fork имел место для callee-saved регистров
     uint32_t shift = 32;
     struct regs* child_r = (struct regs*)((uint32_t)original_child_r - shift);
     k_memcpy(child_r, original_child_r, sizeof(struct regs));
     
-    child_r->eax = 0; // Ребенок видит 0 как результат fork()
+    // 🛡️ CRITICAL: Ребёнок видит 0 как результат fork()
+    child_r->eax = 0;
     
+    // ========================================================================
+    // STACK FORGING: Подготовка стека для ret_from_fork трамплина
+    // ========================================================================
+    // После switch_context процессор выполнит ret, который загрузит EIP из
+    // стека. Мы кладём туда адрес ret_from_fork, который восстановит регистры
+    // и сделает iret в Ring 3 (или вернётся в Ring 0 для kernel tasks).
+    // ========================================================================
     uint32_t* child_stack_ptr = (uint32_t*)child_r;
     
-    *(--child_stack_ptr) = (uint32_t)child_r;
-    *(--child_stack_ptr) = (uint32_t)ret_from_fork;
-    *(--child_stack_ptr) = 0; 
-    *(--child_stack_ptr) = 0; 
-    *(--child_stack_ptr) = 0; 
-    *(--child_stack_ptr) = 0; 
+    *(--child_stack_ptr) = (uint32_t)child_r;      // Аргумент для ret_from_fork
+    *(--child_stack_ptr) = (uint32_t)ret_from_fork; // Return address (EIP после ret)
+    *(--child_stack_ptr) = 0; // EBX (callee-saved)
+    *(--child_stack_ptr) = 0; // ESI (callee-saved)
+    *(--child_stack_ptr) = 0; // EDI (callee-saved)
+    *(--child_stack_ptr) = 0; // EBP (callee-saved)
     
     child->esp = (uint32_t)child_stack_ptr;
     
+    // ========================================================================
+    // RUN QUEUE INSERTION (IRQ Safety)
+    // ========================================================================
+    // Защищаем модификацию двусвязного списка run queue от прерываний PIT.
+    // Если PIT прервёт нас посередине, schedule() может увидеть битый список.
+    // ========================================================================
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
     task_queue_add(child);
@@ -631,6 +686,7 @@ int task_fork(struct regs* r) {
     
     serial_printf("[TASK] Fork: PID %d -> PID %d (CoW)\n", current_task->pid, child->pid);
     
+    // Родитель видит PID ребёнка как результат fork()
     return child->pid;
 }
 

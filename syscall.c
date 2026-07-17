@@ -48,6 +48,7 @@ static syscall_func_t syscall_table[MAX_SYSCALLS] = {
     [SYS_UNAME]  = NULL,
     [SYS_SYSINFO] = NULL,
     [SYS_SLEEP]  = NULL,
+    [SYS_READDIR] = NULL, // Заполним в syscall_init
 };
 
 // ========================================================================
@@ -199,11 +200,18 @@ static int sys_exec_handler(struct regs* r) {
     uint32_t stack_top = USER_STACK_VIRT_TOP;
     uint32_t stack_bottom = stack_top - USER_STACK_SIZE;
     
+    // 🛡️ CRITICAL: Защищаем создание VMA от прерываний PIT
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    
     if (vma_add(current_task, stack_bottom, stack_top, VMA_READ | VMA_WRITE) < 0 ||
         vma_add(current_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE) < 0) {
         kfree(k_argv_buf);
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
         return -ENOMEM; 
     }
+    
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
     
     uint32_t* stack_ptr = (uint32_t*)stack_top;
     char* argv_ptrs[EXEC_MAX_ARGS + 1];
@@ -266,9 +274,19 @@ static int sys_write_handler(struct regs* r) {
         return -EFAULT;
     }
 
+    // 🛡️ [ДЕНЬ 24] ВРЕМЕННЫЙ ХАК: Магический перехват stdout/stderr (fd == 1 или 2)
+    if (fd == 1 || fd == 2) {
+        const char* cbuf = (const char*)buf;
+        for (uint32_t i = 0; i < count; i++) {
+            k_putchar(cbuf[i]);
+        }
+        // Если активен фреймбуфер с двойной буферизацией, сбрасываем back buffer в LFB
+        if (fb_is_available()) fb_flush(); 
+        return count;
+    }
+
     return sys_write(fd, buf, count);
 }
-
 // ========================================================================
 // sys_read: чтение из файлового дескриптора
 // ========================================================================
@@ -282,9 +300,38 @@ static int sys_read_handler(struct regs* r) {
         return -EFAULT;
     }
 
+    // 🛡️ [ДЕНЬ 24] ВРЕМЕННЫЙ ХАК: Магический перехват stdin (fd == 0)
+    if (fd == 0) {
+        char* cbuf = (char*)buf;
+        uint32_t read_count = 0;
+        extern char k_getchar(void); // Прототип из keyboard.c
+        
+        // Блокирующее чтение БЕЗ Hardware Echo (Shell сам делает эхо)
+        while (read_count < count) {
+            char c = k_getchar();
+            
+            if (c != 0) {
+                cbuf[read_count++] = c;
+                // ❌ УБРАЛИ: k_putchar(c); — Shell сам эхоит символы
+                
+                // Line-buffered: если нажали Enter, возвращаем управление Shell
+                if (c == '\n') break; 
+            } else {
+                // Буфер клавиатуры пуст. 
+                // Если уже прочитали часть строки - возвращаем её.
+                if (read_count > 0) break;
+                
+                // Отдаем CPU планировщику, чтобы не жечь 100% CPU в idle loop
+                task_yield(); 
+            }
+        }
+        
+        // ❌ УБРАЛИ: fb_flush() — не нужно, так как мы ничего не писали в FB
+        return read_count;
+    }
+
     return sys_read(fd, buf, count);
 }
-
 // ========================================================================
 // sys_yield: добровольная передача управления планировщику
 // ========================================================================
@@ -583,7 +630,36 @@ static int sys_ioctl_handler(struct regs* r) {
             return -ENOTTY;
     }
 }
-
+// ========================================================================
+// sys_readdir: чтение записи директории
+// ========================================================================
+static int sys_readdir_handler(struct regs* r) {
+    int fd = (int)r->ebx;
+    uint32_t index = r->ecx;
+    dirent_t* user_entry = (dirent_t*)r->edx;
+    
+    if (!is_user_pointer(user_entry, sizeof(dirent_t))) {
+        serial_printf("[SYSCALL] sys_readdir: Invalid entry pointer 0x%x\n", (uint32_t)user_entry);
+        return -EFAULT;
+    }
+    
+    if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) return -EBADF;
+    
+    struct open_file* of = current_task->fd_table[fd];
+    if (!of || !of->node) return -EBADF;
+    if (!(of->node->flags & FS_DIRECTORY)) return -EINVAL; // Not a directory
+    if (!of->node->readdir) return -ENOSYS;
+    
+    // 🛡️ Kernel-Buffer Pattern: заполняем в kernel space, затем копируем
+    dirent_t kernel_entry;
+    k_memset(&kernel_entry, 0, sizeof(dirent_t));
+    
+    int32_t res = of->node->readdir(of->node, index, &kernel_entry);
+    if (res != 0) return res; // -1 означает конец директории
+    
+    k_memcpy(user_entry, &kernel_entry, sizeof(dirent_t));
+    return 0;
+}
 // ========================================================================
 // sys_mmap: выделение виртуальной памяти
 // ========================================================================
@@ -856,6 +932,7 @@ void syscall_init(void) {
     syscall_table[SYS_UNAME]  = sys_uname_handler;
     syscall_table[SYS_SYSINFO] = sys_sysinfo_handler;
     syscall_table[SYS_SLEEP]  = sys_sleep_handler;
+    syscall_table[SYS_READDIR] = sys_readdir_handler;
     
     extern void isr128(); 
     idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE);

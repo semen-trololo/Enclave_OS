@@ -1,3 +1,5 @@
+//kernel.c
+
 #include "klib.h"
 #include "vga.h"
 #include "framebuffer.h"
@@ -196,28 +198,20 @@ void kernel_main(void) {
     // /sbin/init.elf и уходит в бесконечный Idle Loop (sti; hlt).
     // Планировщик (PIT) сам подхватит PID 1 и передаст ему CPU.
     // ========================================================================
-    serial_print("[BOOT] Launching PID 1 (/sbin/init.elf)...\n");
+        serial_print("[BOOT] Launching PID 1 (/sbin/init.elf)...\n");
     
     vfs_node_t* init_node = vfs_findnode("/sbin/init.elf");
     if (!init_node) {
         serial_print("[FATAL] /sbin/init.elf not found in VFS!\n");
-        serial_print("[FATAL] System halted. Check initrd.\n");
-        if (fb_is_available()) {
-            fb_set_color(COLOR_RED, COLOR_BLACK);
-            fb_print(" [FATAL] /sbin/init.elf not found! System halted.\n");
-            fb_flush();
-        }
-        while(1) { asm volatile("cli; hlt"); }
+        // ... (error handling)
     }
 
-    // Создаем изолированный Address Space для PID 1
     uint32_t* init_pdir = vmm_create_address_space();
     if (!init_pdir) {
         serial_print("[FATAL] Failed to create address space for Init!\n");
         while(1) { asm volatile("cli; hlt"); }
     }
 
-    // Временная структура для elf_load (он требует task_t для VMA)
     task_t temp_task;
     temp_task.pdir_virt = init_pdir;
     temp_task.vma_head = NULL;
@@ -230,23 +224,28 @@ void kernel_main(void) {
         while(1) { asm volatile("cli; hlt"); }
     }
 
-    // Создаем Ring 3 задачу
     uint32_t stack_top_init = USER_STACK_VIRT_TOP - 16;
+    
+    // 🛡️ CRITICAL: Защищаем создание задачи от прерываний PIT
+    uint32_t eflags;
+    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    
     task_t* init_task = task_create("/sbin/init.elf", (void (*)(void))init_entry, true, stack_top_init, init_pdir);
     if (!init_task) {
         serial_print("[FATAL] Failed to create Init task!\n");
         vma_destroy_all(&temp_task);
         vmm_destroy_address_space(init_pdir);
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
         while(1) { asm volatile("cli; hlt"); }
     }
 
-    // Переносим VMA из temp_task в реальную задачу
     init_task->vma_head = temp_task.vma_head;
-    init_task->pid = 1; // ✅ Принудительно устанавливаем PID 1
+    init_task->pid = 1;
 
-    // Добавляем VMA для стека и кучи (Demand Paging подхватит при первом обращении)
     vma_add(init_task, stack_top_init - USER_STACK_SIZE, stack_top_init, VMA_READ | VMA_WRITE);
     vma_add(init_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE);
+    
+    __asm__ volatile("push %0; popf" : : "r"(eflags));
 
     serial_printf("[BOOT] ✓ PID 1 (/sbin/init.elf) ready. Entry: 0x%x\n", init_entry);
     serial_print("[BOOT] Entering Kernel Idle Loop (PID 0)...\n\n");

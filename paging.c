@@ -559,40 +559,32 @@ uint32_t* vmm_clone_address_space(uint32_t* parent_pd_virt) {
 void vmm_destroy_address_space(uint32_t* pdir_virt) {
     if (!pdir_virt) return;
     
-    // ✅ FIX: Сравниваем виртуальные адреса, чтобы случайно не уничтожить boot_page_directory
     uint32_t* virt_boot_pd = (uint32_t*)PHYS_TO_VIRT((uint32_t)boot_page_directory);
     if (pdir_virt == virt_boot_pd) return;
     
-    // Iterate User Space PDEs (0 - 767)
     for (uint32_t i = 0; i < 768; i++) {
         if (pdir_virt[i] & PAGE_PRESENT) {
             if (pdir_virt[i] & PAGE_PS) {
-                // 4MB Page
                 uint32_t page_phys = pdir_virt[i] & 0xFFC00000;
                 for(uint32_t p = 0; p < 1024; p++) {
-                    pmm_free_page(page_phys + (p * 4096));
+                    pmm_dec_ref(page_phys + (p * 4096));
                 }
             } else {
-                // 4KB Pages
                 uint32_t pt_phys = pdir_virt[i] & 0xFFFFF000;
                 uint32_t* pt_virt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
                 
                 for (uint32_t j = 0; j < 1024; j++) {
                     if (pt_virt[j] & PAGE_PRESENT) {
-                    uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
-                    pmm_dec_ref(page_phys);
-        
-                    // 🛡️ [ДЕНЬ 24] COW FIX: Освобождаем физическую страницу ТОЛЬКО если refcount == 0
-                    // pmm_dec_ref() только декрементит счетчик, но не освобождает страницу.
-                    // Мы должны явно проверить refcount и вызвать pmm_free_page().
-                        if (pmm_get_refcount(page_phys) == 0) {
-                        pmm_free_page(page_phys);
-                        }
+                        uint32_t page_phys = pt_virt[j] & 0xFFFFF000;
+                        
+                        // 🛡️ FIX: pmm_dec_ref() ВНУТРИ СЕБЯ вызывает pmm_free_page(), 
+                        // когда refcount достигает 0. Повторный вызов здесь вызывал Double Free!
+                        pmm_dec_ref(page_phys);
                     }
                 }
-                pmm_free_page(pt_phys); // Free Page Table
+                pmm_dec_ref(pt_phys); // Free Page Table (тоже через dec_ref для консистентности)
             }
-            pdir_virt[i] = 0; // 🛡️ Prevent Double Free
+            pdir_virt[i] = 0; // Prevent Double Free
         }
     }
     

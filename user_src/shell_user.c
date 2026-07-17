@@ -105,11 +105,10 @@ static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     dirent_t entry;
     uint32_t index = 0;
 
-    printf("  %s\n", entry.d_name);
-
     int32_t res = sys_readdir(fd, index, &entry);
     while (res == 0) {
-        printf("  %s\n", entry.d_name);
+        char type_char = (entry.type == 4) ? 'd' : '-';
+        printf("  %c %s\n", type_char, entry.name);
         index++;
         res = sys_readdir(fd, index, &entry);
     }

@@ -1025,8 +1025,34 @@ TinyCC генерирует **ELF-бинарники**, которые загр�
 3. **Crash-Only Shell:** Если Shell падает (например, из-за бага в парсинге), Init перезапускает его < 100мс.
 4. **Изоляция CoW:** Паттерн `fork + exec` математически защищен от повреждения памяти родителя.
 5. **Zero Trust I/O:** Устройства недоступны без явного `open()` через VFS.
+---
+### 🛠 Критические исправления и запуск TinyCC (Hardening Pack)
 
+**1. Интерактивный I/O и команда `ls`**
+* **Keyboard Hack (Временное решение):** Внедрен магический перехват `fd == 0` в `sys_read` (чтение из кольцевого буфера клавиатуры с `task_yield`) и `fd == 1/2` в `sys_write`.
+* **Отключение Hardware Echo:** Убран `k_putchar` из ядра. Эхо символов теперь полностью на стороне Ring 3 Shell (концепция TTY Line Discipline).
+* **`sys_readdir` (syscall 141):** Реализован обработчик чтения директорий. Синхронизирована структура `dirent_t` (SSOT) между `vfs.h` и `user_syscalls.h` (устранен сдвиг данных из-за разного размера структур). Команда `ls` выводит список файлов.
 
+**2. Memory & Process Hardening**
+* **Task Creation Preemption Race:** Обертывание `task_create()` + `vma_add()` 
+в критическую секцию `cli/sti` в `kernel.c` и `syscall.c`. Защищает от Page Fault, 
+если PIT прерывает ядро до создания VMA для стека.
+* **Strict CoW Teardown (`paging.c`):** В `vmm_destroy_address_space()` физическая 
+страница освобождается через `pmm_free_page()` **ТОЛЬКО** если `pmm_get_refcount() == 0`. Устранен фатальный Double Free / Kernel Panic при паттерне `fork() -> exec()`.
+* **POSIX FD Inheritance (`task.c`):** В `task_fork()` добавлено строгое увеличение
+ `ref_count` для `open_file_t` и `vfs_node_t`. Устранен Kernel Heap Corruption (`Invalid magic in kfree` / Use-After-Free), возникавший при завершении child-процесса, унаследовавшего FD таблицы.
+
+**3. User-Space Library Fixes**
+* **Buffered I/O Flush (`user_libc.c`):** Добавлен принудительный `fflush(stdout)`
+внутри `exit()` перед вызовом `sys_exit`. Устранена проблема "молчаливого" завершения программ, использующих буферизованный `FILE*` API (в частности, `tcc --version`).
+
+**🎯 Результат этапа:**
+* Успешный запуск `test_hello.elf` и интерактивная работа Shell.
+* **TinyCC v0.9.27** (`/bin/tcc.elf`) успешно загружается, работает в Ring 3 и
+ завершается с кодом 0.
+* Достигнут статус **Self-Hosting Ready** (инфраструктура готова к компиляции 
+TinyCC самим TinyCC).
+--- 
 ## 📅 ФАЗА 3: SELF-HOSTING & INTEGRATION (День 21-25)
 ### День 21: Advanced C Features Testing
 **Цель:** Протестировать продвинутые фичи C в TinyCC.
@@ -1055,7 +1081,8 @@ TinyCC генерирует **ELF-бинарники**, которые загр�
 - Запуск через run /scripts/build_tcc.sh
 - Проверка создания tcc_selfhosted.elf
 **Архитектурное решение:**
-Build скрипт использует **существующий** tcc для компиляции **нового** tcc. Это доказывает, что TinyCC может компилировать сам себя (self-hosting).
+Build скрипт использует **существующий** tcc для компиляции **нового** tcc. 
+Это доказывает, что TinyCC может компилировать сам себя (self-hosting).
 **Тесты:**
 - Запуск build скрипта
 - Проверка, что все .o файлы созданы

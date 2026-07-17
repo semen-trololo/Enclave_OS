@@ -31,8 +31,8 @@
 #define PERM_READ_WRITE 0666
 #define PERM_EXECUTABLE 0755
 
-#define VFS_MAX_FILENAME 128
 #define VFS_MAX_OPEN_FILES 16
+#define VFS_MAX_FILENAME 256  // ✅ Увеличили с 128 до 256 для длинных имен
 
 #define VFS_ENOENT 2
 #define VFS_EACCES 13
@@ -46,8 +46,9 @@
 struct vfs_node;
 
 typedef struct dirent {
-    uint32_t ino;
-    char name[VFS_MAX_FILENAME];
+    uint32_t ino;       // Inode number
+    uint32_t type;      // File type (4 = DT_DIR, 8 = DT_REG)
+    char name[256];     // Filename (null-terminated)
 } dirent_t;
 
 // ==========================================

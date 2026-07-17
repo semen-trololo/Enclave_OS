@@ -134,6 +134,7 @@ typedef struct {
 #define SYS_SYSINFO   116  // ✅ [ДЕНЬ 15]
 #define SYS_GETPID    122  // ✅ День 14
 #define SYS_MPROTECT  125
+#define SYS_READDIR   141  // ✅ [ДЕНЬ 24] SSOT
 #define SYS_YIELD     158  // Custom: добровольный yield
 #define SYS_SLEEP     230  // ✅ [ДЕНЬ 15] Custom: sleep в миллисекундах
 
