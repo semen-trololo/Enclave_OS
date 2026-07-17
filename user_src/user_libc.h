@@ -6,11 +6,22 @@
 #include <stdarg.h>
 
 // ============================================================================
-// POSIX TYPES (sys/types.h equivalent for Freestanding Environment)
+// POSIX & ISO C Type Definitions (Критично для TinyCC)
+// В Freestanding среде компилятор не всегда знает эти типы.
 // ============================================================================
-typedef int32_t ssize_t;  // Signed size_t (для read/write, возвращает -1 при ошибке)
-typedef int32_t off_t;    // File offset (для lseek)
-typedef int32_t pid_t;    // Process ID (для fork/waitpid/system)
+typedef unsigned int size_t;      // ✅ НОВОЕ: для malloc, strlen, и т.д.
+typedef int ssize_t;
+typedef int off_t;
+typedef int pid_t;
+typedef unsigned int mode_t;
+typedef unsigned int uid_t;
+typedef unsigned int gid_t;
+typedef unsigned int dev_t;
+typedef unsigned int ino_t;
+typedef unsigned int nlink_t;
+typedef unsigned int blksize_t;
+typedef unsigned int blkcnt_t;
+//typedef int wchar_t;              // ✅ НОВОЕ: иногда нужен для <stddef.h>
 // ============================================================================
 // POSIX-совместимый API для Ring 3 программ
 // Все функции работают ТОЛЬКО через syscalls (Zero Trust Sandbox)

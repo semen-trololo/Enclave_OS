@@ -171,8 +171,6 @@ static int sys_exec_handler(struct regs* r) {
     }
     
     uint32_t saved_pid = current_task->pid;
-    char saved_name[32];
-    k_strncpy(saved_name, current_task->name, sizeof(saved_name));
     
     struct open_file* saved_fds[TASK_MAX_OPEN_FILES];
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
@@ -191,7 +189,10 @@ static int sys_exec_handler(struct regs* r) {
     
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) current_task->fd_table[i] = saved_fds[i];
     current_task->pid = saved_pid;
-    k_strncpy(current_task->name, saved_name, sizeof(current_task->name));
+    
+    // ✅ FIX: POSIX exec заменяет образ процесса, включая имя. 
+    // Мы используем новое имя файла, чтобы в логах (и в Reaper) отображался актуальный процесс.
+    k_strncpy(current_task->name, filename_buf, sizeof(current_task->name));
     
     fpu_release_ownership(current_task);
     current_task->fpu_initialized = 0;
@@ -239,15 +240,23 @@ static int sys_exec_handler(struct regs* r) {
         kfree(k_argv_buf);
         stack_ptr = (uint32_t*)(KERNEL_SPACE_START - 16);
     }
+// ========================================================================
+    // 🛡️ CRITICAL FIX: Stack Switch для IRET
+    // ========================================================================
+    r->esp = (uint32_t)stack_ptr;      // Фиктивный ESP (для pusha/popa, игнорируется)
     
-    r->esp = (uint32_t)stack_ptr;
+    // КРИТИЧНО: Обновляем аппаратный User ESP, который IRET использует 
+    // для переключения стека при возврате в Ring 3!
+    // (Проверь точное имя поля в idt.h: useresp или user_esp)
+    r->useresp = (uint32_t)stack_ptr;  
+    
     r->eip = entry_point;
     r->eax = 0;
     
-    kfree(k_argv_buf); // 🛡️ FIX: Освобождаем буфер
+    kfree(k_argv_buf);
     
     serial_printf("[SYSCALL] sys_exec: PID %d replaced with '%s' at 0x%x, ESP=0x%x\n", 
-                  current_task->pid, current_task->name, entry_point, r->esp);
+                  current_task->pid, current_task->name, entry_point, r->useresp);
     return 0;
 }
 
@@ -261,8 +270,94 @@ static int sys_exit_handler(struct regs* r) {
     task_exit(exit_code); // ✅ FIX: Передаем код выхода для waitpid
     return 0;
 }
+
 // ========================================================================
-// sys_write: запись в файловый дескриптор
+// ANSI State Machine для парсинга escape-последовательностей
+// ========================================================================
+typedef enum {
+    ANSI_IDLE,
+    ANSI_ESCAPE,
+    ANSI_COLLECTING
+} ansi_state_t;
+
+static ansi_state_t ansi_state = ANSI_IDLE;
+static char ansi_buffer[32];
+static int ansi_pos = 0;
+
+static const uint8_t ansi_fg_map[8] = {
+    K_COLOR_BLACK, K_COLOR_RED, K_COLOR_GREEN, K_COLOR_BROWN,
+    K_COLOR_BLUE, K_COLOR_MAGENTA, K_COLOR_CYAN, K_COLOR_LIGHT_GREY
+};
+
+static const uint8_t ansi_fg_bright_map[8] = {
+    K_COLOR_DARK_GREY, K_COLOR_LIGHT_RED, K_COLOR_LIGHT_GREEN, K_COLOR_YELLOW,
+    K_COLOR_LIGHT_BLUE, K_COLOR_LIGHT_MAGENTA, K_COLOR_LIGHT_CYAN, K_COLOR_WHITE
+};
+
+static void process_ansi_csi(void) {
+    if (ansi_pos == 0) return;
+    
+    char final_char = ansi_buffer[ansi_pos - 1];
+    
+    if (final_char == 'm') {
+        static uint8_t current_fg = K_COLOR_LIGHT_GREY;
+        static uint8_t current_bg = K_COLOR_BLACK;
+        bool bold = false;
+        
+        if (ansi_pos == 1) {
+            current_fg = K_COLOR_LIGHT_GREY;
+            current_bg = K_COLOR_BLACK;
+        } else {
+            int i = 0;
+            int limit = ansi_pos - 1;
+            while (i < limit) {
+                while (i < limit && ansi_buffer[i] == ' ') i++;
+                int num = 0;
+                bool has_num = false;
+                while (i < limit && ansi_buffer[i] >= '0' && ansi_buffer[i] <= '9') {
+                    num = num * 10 + (ansi_buffer[i] - '0');
+                    has_num = true;
+                    i++;
+                }
+                if (has_num) {
+                    if (num == 0) {
+                        current_fg = K_COLOR_LIGHT_GREY;
+                        current_bg = K_COLOR_BLACK;
+                        bold = false;
+                    } else if (num == 1) {
+                        bold = true;
+                    } else if (num >= 30 && num <= 37) {
+                        current_fg = ansi_fg_map[num - 30];
+                        if (bold) {
+                            if (current_fg == K_COLOR_BROWN) current_fg = K_COLOR_YELLOW;
+                            else if (current_fg < 8) current_fg += 8;
+                        }
+                    } else if (num >= 40 && num <= 47) {
+                        current_bg = ansi_fg_map[num - 40];
+                    } else if (num >= 90 && num <= 97) {
+                        current_fg = ansi_fg_bright_map[num - 90];
+                    }
+                }
+                if (i < limit && ansi_buffer[i] == ';') i++;
+            }
+        }
+        k_set_color(current_fg, current_bg);
+        //serial_printf("[ANSI] Color applied: FG=%d, BG=%d\n", current_fg, current_bg);
+        
+    } else if (final_char == 'J') {
+        int mode = 0;
+        if (ansi_pos > 1 && ansi_buffer[0] >= '0' && ansi_buffer[0] <= '9') {
+            mode = ansi_buffer[0] - '0';
+        }
+        if (mode == 2 || mode == 3 || ansi_pos == 1) {
+            k_clear();
+            //serial_printf("[ANSI] Screen cleared\n");
+        }
+    }
+}
+
+// ========================================================================
+// sys_write: запись в файловый дескриптор (С ФИЛЬТРОМ ANSI)
 // ========================================================================
 static int sys_write_handler(struct regs* r) {
     int fd = (int)r->ebx;
@@ -274,14 +369,56 @@ static int sys_write_handler(struct regs* r) {
         return -EFAULT;
     }
 
-    // 🛡️ [ДЕНЬ 24] ВРЕМЕННЫЙ ХАК: Магический перехват stdout/stderr (fd == 1 или 2)
     if (fd == 1 || fd == 2) {
         const char* cbuf = (const char*)buf;
         for (uint32_t i = 0; i < count; i++) {
-            k_putchar(cbuf[i]);
+            unsigned char c = (unsigned char)cbuf[i];
+            
+            // 1. ВСЕГДА отправляем оригинальный байт в Serial
+            serial_putc(c);
+            
+            // 2. State Machine для VGA (фильтрует ESC-последовательности)
+            switch (ansi_state) {
+                case ANSI_IDLE:
+                    if (c == 0x1B) {  // ESC (\033)
+                        ansi_state = ANSI_ESCAPE;
+                    } else {
+                        k_putchar(c);
+                    }
+                    break;
+                    
+                case ANSI_ESCAPE:
+                    if (c == '[') {
+                        ansi_state = ANSI_COLLECTING;
+                        ansi_pos = 0;
+                    } else {
+                        k_putchar(0x1B);
+                        k_putchar(c);
+                        ansi_state = ANSI_IDLE;
+                    }
+                    break;
+                    
+                case ANSI_COLLECTING:
+                    if ((c >= '0' && c <= '9') || c == ';' || c == ' ') {
+                        if (ansi_pos < 31) {
+                            ansi_buffer[ansi_pos++] = c;
+                        }
+                    } else if (c >= 0x40 && c <= 0x7E) {
+                        if (ansi_pos < 31) {
+                            ansi_buffer[ansi_pos++] = c;
+                        }
+                        process_ansi_csi();
+                        ansi_state = ANSI_IDLE;
+                        ansi_pos = 0;
+                    } else {
+                        ansi_state = ANSI_IDLE;
+                        ansi_pos = 0;
+                    }
+                    break;
+            }
         }
-        // Если активен фреймбуфер с двойной буферизацией, сбрасываем back buffer в LFB
-        if (fb_is_available()) fb_flush(); 
+        
+        if (fb_is_available()) fb_flush();
         return count;
     }
 

@@ -1068,6 +1068,54 @@ TinyCC самим TinyCC).
 - Проверка корректности вычислений
 - Проверка отсутствия memory corruption
 ---
+### 📘 ENCLAVE OPERATING SYSTEM — Обновление документации (Day 21)
+## Статус: Alpha 0.3 (Self-Hosting Ready)
+
+---
+
+### 📋 СТАТУС ДНЯ 21: Advanced C Features Testing & ELF Loader Hardening (ЗАВЕРШЕНО)
+
+#### 🎯 Цель
+Провести стресс-тестирование ELF Loader'а, VMM и User Space ABI с помощью "адской" C-программы, намеренно использующей все типы сегментов ELF и сложные конструкции языка. Устранить логические ошибки в `sys_exec` и обеспечить полноценный headless-дебаггинг через Serial.
+
+#### ✅ Реализовано
+1. **Создан исчерпывающий стресс-тест `test_advanced_c.c`:**
+   - **Test 1 (.bss Zero-Fill):** Проверка, что ELF Loader корректно зануляет неинициализированные глобальные массивы (`memsz > filesz`).
+   - **Test 2 (.data Initialization):** Проверка копирования инициализированных данных по виртуальным адресам (`p_vaddr`).
+   - **Test 3 (.rodata Read-Only):** Чтение строковых литералов.
+   - **Test 4 (Struct Alignment & Pointers):** Проверка выравнивания структур и работы с указателями.
+   - **Test 5 (Loops & Conditions):** Тест ALU и флагов процессора (EFLAGS).
+   - **Test 6 (Recursion):** Вычисление факториала (проверка глубины стека и teardown стек-фреймов).
+
+2. **Фикс Use-After-Free в `sys_exec_handler` (syscall.c):**
+   - *Проблема:* После уничтожения старого адресного пространства ядро использовало user-space указатель `filename` для логирования, что приводило к чтению мусора (в логах отображалось `/sbin/init.elf` вместо реального имени файла).
+   - *Решение:* Логирование переведено на использование kernel-space буфера `filename_buf`. Имя процесса (`current_task->name`) теперь принудительно обновляется на новое имя файла, что соответствует семантике POSIX `exec`.
+
+3. **Headless Debugging Bridge (syscall.c):**
+   - *Проблема:* Вывод `printf` из User Space уходил только в VGA/Framebuffer, но не дублировался в Serial COM1 (QEMU `-serial stdio` оставался немым).
+   - *Решение:* В `sys_write_handler` для fallback-обработки `fd == 1` и `fd == 2` добавлен вызов `serial_putc()`. Это гарантирует, что любой вывод в stdout/stderr дублируется в COM1, сохраняя при этом Zero Trust (Ring 3 не получает прямого доступа к портам).
+
+#### 🏛 Архитектурные решения
+1. **ELF Loader математически точен:** Доказано, что `.bss` зануляется, `.data` загружается по правильному VADDR, `.rodata` читается, а рекурсия не пробивает стек.
+2. **POSIX exec семантика:** `sys_exec` полностью заменяет образ процесса, включая его имя. Это критично для корректной работы Reaper Queue и логов.
+3. **Serial-мост для headless-отладки:** Временный fallback в `sys_write` позволяет отлаживать User Space программы без подключения монитора, используя только терминал хост-машины.
+
+#### 🐛 Исправленные критические баги
+1. **Use-After-Free в логах `sys_exec`:** Устранен через использование kernel-space буфера и обновление `current_task->name`.
+2. **Немой Serial-вывод:** Устранен через добавление `serial_putc()` в `sys_write_handler` для stdout/stderr.
+
+#### 🧪 Пройденные тесты
+- **test_advanced_c.elf:** Все 6 тестов проходят со 100% результатом `[PASS]`.
+  - `.bss` Zero-Fill: `[PASS]`
+  - `.data` Initialization: `[PASS]`
+  - `.rodata` Read-Only: `[PASS]`
+  - Struct Alignment & Pointers: `[PASS]`
+  - Loops & Conditions (ALU/Flags): `[PASS]`
+  - Recursion (Stack Depth): `[PASS] (Result: 208)`
+
+#### 🎯 Готовность к следующему этапу
+Инфраструктура Дня 21 **полностью готова**. ELF Loader, VMM и User Space ABI доказали свою надежность. Headless-дебаггинг через Serial работает безупречно.
+
 ### День 22: Self-Hosting Preparation
 **Цель:** Подготовить среду для компиляции TinyCC самим TinyCC.
 **Задачи:**
