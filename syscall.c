@@ -294,11 +294,32 @@ static const uint8_t ansi_fg_bright_map[8] = {
     K_COLOR_LIGHT_BLUE, K_COLOR_LIGHT_MAGENTA, K_COLOR_LIGHT_CYAN, K_COLOR_WHITE
 };
 
+// ============================================================================
+// [DAY 28] Helper: parse first integer from ANSI CSI buffer (non-nested)
+// Used by process_ansi_csi to extract numeric parameters like \033[3D → 3
+// ============================================================================
+static int parse_csi_first_int(void) {
+    int num = 0;
+    bool has_num = false;
+    for (int i = 0; i < ansi_pos - 1; i++) {
+        if (ansi_buffer[i] >= '0' && ansi_buffer[i] <= '9') {
+            num = num * 10 + (ansi_buffer[i] - '0');
+            has_num = true;
+        } else {
+            break;
+        }
+    }
+    return has_num ? num : 0;
+}
+
 static void process_ansi_csi(void) {
     if (ansi_pos == 0) return;
     
     char final_char = ansi_buffer[ansi_pos - 1];
     
+    // ========================================================================
+    // SGR (Select Graphic Rendition) — Colors
+    // ========================================================================
     if (final_char == 'm') {
         static uint8_t current_fg = K_COLOR_LIGHT_GREY;
         static uint8_t current_bg = K_COLOR_BLACK;
@@ -342,18 +363,68 @@ static void process_ansi_csi(void) {
             }
         }
         k_set_color(current_fg, current_bg);
-        //serial_printf("[ANSI] Color applied: FG=%d, BG=%d\n", current_fg, current_bg);
-        
-    } else if (final_char == 'J') {
+    }
+    // ========================================================================
+    // ED (Erase in Display) — Clear screen
+    // ========================================================================
+    else if (final_char == 'J') {
         int mode = 0;
         if (ansi_pos > 1 && ansi_buffer[0] >= '0' && ansi_buffer[0] <= '9') {
             mode = ansi_buffer[0] - '0';
         }
         if (mode == 2 || mode == 3 || ansi_pos == 1) {
             k_clear();
-            //serial_printf("[ANSI] Screen cleared\n");
         }
     }
+    // ========================================================================
+    // EL (Erase in Line) — Clear to End of Line
+    // ========================================================================
+    else if (final_char == 'K') {
+        // Shell handles this via space-padding in redraw_line()
+        (void)0;
+    }
+    // ========================================================================
+    // CUP (Cursor Position) — \033[<row>;<col>H
+    // ========================================================================
+    else if (final_char == 'H' || final_char == 'f') {
+        // Ignored — Shell uses \r + reprint strategy
+        (void)0;
+    }
+    // ========================================================================
+    // CHA (Cursor Horizontal Absolute) — \033[<n>G
+    // ========================================================================
+    else if (final_char == 'G') {
+        (void)0;
+    }
+    // ========================================================================
+    // CUB (Cursor Backward) — \033[<n>D  ← CRITICAL for readline redraw
+    // ========================================================================
+    else if (final_char == 'D') {
+        int n = parse_csi_first_int();
+        if (n <= 0) n = 1;
+        for (int i = 0; i < n; i++) {
+            k_putchar('\b');
+        }
+    }
+    // ========================================================================
+    // CUF (Cursor Forward) — \033[<n>C
+    // ========================================================================
+    else if (final_char == 'C') {
+        (void)0;
+    }
+    // ========================================================================
+    // CUU (Cursor Up) — \033[<n>A  and  CUD (Cursor Down) — \033[<n>B
+    // These are INPUT sequences from keyboard, not OUTPUT from Shell.
+    // Shell's readline() consumes them before they reach sys_write.
+    // If they appear here, it means readline failed to parse them.
+    // We silently ignore to prevent garbage on screen.
+    // ========================================================================
+    else if (final_char == 'A' || final_char == 'B') {
+        (void)0;
+    }
+    // ========================================================================
+    // Unknown CSI — ignore silently
+    // ========================================================================
 }
 
 // ========================================================================
@@ -374,15 +445,19 @@ static int sys_write_handler(struct regs* r) {
         for (uint32_t i = 0; i < count; i++) {
             unsigned char c = (unsigned char)cbuf[i];
             
-            // 1. ВСЕГДА отправляем оригинальный байт в Serial
-            serial_putc(c);
-            
-            // 2. State Machine для VGA (фильтрует ESC-последовательности)
+            // ====================================================================
+            // State Machine для VGA + умная фильтрация для Serial
+            // ====================================================================
             switch (ansi_state) {
                 case ANSI_IDLE:
                     if (c == 0x1B) {  // ESC (\033)
                         ansi_state = ANSI_ESCAPE;
+                        // ESC НЕ отправляем в Serial сразу — ждем '['
                     } else {
+                        // Printable ASCII, \n, \r, \t — сразу в оба вывода
+                        if (c == '\n' || c == '\r' || c == '\t' || (c >= 32 && c < 127)) {
+                            serial_putc(c);
+                        }
                         k_putchar(c);
                     }
                     break;
@@ -391,7 +466,15 @@ static int sys_write_handler(struct regs* r) {
                     if (c == '[') {
                         ansi_state = ANSI_COLLECTING;
                         ansi_pos = 0;
+                        // Отправляем ESC [ в Serial (начало CSI-последовательности)
+                        serial_putc(0x1B);
+                        serial_putc('[');
                     } else {
+                        // Bare ESC — отправляем в Serial и VGA как есть
+                        serial_putc(0x1B);
+                        if (c == '\n' || c == '\r' || c == '\t' || (c >= 32 && c < 127)) {
+                            serial_putc(c);
+                        }
                         k_putchar(0x1B);
                         k_putchar(c);
                         ansi_state = ANSI_IDLE;
@@ -399,11 +482,32 @@ static int sys_write_handler(struct regs* r) {
                     break;
                     
                 case ANSI_COLLECTING:
+                    // Параметры CSI (цифры, ';', пробелы) — НЕ отправляем в Serial сразу
+                    // Накопим в ansi_buffer, отправим только после финального символа
                     if ((c >= '0' && c <= '9') || c == ';' || c == ' ') {
                         if (ansi_pos < 31) {
                             ansi_buffer[ansi_pos++] = c;
                         }
                     } else if (c >= 0x40 && c <= 0x7E) {
+                        // Финальный символ CSI — проверяем, можно ли отправить в Serial
+                        
+                        bool send_to_serial = true;
+                        
+                        // [DAY 28 FIX] Фильтруем команды, ломающие Serial-лог:
+                        // - J (ED: Erase in Display) — очистка экрана
+                        // - H/f (CUP: Cursor Position) — прыжок курсора в начало
+                        if (c == 'J') send_to_serial = false;
+                        if (c == 'H' || c == 'f') send_to_serial = false;
+                        
+                        if (send_to_serial) {
+                            // Отправляем накопленные параметры + финальный символ в Serial
+                            for (int j = 0; j < ansi_pos; j++) {
+                                serial_putc(ansi_buffer[j]);
+                            }
+                            serial_putc(c);
+                        }
+                        
+                        // VGA всегда получает полную последовательность
                         if (ansi_pos < 31) {
                             ansi_buffer[ansi_pos++] = c;
                         }
@@ -411,6 +515,7 @@ static int sys_write_handler(struct regs* r) {
                         ansi_state = ANSI_IDLE;
                         ansi_pos = 0;
                     } else {
+                        // Невалидный байт внутри CSI — сброс state machine
                         ansi_state = ANSI_IDLE;
                         ansi_pos = 0;
                     }
@@ -537,7 +642,7 @@ static int sys_brk_handler(struct regs* r) {
             }
             
             heap_vma->end = new_brk;
-            serial_printf("[SYSCALL] sys_brk: Extended heap to 0x%x\n", new_brk);
+            //serial_printf("[SYSCALL] sys_brk: Extended heap to 0x%x\n", new_brk);
         } else if (new_brk < heap_vma->end) {
             heap_vma->end = new_brk;
         }

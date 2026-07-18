@@ -1,7 +1,7 @@
 // ============================================================================
 // SHELL USER — Ring 3 Shell для Enclave Operating System
 // Полноценный user-space shell, работающий ТОЛЬКО через syscalls.
-// Версия: Day 25 Polish (ANSI Colors, Smart LS, Interactive UX)
+// Версия: Day 28 (Readline + History + Arrow Keys)
 // ============================================================================
 
 #include "user_libc.h"
@@ -73,7 +73,6 @@ static void print_help(void) {
 // ============================================================================
 
 static void handle_clear(void) {
-    // ANSI escape code для очистки экрана и сброса курсора в 0,0
     printf("\033[2J\033[H");
     fflush(stdout);
 }
@@ -122,16 +121,12 @@ static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
         int len = strlen(entry.name);
         
         if (entry.type == 4) {
-            // Директория: Синий + Жирный
             printf("  %c " ANSI_BLUE ANSI_BOLD "%s" ANSI_RESET "\n", type_char, entry.name);
         } else if (len > 4 && strcmp(entry.name + len - 4, ".elf") == 0) {
-            // Исполняемый файл: Зеленый + Жирный
             printf("  %c " ANSI_GREEN ANSI_BOLD "%s" ANSI_RESET "\n", type_char, entry.name);
         } else if (len > 2 && strcmp(entry.name + len - 2, ".c") == 0) {
-            // Исходник C: Желтый
             printf("  %c " ANSI_YELLOW "%s" ANSI_RESET "\n", type_char, entry.name);
         } else {
-            // Обычный файл
             printf("  %c %s\n", type_char, entry.name);
         }
         
@@ -304,64 +299,255 @@ static void execute_command(char* buffer) {
 }
 
 // ============================================================================
+// [DAY 28] READLINE: History + Arrow Keys + Line Editing
+// ============================================================================
+
+#define HISTORY_SIZE 32
+#define SCRATCH_SIZE CMD_BUFFER_SIZE
+
+static char history[HISTORY_SIZE][CMD_BUFFER_SIZE];
+static int history_count = 0;
+static int history_view = 0;
+static char scratch[SCRATCH_SIZE];
+static int scratch_len = 0;
+static int last_drawn_len = 0;
+
+static void history_add(const char* line) {
+    if (strlen(line) == 0) return;
+    if (history_count > 0 && strcmp(history[history_count - 1], line) == 0) return;
+    
+    if (history_count < HISTORY_SIZE) {
+        strcpy(history[history_count], line);
+        history_count++;
+    } else {
+        for (int i = 0; i < HISTORY_SIZE - 1; i++) {
+            strcpy(history[i], history[i + 1]);
+        }
+        strcpy(history[HISTORY_SIZE - 1], line);
+    }
+    history_view = history_count;
+    scratch_len = 0;
+}
+
+static int ansi_visible_len(const char* s) {
+    int len = 0;
+    int in_escape = 0;
+    
+    while (*s) {
+        unsigned char c = (unsigned char)*s;
+        if (in_escape) {
+            if (c >= 0x40 && c <= 0x7E) in_escape = 0;
+        } else {
+            if (c == 0x1B) in_escape = 1;
+            else len++;
+        }
+        s++;
+    }
+    return len;
+}
+
+static void redraw_line(const char* prompt, const char* buffer, int cursor_pos) {
+    // 1. Вернуться в начало текущей строки
+    write(STDOUT_FILENO, "\r", 1);
+    
+    // 2. Перепечатать промпт (содержит ANSI-коды для цветов)
+    int prompt_bytes = strlen(prompt);
+    int prompt_visible = ansi_visible_len(prompt);
+    write(STDOUT_FILENO, prompt, prompt_bytes);
+    
+    // 3. Перепечатать buffer полностью
+    int buf_len = strlen(buffer);
+    write(STDOUT_FILENO, buffer, buf_len);
+    
+    int current_visible = prompt_visible + buf_len;
+    
+    // 4. Затереть "хвосты" от предыдущей более длинной строки
+    if (current_visible < last_drawn_len) {
+        int spaces_needed = last_drawn_len - current_visible;
+        if (current_visible + spaces_needed > 200) {
+            spaces_needed = 200 - current_visible;
+            if (spaces_needed < 0) spaces_needed = 0;
+        }
+        for (int i = 0; i < spaces_needed; i++) {
+            write(STDOUT_FILENO, " ", 1);
+        }
+    }
+    last_drawn_len = current_visible;
+    
+    // 5. Если курсор НЕ в конце строки — делаем reprint до позиции курсора
+    //    Это гарантирует корректное позиционирование без зависимости от
+    //    ANSI cursor movement (который может работать некорректно в VGA/FB)
+    if (cursor_pos < buf_len) {
+        write(STDOUT_FILENO, "\r", 1);
+        write(STDOUT_FILENO, prompt, prompt_bytes);
+        write(STDOUT_FILENO, buffer, cursor_pos);
+    }
+    
+    fflush(stdout);
+}
+
+static int readline(const char* prompt, char* buffer, int max_size) {
+    typedef enum { STATE_NORMAL, STATE_ESC, STATE_CSI } read_state_t;
+    read_state_t state = STATE_NORMAL;
+    
+    char csi_buf[32];
+    int csi_pos = 0;
+    
+    int pos = 0;
+    int buf_len = 0;
+    buffer[0] = '\0';
+    
+    last_drawn_len = ansi_visible_len(prompt);
+    
+    write(STDOUT_FILENO, prompt, strlen(prompt));
+    fflush(stdout);
+    
+    while (1) {
+        char c;
+        ssize_t ret = read(STDIN_FILENO, &c, 1);
+        
+        if (ret <= 0) { sleep(0); continue; }
+        
+        if (state == STATE_ESC) {
+            if (c == '[') { state = STATE_CSI; csi_pos = 0; continue; }
+            else { state = STATE_NORMAL; }
+        }
+        else if (state == STATE_CSI) {
+            if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
+                if (csi_pos < 31) csi_buf[csi_pos++] = c;
+                continue;
+            }
+            if ((c >= 0x40 && c <= 0x7E)) {
+                csi_buf[csi_pos] = '\0';
+                state = STATE_NORMAL;
+                
+                if (c == 'A' && csi_pos == 0) {
+                    if (history_view > 0) {
+                        if (history_view == history_count) { strcpy(scratch, buffer); scratch_len = buf_len; }
+                        history_view--;
+                        strcpy(buffer, history[history_view]);
+                        buf_len = strlen(buffer); pos = buf_len;
+                        redraw_line(prompt, buffer, pos);
+                    }
+                    continue;
+                }
+                else if (c == 'B' && csi_pos == 0) {
+                    if (history_view < history_count) {
+                        history_view++;
+                        if (history_view == history_count) { strcpy(buffer, scratch); buf_len = scratch_len; }
+                        else { strcpy(buffer, history[history_view]); buf_len = strlen(buffer); }
+                        pos = buf_len; redraw_line(prompt, buffer, pos);
+                    }
+                    continue;
+                }
+                else if (c == 'C' && csi_pos == 0) { if (pos < buf_len) { pos++; redraw_line(prompt, buffer, pos); } continue; }
+                else if (c == 'D' && csi_pos == 0) { if (pos > 0) { pos--; redraw_line(prompt, buffer, pos); } continue; }
+                else if (c == 'H' && csi_pos == 0) { if (pos != 0) { pos = 0; redraw_line(prompt, buffer, pos); } continue; }
+                else if (c == 'F' && csi_pos == 0) { if (pos != buf_len) { pos = buf_len; redraw_line(prompt, buffer, pos); } continue; }
+                else if (c == '~' && csi_pos == 1 && csi_buf[0] == '3') {
+                    if (pos < buf_len) {
+                        memmove(&buffer[pos], &buffer[pos + 1], buf_len - pos);
+                        buf_len--; buffer[buf_len] = '\0'; redraw_line(prompt, buffer, pos);
+                    }
+                    continue;
+                }
+                continue;
+            }
+            state = STATE_NORMAL;
+            continue;
+        }
+        
+        if ((unsigned char)c == 0x1B) { state = STATE_ESC; continue; }
+        
+        if (c == '\n' || c == '\r') {
+            write(STDOUT_FILENO, "\n", 1);
+            buffer[buf_len] = '\0';
+            return 0;
+        }
+        
+        if (c == '\b' || c == 127) {
+            if (pos > 0) {
+                memmove(&buffer[pos - 1], &buffer[pos], buf_len - pos + 1);
+                pos--; buf_len--; redraw_line(prompt, buffer, pos);
+            }
+            continue;
+        }
+        
+        if ((unsigned char)c < 32) {
+            switch (c) {
+                case 1: if (pos != 0) { pos = 0; redraw_line(prompt, buffer, pos); } break;
+                case 3:
+                    write(STDOUT_FILENO, "^C\n", 3);
+                    buffer[0] = '\0'; buf_len = 0; pos = 0;
+                    history_view = history_count; last_drawn_len = 0;
+                    return 0;
+                case 4:
+                    if (buf_len == 0) { write(STDOUT_FILENO, "\n", 1); return -1; }
+                    if (pos < buf_len) {
+                        memmove(&buffer[pos], &buffer[pos + 1], buf_len - pos);
+                        buf_len--; buffer[buf_len] = '\0'; redraw_line(prompt, buffer, pos);
+                    }
+                    break;
+                case 5: if (pos != buf_len) { pos = buf_len; redraw_line(prompt, buffer, pos); } break;
+                case 11: if (pos < buf_len) { buffer[pos] = '\0'; buf_len = pos; redraw_line(prompt, buffer, pos); } break;
+                case 12:
+                    write(STDOUT_FILENO, "\033[2J\033[H", 7);
+                    last_drawn_len = 0; redraw_line(prompt, buffer, pos);
+                    break;
+                case 21:
+                    if (pos > 0) {
+                        memmove(buffer, &buffer[pos], buf_len - pos + 1);
+                        buf_len -= pos; pos = 0; redraw_line(prompt, buffer, pos);
+                    }
+                    break;
+                default: break;
+            }
+            continue;
+        }
+        
+        if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
+            if (buf_len < max_size - 1) {
+                memmove(&buffer[pos + 1], &buffer[pos], buf_len - pos + 1);
+                buffer[pos] = c;
+                pos++; buf_len++;
+                redraw_line(prompt, buffer, pos);
+            }
+            continue;
+        }
+    }
+}
+
+// ============================================================================
 // ГЛАВНЫЙ ЦИКЛ SHELL
 // ============================================================================
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
     
-    // Очищаем экран при старте, чтобы скрыть boot-логи ядра
     handle_clear();
     
     printf(ANSI_CYAN ANSI_BOLD "Welcome to Enclave OS Shell (Ring 3)" ANSI_RESET "\n");
     printf("Type '" ANSI_YELLOW "help" ANSI_RESET "' for available commands.\n\n");
+    printf(ANSI_YELLOW "Arrow keys, Home/End, Delete, Ctrl+A/E/K/U/L/C/D supported." ANSI_RESET "\n\n");
 
     char buffer[CMD_BUFFER_SIZE];
-    int pos = 0;
-
+    
     while (1) {
-        // Цветной Prompt: user@host:/# 
-        printf(ANSI_GREEN ANSI_BOLD "enclave" ANSI_RESET "@" ANSI_MAGENTA "os" ANSI_RESET ":" ANSI_CYAN ANSI_BOLD "/" ANSI_RESET "# ");
-        fflush(stdout);
-
-        pos = 0;
-        buffer[0] = '\0';
-
-        // Чтение команды посимвольно
-        while (1) {
-            char c;
-            ssize_t ret = read(STDIN_FILENO, &c, 1);
-            
-            if (ret <= 0) {
-                // Буфер клавиатуры пуст. Отдаем CPU планировщику (sys_yield).
-                sleep(0); 
-                continue;
-            }
-            
-            if (c == '\n') {
-                printf("\n");
-                buffer[pos] = '\0';
-                break;
-            }
-            else if (c == '\b' || c == 127) { // Backspace или DEL
-                if (pos > 0) {
-                    pos--;
-                    buffer[pos] = '\0';
-                    printf("\b \b");
-                    fflush(stdout);
-                }
-            }
-            else if (c >= 32 && c < 127) { // Printable ASCII
-                if (pos < CMD_BUFFER_SIZE - 1) {
-                    buffer[pos++] = c;
-                    buffer[pos] = '\0';
-                    printf("%c", c);
-                    fflush(stdout);
-                }
-            }
+        const char* prompt = ANSI_GREEN ANSI_BOLD "enclave" ANSI_RESET "@" 
+                             ANSI_MAGENTA "os" ANSI_RESET ":" 
+                             ANSI_CYAN ANSI_BOLD "/" ANSI_RESET "# ";
+        
+        int result = readline(prompt, buffer, CMD_BUFFER_SIZE);
+        
+        if (result == -1) {
+            printf(ANSI_YELLOW "exit" ANSI_RESET "\n");
+            exit(0);
         }
-
-        // Выполнение команды
+        
+        if (strlen(buffer) == 0) continue;
+        
+        history_add(buffer);
+        
         execute_command(buffer);
     }
 

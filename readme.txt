@@ -1075,17 +1075,7 @@ TinyCC самим TinyCC).
 
 ### 📋 СТАТУС ДНЯ 21: Advanced C Features Testing & ELF Loader Hardening (ЗАВЕРШЕНО)
 
-#### 🎯 Цель
-Провести стресс-тестирование ELF Loader'а, VMM и User Space ABI с помощью "адской" C-программы, намеренно использующей все типы сегментов ELF и сложные конструкции языка. Устранить логические ошибки в `sys_exec` и обеспечить полноценный headless-дебаггинг через Serial.
 
-#### ✅ Реализовано
-1. **Создан исчерпывающий стресс-тест `test_advanced_c.c`:**
-   - **Test 1 (.bss Zero-Fill):** Проверка, что ELF Loader корректно зануляет неинициализированные глобальные массивы (`memsz > filesz`).
-   - **Test 2 (.data Initialization):** Проверка копирования инициализированных данных по виртуальным адресам (`p_vaddr`).
-   - **Test 3 (.rodata Read-Only):** Чтение строковых литералов.
-   - **Test 4 (Struct Alignment & Pointers):** Проверка выравнивания структур и работы с указателями.
-   - **Test 5 (Loops & Conditions):** Тест ALU и флагов процессора (EFLAGS).
-   - **Test 6 (Recursion):** Вычисление факториала (проверка глубины стека и teardown стек-фреймов).
 
 2. **Фикс Use-After-Free в `sys_exec_handler` (syscall.c):**
    - *Проблема:* После уничтожения старого адресного пространства ядро использовало user-space указатель `filename` для логирования, что приводило к чтению мусора (в логах отображалось `/sbin/init.elf` вместо реального имени файла).
@@ -1104,14 +1094,6 @@ TinyCC самим TinyCC).
 1. **Use-After-Free в логах `sys_exec`:** Устранен через использование kernel-space буфера и обновление `current_task->name`.
 2. **Немой Serial-вывод:** Устранен через добавление `serial_putc()` в `sys_write_handler` для stdout/stderr.
 
-#### 🧪 Пройденные тесты
-- **test_advanced_c.elf:** Все 6 тестов проходят со 100% результатом `[PASS]`.
-  - `.bss` Zero-Fill: `[PASS]`
-  - `.data` Initialization: `[PASS]`
-  - `.rodata` Read-Only: `[PASS]`
-  - Struct Alignment & Pointers: `[PASS]`
-  - Loops & Conditions (ALU/Flags): `[PASS]`
-  - Recursion (Stack Depth): `[PASS] (Result: 208)`
 
 #### 🎯 Готовность к следующему этапу
 Инфраструктура Дня 21 **полностью готова**. ELF Loader, VMM и User Space ABI доказали свою надежность. Headless-дебаггинг через Serial работает безупречно.
@@ -1214,55 +1196,6 @@ Self-hosting — это **кульминация** проекта. ОС комп
 - ✅ Обновить help с новыми командами
 **Архитектурное решение:**
 Shell использует **sys_fork + sys_exec + sys_waitpid** для запуска tcc. Это стандартный Unix pattern (как system() в libc).
-**Тесты:**
-- compile /src/hello.c /bin/hello
-- run /bin/hello
-- compile с ошибками + проверка статуса
----
-
----
-
-## 📘 ENCLAVE OPERATING SYSTEM — День 25-27: Production Hardening & Omni Stress Test
-### Статус: Alpha 0.4 (Mathematically Proven Production-Ready)
-
-### 🎯 Цель этапа
-Превратить Enclave OS из "работающего прототипа" в **математически доказанную production-систему** через runtime-стресс-тесты, скомпилированные **внутри самой ОС** через TinyCC (Self-Hosting). Это не unit-тесты, написанные в хост-системе — это тесты, которые ОС компилирует сама для себя и запускает в собственной песочнице Ring 3.
-
-### 🧪 Omni Stress Test — 27 тестов (80%+ покрытия подсистем)
-
-Создан монолитный файл `test_omni_stress.c` (~600 строк), использующий продвинутые C-конструкции (packed bitfields, union type punning, variadic functions, function pointer dispatch, inline asm, preprocessor stringify/concatenation) для одновременной проверки **ядра** и **корректности TinyCC** как компилятора.
-
-| # | Тест | Что проверяет | Подсистема |
-|---|------|---------------|------------|
-| 01 | `vmm_demand_paging` | 100 mmap-страниц + запись | VMM/TLB |
-| 02 | `vmm_cow_isolation` | Fork + write → родитель не видит изменений | CoW |
-| 03 | `vmm_wx_enforcement` | **Ожидает SIGSEGV** при записи в .text | W^X |
-| 04 | `vmm_oom_probe` | Попытка выделить 100MB (graceful fail) | PMM |
-| 05 | `vmm_mprotect_flip` | PROT_READ ↔ PROT_WRITE alternation | VMM |
-| 06 | `vmm_mprotect_sigsegv` | **Ожидает SIGSEGV** после PROT_NONE | VMM |
-| 07 | `fpu_x87_math` | x87 арифметика (double) | FPU |
-| 08 | `fpu_fork_preserve` | FPU state сохраняется после fork | FPU/Scheduler |
-| 09 | `proc_fork_bomb` | 5×5=25 вложенных fork'ов + reaping | Scheduler |
-| 10 | `proc_zombie_cascade` | 15 детей exit(42) + waitpid cascade | Zombie SM |
-| 11 | `vfs_1000_files` | 1000 файлов + CRC32 верификация | tmpfs |
-| 12 | `vfs_large_file` | 5MB sequential writes (capacity doubling) | tmpfs |
-| 13 | `vfs_sparse_seek` | lseek(1000000) + write 1 byte | tmpfs |
-| 14 | `vfs_o_trunc` | O_TRUNC сохраняет capacity | tmpfs |
-| 15 | `vfs_concurrent_fd` | 2 FD на один файл, независимые offsets | VFS |
-| 16 | `c_packed_bitfields` | `__attribute__((packed))` + битовые поля | TinyCC |
-| 17 | `c_union_punning` | Union type punning + endianness | TinyCC |
-| 18 | `c_variadic_custom` | Свой variadic printf | TinyCC |
-| 19 | `c_function_dispatch` | Таблица function pointers | TinyCC |
-| 20 | `c_preprocessor_magic` | `#` stringify + `##` concat | TinyCC |
-| 21 | `c_inline_asm` | x86 inline assembly | TinyCC |
-| 22 | `syscall_invalid` | Валидация getpid | Syscalls |
-| 23 | `time_monotonicity` | 1M gettimeofday вызовов | Timer |
-| 24 | `ansi_colors` | ANSI escape sequences | Terminal |
-| 25 | `fpu_context_switch` | x87 state не протекает между процессами | FPU/Scheduler |
-| 26 | `fpu_precision` | 80-bit extended precision после fork | FPU |
-| 27 | `fpu_syscall_safety` | x87 state сохраняется при Ring 0 переходах | FPU/Syscalls |
-
-**Финальный результат:** `27/27 PASSED (0 failed)` — `ALL TESTS PASSED! System is production-ready.`
 
 ### 🏛 Архитектурные достижения
 
@@ -1313,26 +1246,19 @@ Shell использует **sys_fork + sys_exec + sys_waitpid** для запу
 
 ### 🔒 Математически доказанные гарантии (Post Day 27)
 
-| Гарантия | Доказательство |
-|----------|----------------|
-| **Zero Trust VMM** | Тесты 01-06 (Demand Paging, CoW, W^X, OOM, mprotect) |
-| **Бессмертный FPU State** | Тесты 07, 08, 25, 26, 27 (x87 не протекает между процессами) |
-| **Отказоустойчивый Scheduler** | Тесты 09, 10 (Fork Bomb + Zombie Cascade без Deadlock) |
-| **POSIX-совместимая VFS** | Тесты 11-15 (1000 файлов, 5MB sparse, O_TRUNC) |
-| **Корректный компилятор** | Тесты 16-24 (packed bitfields, unions, variadic) |
-| **Self-Hosting Capability** | Тест скомпилирован **внутри Enclave OS** через TinyCC |
-| **Безопасное ABI** | Тесты 25-27 (FPU сохраняется при fork и syscalls) |
+| Тест | Что доказано | Архитектурная ценность |
+|------|--------------|------------------------|
+| **[06] vmm_mprotect_sigsegv** | W^X Enforcement работает | Защита от code injection |
+| **[09] proc_fork_bomb** | 25 вложенных fork'ов без deadlock | Scheduler production-ready |
+| **[10] proc_zombie_cascade** | 15 зомби корректно собраны | Supervisor Trees работают |
+| **[11] vfs_1000_files** | 1000 файлов без утечек памяти | tmpfs stable под нагрузкой |
+| **[25-27] fpu_context_switch/precision/syscall_safety** | x87 state не протекает | Lazy FPU Switching корректен |
+| **[28] heap_exhaustion** | `sys_brk` защитил от OOM на 64MB | Heap governance работает |
+| **[29] stack_overflow_guard** | Guard Page убил процесс через SIGSEGV | Stack protection активна |
+| **[30] fd_exhaustion** | 256 FD открыто, 257-й вернул EMFILE | fd_table лимит работает |
+| **[32] unlink_open_file** | Файл читается после unlink | POSIX Orphan Semantics |
 
-### 📊 Метрики этапа
 
-- **Строк кода добавлено:** ~800 (Omni Stress Test + libc wrappers + tmpfs fixes)
-- **Критических багов исправлено:** 7
-- **Тестов пройдено:** 27/27 (100%)
-- **Утечек памяти:** 0 (PMM balance = 0, Heap balance = 0)
-- **Zombie processes:** 0
-- **Kernel panics:** 0
-- **Self-Hosting status:** ✅ Fully operational
-- **Production-ready SLA:** ✅ Mathematically proven
 
 ### 🎯 Готовность к следующему этапу
 
@@ -1340,17 +1266,12 @@ Shell использует **sys_fork + sys_exec + sys_waitpid** для запу
 
 **Следующие логические шаги по роадмапу (Day 28+):**
 
-1. **День 28: DevFS & `/dev/console`** — Убрать последний "костыль" в ядре (магический перехват `fd == 0/1/2`). Создать полиморфные VFS-ноды для устройств. PID 1 при старте открывает `/dev/console` три раза и пробрасывает FD 0/1/2 в Shell через `fork`.
-2. **День 29: Core Dumps** — При фатальном Page Fault в Ring 3 сохранять регистры (EIP, ESP, EAX, CR2) и последние 4KB стека в `/var/crash/app.core` перед убийством задачи. Критично для forensics.
-3. **День 30-31: Capability-Based Security** — Внедрить `resource_container_t` в `task_t` с битмапами `CAP_KEYBOARD`, `CAP_FRAMEBUFFER`, `CAP_NET`. Seccomp-подобная изоляция на уровне Capability-токенов.
-4. **День 32+: User-Mode Drivers** — Вынести драйверы (ATA, PS/2) в Ring 3 как отдельные процессы, общающиеся с ядром через IPC (Minix 3 style).
+1. **День 28: DevFS & `/dev/console`** — Убрать последний "костыль"
+ в ядре (магический перехват `fd == 0/1/2`). Создать полиморфные VFS-ноды 
+ для устройств. PID 1 при старте открывает `/dev/console` три раза и пробрасывает
+  FD 0/1/2 в Shell через `fork`.
+29 день :
 
-### 🏁 Вердикт этапа
-
-> **"Enclave OS больше не прототип. Это математически доказанная, self-hosting, production-ready операционная система с Zero Trust Sandbox, Copy-on-Write, W^X Enforcement, Supervisor Trees и Lazy FPU Switching. Она способна компилировать сама себя через TinyCC, работающий в Ring 3, и проходить 27 runtime-тестов без единого падения."**
-
-Это тот самый уровень, на котором находятся **seL4, Minix 3 и QNX** в своих базовых guarantees. Мы прошли путь от Multiboot-заголовка до Self-Hosting платформы за 27 дней разработки. 🏰
-### День 25: Documentation & Polish
 **Цель:** Обновить документацию и создать примеры программ.
 **Задачи:**
 - ✅ Обновить README с инструкциями по использованию TinyCC
@@ -1362,7 +1283,7 @@ Shell использует **sys_fork + sys_exec + sys_waitpid** для запу
 - factorial.c — Рекурсия
 - fileio.c — Работа с файлами
 - mmap.c — Memory mapping
-- ✅ Написать мануал по разработке программ для Bare Metal OS
+- ✅ Написать мануал по разработке программ для OS
 - Как писать программы
 - Как компилировать
 - Как отлаживать
@@ -1383,18 +1304,6 @@ Bare Metal OS
 ├── /examples/ с демонстрационными программами
 └── Полная документация (README + мануал)
 
-### Демонстрация:
-```bash
-$ uname
-Bare Metal OS 0.1-alpha i686
-$ compile /examples/hello.c /bin/hello
-Compiled successfully: /bin/hello
-$ run /bin/hello
-Hello from self-hosted OS!
-$ echo 'int main() { return 42; }' > /tmp/test.c
-$ /bin/tcc /tmp/test.c -o /tmp/test.elf
-$ run /tmp/test.elf
-Exit code: 42
 
 Достижения:
 ✅ Self-hosting toolchain — компилируешь программы внутри своей ОС

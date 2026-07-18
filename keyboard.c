@@ -1,5 +1,3 @@
-//keyboard.c
-
 #include "keyboard.h"
 #include "port_io.h"
 #include "idt.h"
@@ -53,6 +51,16 @@ char k_getchar(void) {
     return c;
 }
 
+// ============================================================================
+// [DAY 28] Helper: pushes a multi-byte ANSI escape sequence into the ring buffer
+// Used for arrow keys, Home, End, Delete to feed Shell's readline() state machine.
+// ============================================================================
+static void kbd_push_ansi_seq(const char* seq) {
+    while (*seq) {
+        kbd_buffer_push(*seq++);
+    }
+}
+
 // --- ТАБЛИЦЫ И ТРАНСЛЯЦИЯ ---
 
 static const char scancode_lower[] = {
@@ -95,9 +103,27 @@ static void keyboard_handler(struct regs* r) {
         extended_key = 1;
         return;
     }
+    
+    // ========================================================================
+    // [DAY 28] Extended Key Handler: Arrow keys, Home, End, Delete
+    // Generates ANSI escape sequences for Shell's readline() state machine.
+    // ========================================================================
     if (extended_key) {
         extended_key = 0;
-        return; 
+        // Ignore break codes (key release) for extended keys
+        if (scancode & 0x80) return;
+        
+        switch (scancode) {
+            case 0x48: kbd_push_ansi_seq("\033[A");    return; // Up Arrow
+            case 0x50: kbd_push_ansi_seq("\033[B");    return; // Down Arrow
+            case 0x4D: kbd_push_ansi_seq("\033[C");    return; // Right Arrow
+            case 0x4B: kbd_push_ansi_seq("\033[D");    return; // Left Arrow
+            case 0x47: kbd_push_ansi_seq("\033[H");    return; // Home
+            case 0x4F: kbd_push_ansi_seq("\033[F");    return; // End
+            case 0x53: kbd_push_ansi_seq("\033[3~");   return; // Delete (4-byte seq)
+            // Ignore other extended keys (Insert=0x52, PgUp=0x49, PgDn=0x51, etc.)
+            default: return;
+        }
     }
 
     if (scancode & 0x80) {
@@ -137,8 +163,18 @@ static void keyboard_handler(struct regs* r) {
 
     char c = translate_scancode(scancode);
     if (c != 0) {
-        if (!ctrl_pressed) {
-            kbd_buffer_push(c); // Кладем обычный символ в буфер
+        if (ctrl_pressed) {
+            // [DAY 28] Ctrl+letter -> ASCII control characters (1-26)
+            // Ctrl+A=1 (SOH), Ctrl+C=3 (ETX), Ctrl+D=4 (EOT), Ctrl+E=5 (ENQ),
+            // Ctrl+K=11 (VT), Ctrl+L=12 (FF), Ctrl+U=21 (NAK)
+            if (c >= 'a' && c <= 'z') {
+                kbd_buffer_push(c - 'a' + 1);
+            } else if (c >= 'A' && c <= 'Z') {
+                kbd_buffer_push(c - 'A' + 1);
+            }
+            // Ignore Ctrl with non-letter keys
+        } else {
+            kbd_buffer_push(c);
         }
     }
 }

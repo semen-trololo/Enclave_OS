@@ -166,8 +166,8 @@ int vma_add(task_t* task, uint32_t start, uint32_t end, uint32_t flags) {
         current->next = new_node;
     }
 
-    serial_printf("[VMA] Added: 0x%x - 0x%x (flags: 0x%x)\n",
-                  new_node->start, new_node->end, new_node->flags);
+    //serial_printf("[VMA] Added: 0x%x - 0x%x (flags: 0x%x)\n",
+       //           new_node->start, new_node->end, new_node->flags);
                   
     return 0; // Успех
 }

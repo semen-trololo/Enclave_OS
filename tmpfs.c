@@ -28,6 +28,10 @@ typedef struct {
 
 vfs_node_t* tmpfs_root = NULL;
 
+// Forward declarations
+static void tmpfs_close(vfs_node_t* node);
+static int tmpfs_unlink(vfs_node_t* parent, const char* name);
+
 // ============================================================================
 // КОЛЛБЭКИ TMPFS
 // ============================================================================
@@ -48,20 +52,7 @@ static int tmpfs_open(vfs_node_t* node, uint32_t flags) {
     return 0;
 }
 
-// 🛡️ TRUE POSIX CLOSE: Освобождение ресурсов для "сирот" (Orphaned Nodes)
-static void tmpfs_close(vfs_node_t* node) {
-    // Вызывается из sys_close (vfs.c), когда ref_count падает до 0.
-    // Если файл просто закрыт, но существует в дереве, данные НЕ освобождаем!
-    // Если файл был удален (is_unlinked == true), освобождаем данные.
-    if (node->is_unlinked) {
-        tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)node->private_data;
-        if (fdata) {
-            if (fdata->data) kfree(fdata->data);
-            kfree(fdata);
-        }
-        node->private_data = NULL;
-    }
-}
+
 
 static int tmpfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
     tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)node->private_data;
@@ -176,31 +167,48 @@ static vfs_node_t* tmpfs_create(vfs_node_t* parent, const char* name, uint32_t m
     return new_node;
 }
 
+// 🛡️ TRUE POSIX CLOSE: Освобождение ресурсов для "сирот" (Orphaned Nodes)
+static void tmpfs_close(vfs_node_t* node) {
+    // Вызывается из sys_close (vfs.c), когда ref_count падает до 0.
+    // Если файл просто закрыт, но существует в дереве, данные НЕ освобождаем!
+    // Если файл был удален (is_unlinked == true), освобождаем только private_data.
+    // Сам vfs_node_t освобождается в sys_close после вызова node->close().
+    if (node->is_unlinked) {
+        tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)node->private_data;
+        if (fdata) {
+            if (fdata->data) kfree(fdata->data);
+            kfree(fdata);
+        }
+        node->private_data = NULL;
+        
+        // ❌ УБРАЛИ: kfree(node) — это делает sys_close после вызова tmpfs_close
+    }
+}
+
 static int tmpfs_unlink(vfs_node_t* parent, const char* name) {
-    //serial_printf("[TMPFS_UNLINK] Called on parent=0x%x, looking for '%s'\n", (uint32_t)parent, name);
-    //serial_printf("[TMPFS_UNLINK] Parent first_child=0x%x\n", (uint32_t)parent->first_child);
-    
     vfs_node_t* prev = NULL;
     vfs_node_t* curr = parent->first_child;
 
     while (curr) {
         if (k_strcmp(curr->name, name) == 0) {
-            //serial_printf("[TMPFS_UNLINK] >>> FOUND! Removing node 0x%x from list.\n", (uint32_t)curr);
-            
+            // 1. Убираем из связного списка VFS
             if (prev) prev->next_sibling = curr->next_sibling;
             else parent->first_child = curr->next_sibling;
             
             curr->parent = NULL;
             curr->next_sibling = NULL;
             
-            //serial_printf("[TMPFS_UNLINK] >>> SUCCESS! Node removed. New first_child=0x%x\n", (uint32_t)parent->first_child);
+            // 2. Помечаем как удалённую (POSIX Orphan Semantics)
+            // Освобождение памяти — ответственность sys_unlink в vfs.c
+            // через tmpfs_close при последнем close() или сразу.
+            curr->is_unlinked = 1;
+            
             return 0;
         }
         prev = curr;
         curr = curr->next_sibling;
     }
     
-    serial_printf("[TMPFS_UNLINK] >>> NOT FOUND in parent 0x%x!\n", (uint32_t)parent);
     return -2; // ENOENT
 }
 

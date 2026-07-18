@@ -24,7 +24,7 @@ typedef struct vma_node vma_node_t;
 // ============================================================================
 // PROCESS TREE FLAGS (Day 14)
 // ============================================================================
-#define TASK_MAX_OPEN_FILES 16
+#define TASK_MAX_OPEN_FILES 256
 
 // ============================================================================
 // TASK STRUCTURE (PCB - Process Control Block)

@@ -283,9 +283,14 @@ int sys_open(const char* pathname, uint32_t flags, uint32_t mode)  {
         }
     }
     
-    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) return -VFS_EACCES;
-    if (node->open && node->open(node, flags) != 0) return -VFS_EACCES;
-    
+    if ((node->flags & FS_SYSTEM) && !(node->flags & FS_DIRECTORY)) {
+        serial_printf("[SYS_OPEN] FAIL: FS_SYSTEM flag on node '%s'\n", pathname);
+        return -VFS_EACCES;
+    }
+    if (node->open && node->open(node, flags) != 0){
+        serial_printf("[SYS_OPEN] FAIL: node->open() returned error for '%s'\n", pathname);
+        return -VFS_EACCES;
+    }
     // 🛡️ CRITICAL: Increment inode ref_count under cli/sti
     __asm__ volatile("cli");
     node->ref_count++;
@@ -293,6 +298,7 @@ int sys_open(const char* pathname, uint32_t flags, uint32_t mode)  {
     
     open_file_t* of = (open_file_t*)kmalloc(sizeof(open_file_t));
     if (!of) {
+        serial_printf("[SYS_OPEN] FAIL: kmalloc(open_file_t) returned NULL\n");
         __asm__ volatile("cli");
         node->ref_count--;
         __asm__ volatile("sti");
@@ -310,7 +316,7 @@ int sys_open(const char* pathname, uint32_t flags, uint32_t mode)  {
             return i;
         }
     }
-    
+    serial_printf("[SYS_OPEN] FAIL: fd_table exhausted (TASK_MAX_OPEN_FILES=%d reached)\n", TASK_MAX_OPEN_FILES);
     kfree(of);
     __asm__ volatile("cli");
     node->ref_count--;
