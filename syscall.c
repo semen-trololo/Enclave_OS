@@ -271,165 +271,6 @@ static int sys_exit_handler(struct regs* r) {
     return 0;
 }
 
-// ========================================================================
-// ANSI State Machine для парсинга escape-последовательностей
-// ========================================================================
-typedef enum {
-    ANSI_IDLE,
-    ANSI_ESCAPE,
-    ANSI_COLLECTING
-} ansi_state_t;
-
-static ansi_state_t ansi_state = ANSI_IDLE;
-static char ansi_buffer[32];
-static int ansi_pos = 0;
-
-static const uint8_t ansi_fg_map[8] = {
-    K_COLOR_BLACK, K_COLOR_RED, K_COLOR_GREEN, K_COLOR_BROWN,
-    K_COLOR_BLUE, K_COLOR_MAGENTA, K_COLOR_CYAN, K_COLOR_LIGHT_GREY
-};
-
-static const uint8_t ansi_fg_bright_map[8] = {
-    K_COLOR_DARK_GREY, K_COLOR_LIGHT_RED, K_COLOR_LIGHT_GREEN, K_COLOR_YELLOW,
-    K_COLOR_LIGHT_BLUE, K_COLOR_LIGHT_MAGENTA, K_COLOR_LIGHT_CYAN, K_COLOR_WHITE
-};
-
-// ============================================================================
-// [DAY 28] Helper: parse first integer from ANSI CSI buffer (non-nested)
-// Used by process_ansi_csi to extract numeric parameters like \033[3D → 3
-// ============================================================================
-static int parse_csi_first_int(void) {
-    int num = 0;
-    bool has_num = false;
-    for (int i = 0; i < ansi_pos - 1; i++) {
-        if (ansi_buffer[i] >= '0' && ansi_buffer[i] <= '9') {
-            num = num * 10 + (ansi_buffer[i] - '0');
-            has_num = true;
-        } else {
-            break;
-        }
-    }
-    return has_num ? num : 0;
-}
-
-static void process_ansi_csi(void) {
-    if (ansi_pos == 0) return;
-    
-    char final_char = ansi_buffer[ansi_pos - 1];
-    
-    // ========================================================================
-    // SGR (Select Graphic Rendition) — Colors
-    // ========================================================================
-    if (final_char == 'm') {
-        static uint8_t current_fg = K_COLOR_LIGHT_GREY;
-        static uint8_t current_bg = K_COLOR_BLACK;
-        bool bold = false;
-        
-        if (ansi_pos == 1) {
-            current_fg = K_COLOR_LIGHT_GREY;
-            current_bg = K_COLOR_BLACK;
-        } else {
-            int i = 0;
-            int limit = ansi_pos - 1;
-            while (i < limit) {
-                while (i < limit && ansi_buffer[i] == ' ') i++;
-                int num = 0;
-                bool has_num = false;
-                while (i < limit && ansi_buffer[i] >= '0' && ansi_buffer[i] <= '9') {
-                    num = num * 10 + (ansi_buffer[i] - '0');
-                    has_num = true;
-                    i++;
-                }
-                if (has_num) {
-                    if (num == 0) {
-                        current_fg = K_COLOR_LIGHT_GREY;
-                        current_bg = K_COLOR_BLACK;
-                        bold = false;
-                    } else if (num == 1) {
-                        bold = true;
-                    } else if (num >= 30 && num <= 37) {
-                        current_fg = ansi_fg_map[num - 30];
-                        if (bold) {
-                            if (current_fg == K_COLOR_BROWN) current_fg = K_COLOR_YELLOW;
-                            else if (current_fg < 8) current_fg += 8;
-                        }
-                    } else if (num >= 40 && num <= 47) {
-                        current_bg = ansi_fg_map[num - 40];
-                    } else if (num >= 90 && num <= 97) {
-                        current_fg = ansi_fg_bright_map[num - 90];
-                    }
-                }
-                if (i < limit && ansi_buffer[i] == ';') i++;
-            }
-        }
-        k_set_color(current_fg, current_bg);
-    }
-    // ========================================================================
-    // ED (Erase in Display) — Clear screen
-    // ========================================================================
-    else if (final_char == 'J') {
-        int mode = 0;
-        if (ansi_pos > 1 && ansi_buffer[0] >= '0' && ansi_buffer[0] <= '9') {
-            mode = ansi_buffer[0] - '0';
-        }
-        if (mode == 2 || mode == 3 || ansi_pos == 1) {
-            k_clear();
-        }
-    }
-    // ========================================================================
-    // EL (Erase in Line) — Clear to End of Line
-    // ========================================================================
-    else if (final_char == 'K') {
-        // Shell handles this via space-padding in redraw_line()
-        (void)0;
-    }
-    // ========================================================================
-    // CUP (Cursor Position) — \033[<row>;<col>H
-    // ========================================================================
-    else if (final_char == 'H' || final_char == 'f') {
-        // Ignored — Shell uses \r + reprint strategy
-        (void)0;
-    }
-    // ========================================================================
-    // CHA (Cursor Horizontal Absolute) — \033[<n>G
-    // ========================================================================
-    else if (final_char == 'G') {
-        (void)0;
-    }
-    // ========================================================================
-    // CUB (Cursor Backward) — \033[<n>D  ← CRITICAL for readline redraw
-    // ========================================================================
-    else if (final_char == 'D') {
-        int n = parse_csi_first_int();
-        if (n <= 0) n = 1;
-        for (int i = 0; i < n; i++) {
-            k_putchar('\b');
-        }
-    }
-    // ========================================================================
-    // CUF (Cursor Forward) — \033[<n>C
-    // ========================================================================
-    else if (final_char == 'C') {
-        (void)0;
-    }
-    // ========================================================================
-    // CUU (Cursor Up) — \033[<n>A  and  CUD (Cursor Down) — \033[<n>B
-    // These are INPUT sequences from keyboard, not OUTPUT from Shell.
-    // Shell's readline() consumes them before they reach sys_write.
-    // If they appear here, it means readline failed to parse them.
-    // We silently ignore to prevent garbage on screen.
-    // ========================================================================
-    else if (final_char == 'A' || final_char == 'B') {
-        (void)0;
-    }
-    // ========================================================================
-    // Unknown CSI — ignore silently
-    // ========================================================================
-}
-
-// ========================================================================
-// sys_write: запись в файловый дескриптор (С ФИЛЬТРОМ ANSI)
-// ========================================================================
 static int sys_write_handler(struct regs* r) {
     int fd = (int)r->ebx;
     const void* buf = (const void*)r->ecx;
@@ -440,98 +281,9 @@ static int sys_write_handler(struct regs* r) {
         return -EFAULT;
     }
 
-    if (fd == 1 || fd == 2) {
-        const char* cbuf = (const char*)buf;
-        for (uint32_t i = 0; i < count; i++) {
-            unsigned char c = (unsigned char)cbuf[i];
-            
-            // ====================================================================
-            // State Machine для VGA + умная фильтрация для Serial
-            // ====================================================================
-            switch (ansi_state) {
-                case ANSI_IDLE:
-                    if (c == 0x1B) {  // ESC (\033)
-                        ansi_state = ANSI_ESCAPE;
-                        // ESC НЕ отправляем в Serial сразу — ждем '['
-                    } else {
-                        // Printable ASCII, \n, \r, \t — сразу в оба вывода
-                        if (c == '\n' || c == '\r' || c == '\t' || (c >= 32 && c < 127)) {
-                            serial_putc(c);
-                        }
-                        k_putchar(c);
-                    }
-                    break;
-                    
-                case ANSI_ESCAPE:
-                    if (c == '[') {
-                        ansi_state = ANSI_COLLECTING;
-                        ansi_pos = 0;
-                        // Отправляем ESC [ в Serial (начало CSI-последовательности)
-                        serial_putc(0x1B);
-                        serial_putc('[');
-                    } else {
-                        // Bare ESC — отправляем в Serial и VGA как есть
-                        serial_putc(0x1B);
-                        if (c == '\n' || c == '\r' || c == '\t' || (c >= 32 && c < 127)) {
-                            serial_putc(c);
-                        }
-                        k_putchar(0x1B);
-                        k_putchar(c);
-                        ansi_state = ANSI_IDLE;
-                    }
-                    break;
-                    
-                case ANSI_COLLECTING:
-                    // Параметры CSI (цифры, ';', пробелы) — НЕ отправляем в Serial сразу
-                    // Накопим в ansi_buffer, отправим только после финального символа
-                    if ((c >= '0' && c <= '9') || c == ';' || c == ' ') {
-                        if (ansi_pos < 31) {
-                            ansi_buffer[ansi_pos++] = c;
-                        }
-                    } else if (c >= 0x40 && c <= 0x7E) {
-                        // Финальный символ CSI — проверяем, можно ли отправить в Serial
-                        
-                        bool send_to_serial = true;
-                        
-                        // [DAY 28 FIX] Фильтруем команды, ломающие Serial-лог:
-                        // - J (ED: Erase in Display) — очистка экрана
-                        // - H/f (CUP: Cursor Position) — прыжок курсора в начало
-                        if (c == 'J') send_to_serial = false;
-                        if (c == 'H' || c == 'f') send_to_serial = false;
-                        
-                        if (send_to_serial) {
-                            // Отправляем накопленные параметры + финальный символ в Serial
-                            for (int j = 0; j < ansi_pos; j++) {
-                                serial_putc(ansi_buffer[j]);
-                            }
-                            serial_putc(c);
-                        }
-                        
-                        // VGA всегда получает полную последовательность
-                        if (ansi_pos < 31) {
-                            ansi_buffer[ansi_pos++] = c;
-                        }
-                        process_ansi_csi();
-                        ansi_state = ANSI_IDLE;
-                        ansi_pos = 0;
-                    } else {
-                        // Невалидный байт внутри CSI — сброс state machine
-                        ansi_state = ANSI_IDLE;
-                        ansi_pos = 0;
-                    }
-                    break;
-            }
-        }
-        
-        if (fb_is_available()) fb_flush();
-        return count;
-    }
-
+    // Делегируем запись полиморфному VFS callback'у (DevFS, tmpfs, FAT32)
     return sys_write(fd, buf, count);
 }
-// ========================================================================
-// sys_read: чтение из файлового дескриптора
-// ========================================================================
 static int sys_read_handler(struct regs* r) {
     int fd = (int)r->ebx;
     void* buf = (void*)r->ecx;
@@ -542,36 +294,7 @@ static int sys_read_handler(struct regs* r) {
         return -EFAULT;
     }
 
-    // 🛡️ [ДЕНЬ 24] ВРЕМЕННЫЙ ХАК: Магический перехват stdin (fd == 0)
-    if (fd == 0) {
-        char* cbuf = (char*)buf;
-        uint32_t read_count = 0;
-        extern char k_getchar(void); // Прототип из keyboard.c
-        
-        // Блокирующее чтение БЕЗ Hardware Echo (Shell сам делает эхо)
-        while (read_count < count) {
-            char c = k_getchar();
-            
-            if (c != 0) {
-                cbuf[read_count++] = c;
-                // ❌ УБРАЛИ: k_putchar(c); — Shell сам эхоит символы
-                
-                // Line-buffered: если нажали Enter, возвращаем управление Shell
-                if (c == '\n') break; 
-            } else {
-                // Буфер клавиатуры пуст. 
-                // Если уже прочитали часть строки - возвращаем её.
-                if (read_count > 0) break;
-                
-                // Отдаем CPU планировщику, чтобы не жечь 100% CPU в idle loop
-                task_yield(); 
-            }
-        }
-        
-        // ❌ УБРАЛИ: fb_flush() — не нужно, так как мы ничего не писали в FB
-        return read_count;
-    }
-
+    // Делегируем чтение полиморфному VFS callback'у (DevFS, tmpfs, FAT32)
     return sys_read(fd, buf, count);
 }
 // ========================================================================
@@ -1126,6 +849,59 @@ static int sys_sysinfo_handler(struct regs* r) {
     return 0;
 }
 
+// ============================================================================
+// [ДЕНЬ 28] sys_dup: дублирование файлового дескриптора
+// ============================================================================
+static int sys_dup_handler(struct regs* r) {
+    int old_fd = (int)r->ebx;
+    
+    if (old_fd < 0 || old_fd >= TASK_MAX_OPEN_FILES) return -EBADF;
+    
+    open_file_t* of = current_task->fd_table[old_fd];
+    if (!of) return -EBADF;
+    
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        if (current_task->fd_table[i] == 0) {
+            __asm__ volatile("cli");
+            of->ref_count++;
+            if (of->node) of->node->ref_count++;
+            current_task->fd_table[i] = of;
+            __asm__ volatile("sti");
+            return i;
+        }
+    }
+    
+    return -EMFILE;
+}
+
+// ============================================================================
+// [ДЕНЬ 28] sys_dup2: атомарное дублирование в конкретный FD
+// ============================================================================
+static int sys_dup2_handler(struct regs* r) {
+    int old_fd = (int)r->ebx;
+    int new_fd = (int)r->ecx;
+    
+    if (old_fd < 0 || old_fd >= TASK_MAX_OPEN_FILES) return -EBADF;
+    if (new_fd < 0 || new_fd >= TASK_MAX_OPEN_FILES) return -EBADF;
+    
+    open_file_t* of = current_task->fd_table[old_fd];
+    if (!of) return -EBADF;
+    
+    if (old_fd == new_fd) return new_fd;
+    
+    // Закрываем new_fd, если он уже открыт
+    if (current_task->fd_table[new_fd] != 0) {
+        sys_close(new_fd);
+    }
+    
+    __asm__ volatile("cli");
+    of->ref_count++;
+    if (of->node) of->node->ref_count++;
+    current_task->fd_table[new_fd] = of;
+    __asm__ volatile("sti");
+    
+    return new_fd;
+}
 // ========================================================================
 // ✅ Диспатчер системных вызовов
 // ========================================================================
@@ -1175,6 +951,8 @@ void syscall_init(void) {
     syscall_table[SYS_SYSINFO] = sys_sysinfo_handler;
     syscall_table[SYS_SLEEP]  = sys_sleep_handler;
     syscall_table[SYS_READDIR] = sys_readdir_handler;
+    syscall_table[SYS_DUP]    = sys_dup_handler;
+    syscall_table[SYS_DUP2]   = sys_dup2_handler;
     
     extern void isr128(); 
     idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE);

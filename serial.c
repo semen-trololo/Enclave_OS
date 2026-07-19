@@ -65,32 +65,16 @@ static void serial_print_dec(uint32_t val) {
 }
 
 void serial_printf(const char* fmt, ...) {
+    char buf[1024];
     va_list args;
     va_start(args, fmt);
     
-    while (*fmt) {
-        if (*fmt == '%' && *(fmt + 1)) {
-            fmt++; // Пропускаем '%'
-            if (*fmt == 'x') {
-                serial_print_hex(va_arg(args, uint32_t));
-            } else if (*fmt == 'p') {
-                serial_print("0x");
-                serial_print_hex(va_arg(args, uint32_t));
-            } else if (*fmt == 'd' || *fmt == 'u') {
-                serial_print_dec(va_arg(args, uint32_t));
-            } else if (*fmt == 's') {
-                serial_print(va_arg(args, const char*));
-            } else if (*fmt == 'c') {
-                serial_putc((char)va_arg(args, int));
-            } else if (*fmt == '%') {
-                serial_putc('%');
-            }
-        } else {
-            // Твой оригинальный逻辑 для \n -> \r\n
-            if (*fmt == '\n') serial_putc('\r');
-            serial_putc(*fmt);
-        }
-        fmt++;
-    }
+    // Делегируем форматирование в общий C99-движок
+    extern int k_vsprintf(char* buf, const char* fmt, va_list args);
+    k_vsprintf(buf, fmt, args);
+    
     va_end(args);
+    
+    // Выводим готовую строку в COM1
+    serial_print(buf);
 }

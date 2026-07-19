@@ -138,12 +138,8 @@ void tasking_init(void) {
     main_task_ptr->exit_code = 0;
     main_task_ptr->orphan_on_exit = 1;
     main_task_ptr->monitor_children = 0;
-    
     init_task = main_task_ptr;
-
     task_count++;
-    
-    task_init_fds(main_task_ptr);
     
     uint32_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -228,7 +224,6 @@ task_t* task_create(const char* name, void (*entry_point)(void),
     new_task->esp = (uint32_t)stack_ptr;
 
     for (int j = 0; j < TASK_MAX_OPEN_FILES; j++) new_task->fd_table[j] = 0;
-    task_init_fds(new_task); 
     
     new_task->parent = current_task;
     new_task->children = NULL;

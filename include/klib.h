@@ -75,4 +75,7 @@ uint32_t k_atoh(const char* str);
 // НОВОЕ: универсальная установка цвета
 void k_set_color(uint8_t fg, uint8_t bg); // Убрали vga_ из названий параметров!
 
+// [DAY 29] Cursor Positioning (0-based: row, col)
+void k_set_cursor(int row, int col);
+
 #endif // KLIB_H

@@ -94,7 +94,4 @@ int task_waitpid(int pid, int* status, int options);
 // [ДЕНЬ 14] FPU Management
 void fpu_release_ownership(task_t* task);
 
-// File Descriptor Management
-void task_init_fds(task_t* task);
-
 #endif // TASK_H

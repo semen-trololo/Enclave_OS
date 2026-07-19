@@ -42,7 +42,9 @@
 #define SYS_MPROTECT  125
 #define SYS_YIELD     158
 #define SYS_SLEEP     230   // ✅ [ДЕНЬ 15] SSOT
-#define SYS_READDIR   141 
+#define SYS_READDIR   141
+#define SYS_DUP       41
+#define SYS_DUP2      63
 
 // ============================================================================
 // [ДЕНЬ 13] SEEK CONSTANTS (SSOT sync)
@@ -267,6 +269,18 @@ static inline int32_t sys_readdir(int fd, uint32_t index, dirent_t* entry) {
         : "a" (SYS_READDIR), "b" (fd), "c" (index), "d" (entry)
         : "memory"
     );
+    return ret;
+}
+
+static inline int sys_dup(int oldfd) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(SYS_DUP), "b"(oldfd));
+    return ret;
+}
+
+static inline int sys_dup2(int oldfd, int newfd) {
+    int ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(SYS_DUP2), "b"(oldfd), "c"(newfd));
     return ret;
 }
 

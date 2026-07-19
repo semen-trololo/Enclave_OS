@@ -8,27 +8,6 @@
 
 vfs_node_t* vfs_root = 0;
 
-// ==========================================
-// ГЛОБАЛЬНЫЕ СИНГЛТОНЫ СТАНДАРТНЫХ ПОТОКОВ
-// ==========================================
-static vfs_node_t stdin_node_singleton;
-static vfs_node_t stdout_node_singleton;
-static bool std_nodes_initialized = false;
-
-static int32_t stdout_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* buffer) {
-    (void)node; (void)offset;
-    for (uint32_t i = 0; i < size; i++) {
-        k_putchar(buffer[i]);   // Вывод на экран (VGA/FB через Strategy Pattern)
-        serial_putc(buffer[i]); // Зеркалирование в COM1 для headless debug
-    }
-    return size;
-}
-
-static int32_t stdin_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
-    (void)node; (void)offset; (void)size; (void)buffer;
-    // TODO: День 10 - интеграция с Ring Buffer клавиатуры
-    return 0; // EOF
-}
 
 // ==========================================
 // 1. УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ОБХОДА ДЕРЕВА (LCRS)
@@ -446,42 +425,4 @@ int32_t sys_readdir(int fd, uint32_t index, dirent_t* entry) {
     if (!of->node->readdir) return -1;
     
     return of->node->readdir(of->node, index, entry);
-}
-
-// ==========================================
-// 6. СТАНДАРТНЫЕ ПОТОКИ (FD 0, 1, 2)
-// ==========================================
-void task_init_fds(task_t* task) {
-    if (!task) return;
-
-    if (!std_nodes_initialized) {
-        k_memset(&stdin_node_singleton, 0, sizeof(vfs_node_t));
-        stdin_node_singleton.flags = FS_CHARDEVICE;
-        stdin_node_singleton.read = stdin_read;
-
-        k_memset(&stdout_node_singleton, 0, sizeof(vfs_node_t));
-        stdout_node_singleton.flags = FS_CHARDEVICE;
-        stdout_node_singleton.write = stdout_write;
-        
-        std_nodes_initialized = true;
-    }
-
-    open_file_t* of_stdin = (open_file_t*)kmalloc(sizeof(open_file_t));
-    open_file_t* of_stdout = (open_file_t*)kmalloc(sizeof(open_file_t));
-
-    if (of_stdin && of_stdout) {
-        of_stdin->node = &stdin_node_singleton;
-        of_stdin->offset = 0;
-        of_stdin->flags = O_RDONLY;
-        of_stdin->ref_count = 1;
-
-        of_stdout->node = &stdout_node_singleton;
-        of_stdout->offset = 0;
-        of_stdout->flags = O_WRONLY;
-        of_stdout->ref_count = 2; // stdout (1) и stderr (2) делят один open_file
-
-        task->fd_table[0] = of_stdin;
-        task->fd_table[1] = of_stdout;
-        task->fd_table[2] = of_stdout; 
-    }
 }

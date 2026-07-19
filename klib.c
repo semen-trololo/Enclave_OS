@@ -1,13 +1,15 @@
+//klib.h
+
 #include "klib.h"
 #include "vga.h"
 #include "framebuffer.h"
 #include <stdarg.h>
+#include <stdbool.h>
 
 // ==========================================
 // ДИСПЕТЧЕР ВЫВОДА (Strategy Pattern)
 // ==========================================
 
-// Внутренний диспетчер: выбирает между framebuffer и VGA
 static void output_char(char c) {
     if (fb_is_available()) {
         fb_putc(c);
@@ -16,15 +18,14 @@ static void output_char(char c) {
     }
 }
 
-// Установка цвета одновременно для framebuffer и VGA
-// VGA-цвета (0-15) мапим на близкие RGB-значения
+// ==========================================
+// ЦВЕТА
+// ==========================================
+
 void k_set_color(uint8_t vga_fg, uint8_t vga_bg) {
-    // Устанавливаем VGA (на случай fallback)
     vga_set_color(vga_fg, vga_bg);
     
-    // Параллельно синхронизируем framebuffer-цвета
     if (fb_is_available()) {
-        // Маппинг VGA -> RGB (упрощенная палитра)
         static const uint32_t vga_to_rgb[16] = {
             0x00000000, // BLACK
             0x000000AA, // BLUE
@@ -77,90 +78,15 @@ int k_memcmp(const void* s1, const void* s2, size_t n) {
     }
     return 0;
 }
-// ==========================================
-// VSPRINTF (Для fb_printf и будущих нужд)
-// ==========================================
 
-int k_vsprintf(char* buf, const char* fmt, va_list args) {
-    char* start = buf;
-    
-    while (*fmt) {
-        if (*fmt == '%') {
-            fmt++;
-            switch (*fmt) {
-                case 'd': {
-                    int val = va_arg(args, int);
-                    char tmp[16];
-                    k_itoa(val, tmp, 10);
-                    char* p = tmp;
-                    while (*p) *buf++ = *p++;
-                    break;
-                }
-                case 'u': {
-                    unsigned int val = va_arg(args, unsigned int);
-                    char tmp[16];
-                    k_uitoa(val, tmp, 10);
-                    char* p = tmp;
-                    while (*p) *buf++ = *p++;
-                    break;
-                }
-                case 'x': {
-                    unsigned int val = va_arg(args, unsigned int);
-                    *buf++ = '0';
-                    *buf++ = 'x';
-                    char tmp[16];
-                    k_uitoa(val, tmp, 16);
-                    char* p = tmp;
-                    while (*p) *buf++ = *p++;
-                    break;
-                }
-                case 'p': {
-                    void* ptr = va_arg(args, void*);
-                    *buf++ = '0';
-                    *buf++ = 'x';
-                    char tmp[16];
-                    k_uitoa((unsigned int)(uintptr_t)ptr, tmp, 16);
-                    char* p = tmp;
-                    while (*p) *buf++ = *p++;
-                    break;
-                }
-                case 's': {
-                    const char* str = va_arg(args, const char*);
-                    if (!str) str = "(null)";
-                    while (*str) *buf++ = *str++;
-                    break;
-                }
-                case 'c': {
-                    char c = (char)va_arg(args, int);
-                    *buf++ = c;
-                    break;
-                }
-                case '%': *buf++ = '%'; break;
-                case '\0': goto end;
-                default: *buf++ = '%'; *buf++ = *fmt; break;
-            }
-        } else {
-            *buf++ = *fmt;
-        }
-        fmt++;
-    }
-end:
-    *buf = '\0';
-    return buf - start;
-}
 // ==========================================
-// СТРОКИ И ВЫВОД
+// СТРОКИ
 // ==========================================
 
 size_t k_strlen(const char* str) {
     size_t len = 0;
     while (str[len]) len++;
     return len;
-}
-
-void k_print(const char* str) {
-    if (!str) return;
-    while (*str) output_char(*str++);
 }
 
 int k_strcmp(const char* s1, const char* s2) {
@@ -174,102 +100,282 @@ int k_strncmp(const char* s1, const char* s2, size_t n) {
     return *(unsigned char*)s1 - *(unsigned char*)s2;
 }
 
-// Копирует не более n символов из src в dest.
-// Если src короче n, оставшееся пространство в dest заполняется нулями ('\0').
-// Это критично для безопасности, чтобы избежать утечки данных из стека/кучи.
 char* k_strncpy(char* dest, const char* src, size_t n) {
     size_t i;
-    
-    // Копируем символы до тех пор, пока не достигнем n или конца src
     for (i = 0; i < n && src[i] != '\0'; i++) {
         dest[i] = src[i];
     }
-    
-    // Заполняем остаток буфера нулями (стандартное поведение strncpy)
     for (; i < n; i++) {
         dest[i] = '\0';
     }
-    
     return dest;
 }
 
-void k_printf(const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
+// ============================================================================
+// PRINTF FAMILY — C99 COMPLIANT (Ring 0 Kernel Space)
+// ============================================================================
+
+static void k_put_int(char** buf, char* end, int value, int base, int width, int precision, int pad_zero, int is_signed, int left_align, int show_sign, int space_flag) {
+    char tmp[33];
+    int len = 0;
+    int negative = 0;
     
-    while (*fmt) {
-        if (*fmt == '%') {
+    if (is_signed && value < 0) {
+        negative = 1;
+        value = -value;
+    }
+    
+    unsigned int uval = (unsigned int)value;
+    if (uval == 0) {
+        tmp[len++] = '0';
+    } else {
+        while (uval > 0) {
+            int rem = uval % base;
+            tmp[len++] = (rem < 10) ? (rem + '0') : (rem - 10 + 'a');
+            uval /= base;
+        }
+    }
+    
+    int num_digits = len;
+    if (precision > num_digits) num_digits = precision;
+    
+    int sign_len = 0;
+    if (negative) sign_len = 1;
+    else if (show_sign) sign_len = 1;
+    else if (space_flag) sign_len = 1;
+    
+    int total_len = num_digits + sign_len;
+    int pad = width - total_len;
+    char pad_char = (pad_zero && precision < 0) ? '0' : ' ';
+    
+    if (!left_align) {
+        while (pad-- > 0 && *buf < end) *(*buf)++ = pad_char;
+    }
+    
+    if (negative && *buf < end) *(*buf)++ = '-';
+    else if (show_sign && !negative && *buf < end) *(*buf)++ = '+';
+    else if (space_flag && !negative && *buf < end) *(*buf)++ = ' ';
+    
+    int leading_zeros = num_digits - len;
+    while (leading_zeros-- > 0 && *buf < end) *(*buf)++ = '0';
+    
+    while (len > 0 && *buf < end) *(*buf)++ = tmp[--len];
+    
+    if (left_align) {
+        while (pad-- > 0 && *buf < end) *(*buf)++ = ' ';
+    }
+}
+
+static void k_put_uint(char** buf, char* end, unsigned int value, int base, int width, int precision, int pad_zero, int left_align, int alt_form) {
+    char tmp[33];
+    int len = 0;
+    
+    if (value == 0) {
+        tmp[len++] = '0';
+    } else {
+        while (value > 0) {
+            int rem = value % base;
+            tmp[len++] = (rem < 10) ? (rem + '0') : (rem - 10 + 'a');
+            value /= base;
+        }
+    }
+    
+    int num_digits = len;
+    if (precision > num_digits) num_digits = precision;
+    
+    int prefix_len = 0;
+    if (alt_form && base == 16 && value != 0) prefix_len = 2;
+    else if (alt_form && base == 8 && value != 0) prefix_len = 1;
+    
+    int total_len = num_digits + prefix_len;
+    int pad = width - total_len;
+    char pad_char = (pad_zero && precision < 0) ? '0' : ' ';
+    
+    if (!left_align) {
+        while (pad-- > 0 && *buf < end) *(*buf)++ = pad_char;
+    }
+    
+    if (alt_form && base == 16 && value != 0) {
+        if (*buf < end) *(*buf)++ = '0';
+        if (*buf < end) *(*buf)++ = 'x';
+    } else if (alt_form && base == 8 && value != 0) {
+        if (*buf < end) *(*buf)++ = '0';
+    }
+    
+    int leading_zeros = num_digits - len;
+    while (leading_zeros-- > 0 && *buf < end) *(*buf)++ = '0';
+    
+    while (len > 0 && *buf < end) *(*buf)++ = tmp[--len];
+    
+    if (left_align) {
+        while (pad-- > 0 && *buf < end) *(*buf)++ = ' ';
+    }
+}
+
+// ----------------------------------------------------------------------------
+// k_vsprintf — C99 compliant kernel-space formatter
+// ----------------------------------------------------------------------------
+int k_vsprintf(char* buf, const char* fmt, va_list args) {
+    char* start = buf;
+    char* end = buf + 1023;
+    
+    while (*fmt && buf < end) {
+        if (*fmt != '%') {
+            *buf++ = *fmt++;
+            continue;
+        }
+        fmt++;
+        
+        int left_align = 0, show_sign = 0, space_flag = 0, pad_zero = 0, alt_form = 0;
+        while (1) {
+            if (*fmt == '-') { left_align = 1; fmt++; }
+            else if (*fmt == '+') { show_sign = 1; fmt++; }
+            else if (*fmt == ' ') { space_flag = 1; fmt++; }
+            else if (*fmt == '0') { pad_zero = 1; fmt++; }
+            else if (*fmt == '#') { alt_form = 1; fmt++; }
+            else break;
+        }
+        
+        int width = 0;
+        if (*fmt == '*') {
+            width = va_arg(args, int);
+            if (width < 0) { left_align = 1; width = -width; }
             fmt++;
-            switch (*fmt) {
-                case 'd': {
-                    int val = va_arg(args, int);
-                    char buf[16];
-                    k_itoa(val, buf, 10);
-                    k_print(buf);
-                    break;
-                }
-                case 'u': {
-                    unsigned int val = va_arg(args, unsigned int);
-                    char buf[16];
-                    k_uitoa(val, buf, 10);
-                    k_print(buf);
-                    break;
-                }
-                case 'x': {
-                    unsigned int val = va_arg(args, unsigned int);
-                    k_print("0x");
-                    char buf[16];
-                    k_uitoa(val, buf, 16);
-                    k_print(buf);
-                    break;
-                }
-                case 'p': {
-                    void* ptr = va_arg(args, void*);
-                    k_print("0x");
-                    char buf[16];
-                    k_uitoa((unsigned int)(uintptr_t)ptr, buf, 16);
-                    k_print(buf);
-                    break;
-                }
-                case 's': {
-                    const char* str = va_arg(args, const char*);
-                    k_print(str ? str : "(null)");
-                    break;
-                }
-                case 'c': {
-                    char c = (char)va_arg(args, int);
-                    output_char(c);
-                    break;
-                }
-                case '%': output_char('%'); break;
-                case '\0': goto end;
-                default: output_char('%'); output_char(*fmt); break;
-            }
         } else {
-            output_char(*fmt);
+            while (*fmt >= '0' && *fmt <= '9') {
+                width = width * 10 + (*fmt - '0');
+                fmt++;
+            }
+        }
+        
+        int precision = -1;
+        if (*fmt == '.') {
+            fmt++;
+            precision = 0;
+            if (*fmt == '*') {
+                precision = va_arg(args, int);
+                fmt++;
+            } else {
+                while (*fmt >= '0' && *fmt <= '9') {
+                    precision = precision * 10 + (*fmt - '0');
+                    fmt++;
+                }
+            }
+        }
+        
+        int length = 0;
+        if (*fmt == 'h') {
+            fmt++;
+            if (*fmt == 'h') { length = 2; fmt++; }
+            else length = 1;
+        } else if (*fmt == 'l') {
+            fmt++;
+            if (*fmt == 'l') { length = 4; fmt++; }
+            else length = 3;
+        } else if (*fmt == 'z') {
+            length = 5; fmt++;
+        }
+        (void)length;
+        
+        switch (*fmt) {
+            case 'd':
+            case 'i': {
+                int val = va_arg(args, int);
+                k_put_int(&buf, end, val, 10, width, precision, pad_zero, 1, left_align, show_sign, space_flag);
+                break;
+            }
+            case 'u': {
+                unsigned int val = va_arg(args, unsigned int);
+                k_put_uint(&buf, end, val, 10, width, precision, pad_zero, left_align, alt_form);
+                break;
+            }
+            case 'x':
+            case 'X': {
+                unsigned int val = va_arg(args, unsigned int);
+                k_put_uint(&buf, end, val, 16, width, precision, pad_zero, left_align, alt_form);
+                break;
+            }
+            case 'o': {
+                unsigned int val = va_arg(args, unsigned int);
+                k_put_uint(&buf, end, val, 8, width, precision, pad_zero, left_align, alt_form);
+                break;
+            }
+            case 'p': {
+                void* p = va_arg(args, void*);
+                if (buf < end) *buf++ = '0';
+                if (buf < end) *buf++ = 'x';
+                k_put_uint(&buf, end, (unsigned int)(uintptr_t)p, 16, 8, -1, 1, 0, 0);
+                break;
+            }
+            case 's': {
+                const char* str = va_arg(args, const char*);
+                if (!str) str = "(null)";
+                int slen = k_strlen(str);
+                
+                if (precision >= 0 && precision < slen) {
+                    slen = precision;
+                }
+                
+                int pad = width - slen;
+                if (!left_align) {
+                    while (pad-- > 0 && buf < end) *buf++ = ' ';
+                }
+                for (int i = 0; i < slen && buf < end; i++) {
+                    *buf++ = str[i];
+                }
+                if (left_align) {
+                    while (pad-- > 0 && buf < end) *buf++ = ' ';
+                }
+                break;
+            }
+            case 'c':
+                if (buf < end) *buf++ = (char)va_arg(args, int);
+                break;
+            case '%':
+                if (buf < end) *buf++ = '%';
+                break;
+            default:
+                if (buf < end) *buf++ = '%';
+                if (buf < end) *buf++ = *fmt;
+                break;
         }
         fmt++;
     }
-end:
-    va_end(args);
+    
+    *buf = '\0';
+    return buf - start;
 }
 
 // ==========================================
-// УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ДЛЯ SHELL
+// ВЫВОД
 // ==========================================
 
-// Универсальный вывод одного символа (для shell input echo)
+void k_print(const char* str) {
+    if (!str) return;
+    while (*str) output_char(*str++);
+}
+
 void k_putchar(char c) {
     output_char(c);
 }
 
-// Универсальная очистка экрана
 void k_clear(void) {
     if (fb_is_available()) {
         fb_clear(COLOR_BLACK);
     } else {
-        clear();  // существующая VGA функция
+        clear();
     }
+}
+
+void k_printf(const char* fmt, ...) {
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    
+    k_vsprintf(buf, fmt, args);
+    
+    va_end(args);
+    k_print(buf);
 }
 
 // ==========================================
@@ -341,4 +447,15 @@ void k_uitoa(unsigned int value, char* buf, int base) {
     int j = 0;
     while (i > 0) buf[j++] = tmp[--i];
     buf[j] = '\0';
+}
+
+// ============================================================================
+// [DAY 29] CURSOR POSITIONING — Strategy Pattern (VGA vs Framebuffer)
+// ============================================================================
+void k_set_cursor(int row, int col) {
+    if (fb_is_available()) {
+        fb_set_cursor((uint32_t)col, (uint32_t)row);
+    } else {
+        vga_set_cursor(row, col);
+    }
 }

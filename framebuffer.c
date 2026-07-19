@@ -1,3 +1,5 @@
+//framebuffer.c
+
 #include "framebuffer.h"
 #include "klib.h"
 #include "heap.h"
@@ -171,6 +173,8 @@ static inline void mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (y + h > dirty_rect.max_y) dirty_rect.max_y = y + h;
 }
 
+static int fb_dbg_count = 0;
+
 // ============================================================================
 // INIT & GETTERS
 // ============================================================================
@@ -203,6 +207,7 @@ uint32_t fb_get_font_height(void) { return font_height; }
 void fb_set_cursor(uint32_t x, uint32_t y) {
     if (x < fb_get_cols()) cursor_x = x;
     if (y < fb_get_rows()) cursor_y = y;
+    fb_dbg_count = 0;
 }
 
 void fb_set_color(uint32_t fg, uint32_t bg) {
@@ -577,6 +582,12 @@ void fb_scroll_up(void) {
 
 void fb_putc(char c) {
     if (!fb_ready) return;
+
+    if (fb_dbg_count < 20) {
+        serial_printf("[FB] c=0x%02x x=%d y=%d\n", (unsigned char)c, cursor_x, cursor_y);
+        fb_dbg_count++;
+    }
+
     uint32_t max_cols = fb_width / font_width;
     uint32_t max_rows = fb_height / font_height;
     uint8_t byte = (uint8_t)c;
@@ -661,13 +672,15 @@ void fb_putc(char c) {
     
 check_scroll:
     while (cursor_y >= max_rows) {
+        // 🛡️ DEBUG: Логируем каждый скролл в Serial
+        serial_printf("[FB_SCROLL] cursor_y=%d max_rows=%d\n", cursor_y, max_rows);
         fb_scroll_up();
         cursor_y--;
     }
 
-    if (double_buffering_enabled) {
-        fb_flush();
-    }
+    // 🛡️ ENCLAVE OS PATCH: УБРАЛИ fb_flush() отсюда!
+    // fb_flush() теперь вызывается ОДИН РАЗ в конце devfs_console_write().
+    // Это устраняет 4000 копирований LFB на одну перерисовку экрана.
 }
 
 void fb_print(const char* str) {

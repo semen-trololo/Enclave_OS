@@ -7,39 +7,6 @@
 #include "user_libc.h"
 #include "user_syscalls.h"
 
-// ============================================================================
-// ERROR STRINGS (strerror)
-// ============================================================================
-char* strerror(int errnum) {
-    switch (errnum) {
-        case 0: return "Success";
-        case EPERM: return "Operation not permitted";
-        case ENOENT: return "No such file or directory";
-        case ESRCH: return "No such process";
-        case EINTR: return "Interrupted system call";
-        case EIO: return "I/O error";
-        case ENXIO: return "No such device or address";
-        case E2BIG: return "Argument list too long";
-        case ENOEXEC: return "Exec format error";
-        case EBADF: return "Bad file number";
-        case ECHILD: return "No child processes";
-        case EAGAIN: return "Try again";
-        case ENOMEM: return "Out of memory";
-        case EACCES: return "Permission denied";
-        case EFAULT: return "Bad address";
-        case ENOSPC: return "No space left on device";
-        case ESPIPE: return "Illegal seek";
-        case EROFS: return "Read-only file system";
-        case EMLINK: return "Too many links";
-        case EPIPE: return "Broken pipe";
-        case EDOM: return "Math argument out of domain of func";
-        case ERANGE: return "Math result not representable";
-        case ENAMETOOLONG: return "File name too long";
-        case ENOSYS: return "Function not implemented";
-        case ENOTTY: return "Not a typewriter";
-        default: return "Unknown error";
-    }
-}
 
 // ============================================================================
 // FILE I/O (fwrite)
@@ -112,16 +79,7 @@ char* realpath(const char* path, char* resolved_path) {
     return dest;
 }
 
-// ============================================================================
-// STRING DUPLICATION
-// ============================================================================
-char* strdup(const char* s) {
-    if (!s) return NULL;
-    size_t len = strlen(s) + 1;
-    char* new_s = (char*)malloc(len);
-    if (new_s) memcpy(new_s, s, len);
-    return new_s;
-}
+
 
 char* strndup(const char* s, size_t n) {
     if (!s) return NULL;
@@ -178,13 +136,6 @@ clock_t clock(void) {
     timeval_t tv;
     gettimeofday(&tv, NULL);
     return (clock_t)(tv.tv_sec * CLOCKS_PER_SEC + tv.tv_usec);
-}
-
-time_t time(time_t* tloc) {
-    timeval_t tv;
-    gettimeofday(&tv, NULL);
-    if (tloc) *tloc = (time_t)tv.tv_sec;
-    return (time_t)tv.tv_sec;
 }
 
 // ============================================================================

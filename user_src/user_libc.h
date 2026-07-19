@@ -354,7 +354,6 @@ char* strncat(char* dest, const char* src, size_t n);
 char* strchr(const char* str, int c);
 char* strrchr(const char* str, int c);
 char* strstr(const char* haystack, const char* needle);
-char* strdup(const char* s);
 char* strndup(const char* s, size_t n);
 char* strpbrk(const char* s, const char* accept);
 
@@ -400,6 +399,15 @@ int isatty(int fd);
 char* getcwd(char* buf, size_t size);
 int chdir(const char* path);
 char* realpath(const char* path, char* resolved_path);
+int dup(int oldfd);
+int dup2(int oldfd, int newfd);
+// POSIX FUNCTIONS (Day 29 — Enano Text Editor Support)
+ssize_t getline(char** lineptr, size_t* n, FILE* stream);
+char* strdup(const char* s);
+char* strerror(int errnum);
+void perror(const char* s);
+time_t time(time_t* tloc);
+int ioctl(int fd, unsigned long request, ...);
 
 /* --------------------------------------------------------------------------
  * 15. Function Prototypes: Output (printf family)

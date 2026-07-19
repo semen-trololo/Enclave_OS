@@ -137,6 +137,8 @@ typedef struct {
 #define SYS_READDIR   141  // ✅ [ДЕНЬ 24] SSOT
 #define SYS_YIELD     158  // Custom: добровольный yield
 #define SYS_SLEEP     230  // ✅ [ДЕНЬ 15] Custom: sleep в миллисекундах
+#define SYS_DUP       41
+#define SYS_DUP2      63
 
 // ========================================================================
 // Инициализация таблицы системных вызовов

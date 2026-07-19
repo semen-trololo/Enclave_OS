@@ -25,6 +25,7 @@
 #include "elf.h"     // ✅ НОВОЕ: Для загрузки /sbin/init.elf
 #include "vma.h"     // ✅ НОВОЕ: Для создания VMA стека/кучи
 #include "config.h"  // ✅ НОВОЕ: Для USER_STACK_VIRT_TOP и USER_HEAP_START
+#include "devfs.h"
 
 // ==========================================
 // КОНСТАНТЫ И КОНФИГУРАЦИЯ
@@ -91,6 +92,7 @@ static void init_subsystems(void) {
     serial_print("[BOOT] Phase 3: Core Subsystems...\n");
 
     vfs_init();
+    devfs_init();
     initrd_init();
     serial_print("  [+] VFS & Initrd (tmpfs) mounted\n");
 

@@ -1,3 +1,5 @@
+//vga.c
+
 #include "vga.h"
 #include "port_io.h"
 #include <stddef.h>
@@ -246,4 +248,20 @@ void vga_init(void) {
     vga_set_80x50();
     clear();
 }
-
+// ============================================================================
+// [DAY 29] CURSOR POSITIONING для VGA Text Mode (80x50)
+// ============================================================================
+void vga_set_cursor(int row, int col) {
+    // Границы VGA Text Mode (VGA_WIDTH = 80, VGA_HEIGHT = 50)
+    if (row < 0) row = 0;
+    if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
+    if (col < 0) col = 0;
+    if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
+    
+    // Обновляем software-состояние
+    cursor_y = (uint8_t)row;
+    cursor_x = (uint8_t)col;
+    
+    // Синхронизируем аппаратный мигающий курсор
+    vga_update_hw_cursor();
+}

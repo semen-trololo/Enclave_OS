@@ -48,116 +48,164 @@ FILE* stdout = &_stdout_stream;
 FILE* stderr = &_stderr_stream;
 
 // ============================================================================
-// MEMORY MANAGEMENT (Bump Allocator)
-// ============================================================================
-// Heap end tracker. Инициализируется при первом malloc через sys_brk(0).
-// Bump allocator НИКОГДА не освобождает память — это осознанный trade-off
-// для простоты и скорости. TinyCC это переваривает без проблем.
-static uint32_t heap_end = 0;
-
-static void heap_init_if_needed(void) {
-    if (heap_end == 0) {
-        // sys_brk(0) возвращает текущий конец кучи
-        heap_end = (uint32_t)sys_brk(0);
-    }
-}
-
-void* malloc(size_t size) {
-    if (size == 0) return NULL;
-    
-    heap_init_if_needed();
-    
-    // Выравнивание на 8 байт (для 32-bit систем достаточно 4, но 8 безопаснее)
-    size = (size + 7) & ~7;
-    
-    uint32_t new_end = heap_end + size;
-    int result = sys_brk(new_end);
-    
-    if (result < 0) {
-        errno = ENOMEM;
-        return NULL;
-    }
-    
-    void* ptr = (void*)heap_end;
-    heap_end = new_end;
-    return ptr;
-}
-
-void* calloc(size_t nmemb, size_t size) {
-    size_t total = nmemb * size;
-    if (total == 0) return NULL;
-    
-    // Защита от переполнения
-    if (nmemb != 0 && total / nmemb != size) {
-        errno = ENOMEM;
-        return NULL;
-    }
-    
-    void* ptr = malloc(total);
-    if (ptr) memset(ptr, 0, total);
-    return ptr;
-}
-
-void* realloc(void* ptr, size_t size) {
-    if (!ptr) return malloc(size);
-    if (size == 0) {
-        // Bump allocator не умеет free — просто вернем NULL
-        // (память все равно не освободится, но поведение корректное)
-        return NULL;
-    }
-    
-    void* new_ptr = malloc(size);
-    if (!new_ptr) return NULL;
-    
-    // Копируем старые данные (предполагаем размер = size, это упрощение)
-    memcpy(new_ptr, ptr, size);
-    return new_ptr;
-}
-
-void free(void* ptr) {
-    (void)ptr;
-    // Bump allocator: no-op. Memory leak by design.
-    // Для TinyCC и короткоживущих процессов это нормально.
-}
-
-// ============================================================================
 // MEMORY OPERATIONS
 // ============================================================================
+
 void* memset(void* ptr, int value, size_t num) {
     uint8_t* p = (uint8_t*)ptr;
-    while (num--) *p++ = (uint8_t)value;
+    while (num--) {
+        *p++ = (uint8_t)value;
+    }
     return ptr;
 }
 
 void* memcpy(void* dest, const void* src, size_t num) {
     uint8_t* d = (uint8_t*)dest;
     const uint8_t* s = (const uint8_t*)src;
-    while (num--) *d++ = *s++;
+    while (num--) {
+        *d++ = *s++;
+    }
     return dest;
 }
 
 int memcmp(const void* s1, const void* s2, size_t n) {
     const uint8_t* p1 = (const uint8_t*)s1;
     const uint8_t* p2 = (const uint8_t*)s2;
+
     while (n--) {
-        if (*p1 != *p2) return *p1 - *p2;
-        p1++; p2++;
+        if (*p1 != *p2) {
+            return (int)(*p1 - *p2);
+        }
+        p1++;
+        p2++;
     }
+
     return 0;
 }
 
 void* memmove(void* dest, const void* src, size_t n) {
     uint8_t* d = (uint8_t*)dest;
     const uint8_t* s = (const uint8_t*)src;
+
     if (d < s) {
-        while (n--) *d++ = *s++;
+        while (n--) {
+            *d++ = *s++;
+        }
     } else {
-        d += n; s += n;
-        while (n--) *--d = *--s;
+        d += n;
+        s += n;
+
+        while (n--) {
+            *--d = *--s;
+        }
     }
+
     return dest;
 }
 
+// ============================================================================
+// MEMORY MANAGEMENT (Bump Allocator + Header for safe realloc)
+// ============================================================================
+
+typedef struct {
+    size_t size;
+    uint32_t magic;
+} malloc_header_t;
+
+#define MALLOC_MAGIC 0xA110CA7E
+#define MALLOC_HDR_SIZE (sizeof(malloc_header_t))
+
+static uint32_t heap_end = 0;
+
+static void heap_init_if_needed(void) {
+    if (heap_end == 0) {
+        heap_end = (uint32_t)sys_brk(0);
+    }
+}
+
+void* malloc(size_t size) {
+    if (size == 0) {
+        return NULL;
+    }
+
+    heap_init_if_needed();
+
+    // Выравнивание payload на 8 байт + заголовок
+    size_t aligned = (size + 7) & ~7;
+    size_t total = MALLOC_HDR_SIZE + aligned;
+    uint32_t new_end = heap_end + total;
+
+    int result = sys_brk(new_end);
+    if (result < 0) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    malloc_header_t* hdr = (malloc_header_t*)heap_end;
+    hdr->size = size;
+    hdr->magic = MALLOC_MAGIC;
+
+    heap_end = new_end;
+
+    return (void*)(hdr + 1);
+}
+
+void* calloc(size_t nmemb, size_t size) {
+    size_t total = nmemb * size;
+
+    if (total == 0) {
+        return NULL;
+    }
+
+    // Защита от переполнения
+    if (nmemb != 0 && total / nmemb != size) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    void* ptr = malloc(total);
+    if (ptr) {
+        memset(ptr, 0, total);
+    }
+
+    return ptr;
+}
+
+void* realloc(void* ptr, size_t size) {
+    if (!ptr) {
+        return malloc(size);
+    }
+
+    if (size == 0) {
+        return NULL;
+    }
+
+    // Читаем реальный размер старого блока из заголовка
+    malloc_header_t* hdr = ((malloc_header_t*)ptr) - 1;
+
+    size_t old_size = 0;
+    if (hdr->magic == MALLOC_MAGIC) {
+        old_size = hdr->size;
+    }
+
+    void* new_ptr = malloc(size);
+    if (!new_ptr) {
+        return NULL;
+    }
+
+    // Копируем только min(old_size, new_size)
+    size_t copy_size = (old_size < size) ? old_size : size;
+    if (copy_size > 0) {
+        memcpy(new_ptr, ptr, copy_size);
+    }
+
+    return new_ptr;
+}
+
+void free(void* ptr) {
+    (void)ptr;
+    // Bump allocator: no-op. Memory leak by design.
+}
 // ============================================================================
 // STRING OPERATIONS
 // ============================================================================
@@ -368,6 +416,21 @@ off_t lseek(int fd, off_t offset, int whence) {
     int ret = sys_lseek(fd, (int)offset, whence);
     if (ret < 0) { errno = -ret; return -1; }
     return (off_t)ret;
+}
+
+// ============================================================================
+// POSIX DUP / DUP2 (Обертки над sys_dup / sys_dup2)
+// ============================================================================
+int dup(int oldfd) {
+    int ret = sys_dup(oldfd);
+    if (ret < 0) { errno = -ret; return -1; }
+    return ret;
+}
+
+int dup2(int oldfd, int newfd) {
+    int ret = sys_dup2(oldfd, newfd);
+    if (ret < 0) { errno = -ret; return -1; }
+    return ret;
 }
 
 // ============================================================================
@@ -610,11 +673,19 @@ int vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
             *buf++ = *fmt++;
             continue;
         }
-        fmt++;
+        fmt++; // skip '%'
+        
+        // 🛡️ Защита от "%\0"
+        if (*fmt == '\0') break;
         
         // Parse flags
         int pad_zero = 0;
-        if (*fmt == '0') { pad_zero = 1; fmt++; }
+        int left_align = 0;
+        while (*fmt == '0' || *fmt == '-') {
+            if (*fmt == '0') pad_zero = 1;
+            if (*fmt == '-') left_align = 1;
+            fmt++;
+        }
         
         // Parse width
         int width = 0;
@@ -623,8 +694,25 @@ int vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
             fmt++;
         }
         
-        // Parse length modifiers (ignore for now)
-        if (*fmt == 'l') fmt++;
+        // Parse precision (ignore value, but consume it safely)
+        if (*fmt == '.') {
+            fmt++;
+            while (*fmt >= '0' && *fmt <= '9') fmt++;
+        }
+        
+        // Parse length modifiers (consume safely)
+        if (*fmt == 'l') {
+            fmt++;
+            if (*fmt == 'l') fmt++; // ll
+        } else if (*fmt == 'h') {
+            fmt++;
+            if (*fmt == 'h') fmt++; // hh
+        } else if (*fmt == 'z') {
+            fmt++;
+        }
+        
+        // 🛡️ Защита от "%\0" после модификаторов
+        if (*fmt == '\0') break;
         
         switch (*fmt) {
             case 'd':
@@ -650,8 +738,13 @@ int vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
                 if (!str) str = "(null)";
                 int slen = strlen(str);
                 int pad = width - slen;
-                while (pad-- > 0 && buf < end) *buf++ = ' ';
+                if (!left_align) {
+                    while (pad-- > 0 && buf < end) *buf++ = ' ';
+                }
                 while (*str && buf < end) *buf++ = *str++;
+                if (left_align) {
+                    while (pad-- > 0 && buf < end) *buf++ = ' ';
+                }
                 break;
             }
             case 'c':
@@ -661,15 +754,16 @@ int vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
                 if (buf < end) *buf++ = '%';
                 break;
             default:
+                // 🛡️ Безопасный fallback: не пишем \0, не выходим за границы
                 if (buf < end) *buf++ = '%';
-                if (buf < end) *buf++ = *fmt;
+                if (*fmt && buf < end) *buf++ = *fmt;
                 break;
         }
         fmt++;
     }
     
     *buf = '\0';
-    return buf - start;
+    return (int)(buf - start);
 }
 
 int vsprintf(char* buf, const char* fmt, va_list args) {
@@ -913,4 +1007,153 @@ int munmap(void* addr, size_t length) {
         return -1;
     }
     return 0;
+}
+
+// ============================================================================
+// POSIX FUNCTIONS (Day 29 — Enano Text Editor Support)
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// getline() — POSIX функция для чтения строки с автоматическим расширением буфера
+// Используется в editorOpen() для чтения файла построчно
+// ----------------------------------------------------------------------------
+ssize_t getline(char** lineptr, size_t* n, FILE* stream) {
+    if (!lineptr || !n || !stream) {
+        errno = EINVAL;
+        return -1;
+    }
+    
+    // Инициализация буфера, если не выделен
+    if (*lineptr == NULL) {
+        *n = 128;
+        *lineptr = malloc(*n);
+        if (!*lineptr) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+    
+    size_t pos = 0;
+    int c;
+    
+    while ((c = fgetc(stream)) != EOF) {
+        // Расширяем буфер при необходимости
+        if (pos + 1 >= *n) {
+            *n *= 2;
+            char* new_ptr = realloc(*lineptr, *n);
+            if (!new_ptr) {
+                errno = ENOMEM;
+                return -1;
+            }
+            *lineptr = new_ptr;
+        }
+        
+        (*lineptr)[pos++] = (char)c;
+        
+        if (c == '\n') break; // POSIX: включаем \n в строку
+    }
+    
+    (*lineptr)[pos] = '\0';
+    
+    // Если ничего не прочитали и EOF — возвращаем -1
+    if (c == EOF && pos == 0) return -1;
+    
+    return (ssize_t)pos;
+}
+
+// ----------------------------------------------------------------------------
+// strdup() — POSIX функция для дублирования строки
+// ----------------------------------------------------------------------------
+char* strdup(const char* s) {
+    if (!s) return NULL;
+    size_t len = strlen(s) + 1;
+    char* dup = malloc(len);
+    if (dup) memcpy(dup, s, len);
+    return dup;
+}
+
+// ----------------------------------------------------------------------------
+// strerror() — преобразование errno в строку ошибки
+// Минимальная таблица из 35 наиболее частых ошибок
+// ----------------------------------------------------------------------------
+char* strerror(int errnum) {
+    switch (errnum) {
+        case 0:        return "Success";
+        case EPERM:    return "Operation not permitted";
+        case ENOENT:   return "No such file or directory";
+        case ESRCH:    return "No such process";
+        case EINTR:    return "Interrupted system call";
+        case EIO:      return "I/O error";
+        case ENXIO:    return "No such device or address";
+        case E2BIG:    return "Argument list too long";
+        case ENOEXEC:  return "Exec format error";
+        case EBADF:    return "Bad file descriptor";
+        case ECHILD:   return "No child processes";
+        case EAGAIN:   return "Try again";
+        case ENOMEM:   return "Out of memory";
+        case EACCES:   return "Permission denied";
+        case EFAULT:   return "Bad address";
+        case ENOTBLK:  return "Block device required";
+        case EBUSY:    return "Device or resource busy";
+        case EEXIST:   return "File exists";
+        case EXDEV:    return "Cross-device link";
+        case ENODEV:   return "No such device";
+        case ENOTDIR:  return "Not a directory";
+        case EISDIR:   return "Is a directory";
+        case EINVAL:   return "Invalid argument";
+        case ENFILE:   return "File table overflow";
+        case EMFILE:   return "Too many open files";
+        case ENOTTY:   return "Not a typewriter";
+        case EFBIG:    return "File too large";
+        case ENOSPC:   return "No space left on device";
+        case ESPIPE:   return "Illegal seek";
+        case EROFS:    return "Read-only file system";
+        case EMLINK:   return "Too many links";
+        case EPIPE:    return "Broken pipe";
+        case EDOM:     return "Math argument out of domain";
+        case ERANGE:   return "Math result not representable";
+        case ENOSYS:   return "Function not implemented";
+        default:       return "Unknown error";
+    }
+}
+
+// ----------------------------------------------------------------------------
+// perror() — вывод сообщения об ошибке в stderr
+// ----------------------------------------------------------------------------
+void perror(const char* s) {
+    if (s && *s) {
+        fprintf(stderr, "%s: %s\n", s, strerror(errno));
+    } else {
+        fprintf(stderr, "%s\n", strerror(errno));
+    }
+}
+
+// ----------------------------------------------------------------------------
+// time() — получение текущего времени (через gettimeofday)
+// Enano использует для timestamp в строке статуса
+// ----------------------------------------------------------------------------
+time_t time(time_t* tloc) {
+    timeval_t tv;
+    int ret = gettimeofday(&tv, NULL);
+    if (ret < 0) return (time_t)-1;
+    
+    if (tloc) *tloc = (time_t)tv.tv_sec;
+    return (time_t)tv.tv_sec;
+}
+
+// ----------------------------------------------------------------------------
+// ioctl() — variadic обертка над sys_ioctl
+// ----------------------------------------------------------------------------
+int ioctl(int fd, unsigned long request, ...) {
+    va_list args;
+    va_start(args, request);
+    void* argp = va_arg(args, void*);
+    va_end(args);
+    
+    int ret = sys_ioctl(fd, (uint32_t)request, argp);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
