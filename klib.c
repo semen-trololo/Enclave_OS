@@ -1,4 +1,4 @@
-//klib.h
+//klib.c
 
 #include "klib.h"
 #include "vga.h"
