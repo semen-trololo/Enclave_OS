@@ -1,1540 +1,840 @@
-📘 Enclave Operating System — Полная Архитектурная Документация (BARE METAL)
-Single Source of Truth (SSOT) | Версия: Alpha 0.2 (Day 18 — Self-Hosting Ready)
-1. СРЕДА РАЗРАБОТКИ
-Название: Bare Metal OS (учебно-исследовательская лабораторная работа)
-Архитектура: x86, 32-битный защищённый режим (Protected Mode), Higher Half Kernel (0xC0000000)
-Загрузчик: Multiboot 1 (GRUB)
-Формат дистрибутива: Загрузочный ISO-образ (grub-mkrescue) + Initrd (TAR UStar)
-Среда разработки: Linux (Kali / Debian / Arch)
-🛠 Инструментарий
-Кросс-компилятор: i686-linux-gnu-gcc (или i686-elf-gcc)
-Ассемблер: nasm
-Линкер: GNU ld
-Сборка: Make, xorriso, grub-pc-bin, mtools
-Эмуляция: QEMU (qemu-system-i386)
-Контроль версий: Git
-⚙️ Сборка проекта и флаги компиляции
-Проект работает в Freestanding Environment (без libc). Использование стандартных заголовков <stdio.h>, <stdlib.h> запрещено. Разрешены только ISO C builtins: <stdint.h>, <stddef.h>, <stdarg.h>, <stdbool.h>.
-Критические CFLAGS (Makefile):
+# 📘 Enclave Operating System — Полная Архитектурная Документация
+
+**Single Source of Truth (SSOT) | Версия: Alpha 0.3 (Day 29 — Self-Hosting Ready)**
+**Дата актуализации:** 20 июля 2026
+**Статус:** Production-Ready SLA достигнут по базовым гарантиям
+
+---
+
+## 📑 СОДЕРЖАНИЕ
+
+1. [Среда разработки](#1-среда-разработки)
+2. [Структура проекта](#2-структура-проекта)
+3. [Архитектурные принципы](#3-архитектурные-принципы)
+4. [Карта памяти](#4-карта-памяти)
+5. [Подсистемы ядра](#5-подсистемы-ядра)
+6. [Многозадачность и процессная модель](#6-многозадачность-и-процессная-модель)
+7. [Системные вызовы](#7-системные-вызовы)
+8. [User Space и Self-Hosting](#8-user-space-и-self-hosting)
+9. [Гарантии системы (SLA)](#9-гарантии-системы-sla)
+10. [Известные проблемы и Roadmap](#10-известные-проблемы-и-roadmap)
+
+---
+
+## 1. СРЕДА РАЗРАБОТКИ
+
+| Параметр | Значение |
+|---|---|
+| **Название** | Enclave Operating System (Enclave OS) |
+| **Архитектура** | x86, 32-битный Protected Mode, Higher Half Kernel (0xC0000000) |
+| **Загрузчик** | Multiboot 1 (GRUB) |
+| **Дистрибутив** | Загрузочный ISO (grub-mkrescue) + Initrd (TAR UStar) |
+| **Среда** | Linux ( Debian) |
+| **Эмуляция** | QEMU (`qemu-system-i386`) |
+
+### 🛠 Инструментарий
+
+| Инструмент | Назначение |
+|---|---|
+| `i686-linux-gnu-gcc` | Кросс-компилятор ядра |
+| `nasm` | Ассемблер |
+| `GNU ld` | Линкер |
+| `Make`, `xorriso`, `grub-pc-bin`, `mtools` | Сборка ISO |
+| `Git` | Контроль версий |
+
+### ⚙️ Флаги компиляции
+
+**Kernel CFLAGS:**
+```makefile
 CFLAGS  = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Iinclude
-CFLAGS += -fno-pie -fno-pic -fno-stack-protector  # Отключение защит системного GCC
-CFLAGS += -mno-sse -mno-sse2 -mno-mmx -mno-3dnow  # Запрет FPU/SSE в ядре (индустриальный стандарт)
-CFLAGS += -mincoming-stack-boundary=2 -g          # Снятие 16-byte ABI alignment для ASM-трамплинов
-User Space CFLAGS:
-USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra -fno-optimize-sibling-calls
-LDFLAGS:
+CFLAGS += -fno-pie -fno-pic -fno-stack-protector
+CFLAGS += -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
+CFLAGS += -mincoming-stack-boundary=2 -g
+```
+
+**User Space CFLAGS:**
+```makefile
+USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra
+USER_CFLAGS += -fno-optimize-sibling-calls
+```
+
+**LDFLAGS:**
+```makefile
 LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
-Принцип "Голая ОС" (Bare Metal):
-Ядро не использует FPU/SSE напрямую, чтобы избежать необходимости сохранять 512-байтный FPU-контекст при каждом прерывании. Математика с плавающей точкой доступна только в User Space (Ring 3) через механизм Lazy FPU Switching.
-Запуск:
+```
+
+**Принцип "Голая ОС":** Ядро не использует FPU/SSE напрямую. Математика с плавающей точкой доступна только в Ring 3 через Lazy FPU Switching (#NM, fxsave/fxrstor).
+
+**Запуск:**
+```bash
 make iso && make run
 # qemu-system-i386 -cdrom build/metal_os.iso -m 1024M -serial stdio -no-reboot
-2. СТРУКТУРА ПРОЕКТА
+```
+
+---
+
+## 2. СТРУКТУРА ПРОЕКТА
+
+```
 project_root/
-├── isodir/                   # Корневая директория для генерации ISO
+├── isodir/                       # Корневая директория ISO
 │   └── boot/
-│       ├── grub/
-│       │   └── grub.cfg      # Конфигурация GRUB (multiboot /boot/kernel.bin)
-│       ├── kernel.bin        # Скомпилированное ядро (копируется Makefile'ом)
-│       └── initrd.tar        # RAM-диск (TAR UStar, генерируется из initrd_src/)
+│       ├── grub/grub.cfg         # Multiboot конфигурация
+│       ├── kernel.bin            # Ядро
+│       └── initrd.tar            # RAM-диск (TAR UStar)
 │
-├── include/                  # Заголовочные файлы (API подсистем)
+├── include/                      # Заголовочные файлы ядра
+│   ├── config.h                  # ⭐ SSOT границ памяти
 │   ├── gdt.h, idt.h, isr.h, pic.h, tss.h
 │   ├── pmm.h, paging.h, heap.h, vma.h, elf.h
-│   ├── task.h, vfs.h, initrd.h, tmpfs.h
+│   ├── task.h, vfs.h, initrd.h, tmpfs.h, devfs.h
+│   ├── ata.h, fat32.h            # Storage (Day 8.2)
 │   ├── vga.h, framebuffer.h, keyboard.h, timer.h, serial.h
-│   ├── klib.h, shell.h, syscall.h, multiboot.h, port_io.h
-│   ├── config.h              # Single Source of Truth для всех границ памяти
-│   ├── ata.h                 # ATA PIO Driver & MBR Parser (Day 8.2)
-│   └── univga_font.h         # PSF1 шрифт с кириллицей
+│   ├── klib.h, syscall.h, multiboot.h, port_io.h
+│   ├── kerrno.h                  # POSIX errno codes
+│   └── univga_font.h             # PSF1 шрифт с кириллицей
 │
-├── boot.asm                  # Multiboot, VBE, Higher Half Mapping
-├── linker.ld                 # Карта памяти (LMA/VMA)
-├── kernel.c                  # Точка входа (kernel_main), Bootstrap
+├── boot.asm                      # Multiboot, VBE, Higher Half Trampoline
+├── linker.ld                     # LMA/VMA split
+├── kernel.c                      # kernel_main, Bootstrap
 │
-├── descriptors_flush.asm     # ASM: lgdt, lidt, ltr
-├── isr_asm.asm               # ASM: ISR/IRQ stubs (pusha, segment swap)
-├── context_switch.asm        # ASM: save/restore regs, CR3 switch, CR0.TS
-├── usermode.asm              # ASM: IRET в Ring 3 (Fake Interrupt)
+├── descriptors_flush.asm         # lgdt, lidt, ltr
+├── isr_asm.asm                   # ISR/IRQ stubs
+├── context_switch.asm            # CR3 switch, CR0.TS
+├── usermode.asm                  # IRET в Ring 3
 │
-├── pmm.c, paging.c, heap.c   # Подсистемы памяти
-├── vma.c, elf.c              # Virtual Memory Areas и ELF Loader
-├── task.c                    # PCB, Round-Robin, Lazy FPU, Reaper Queue
-├── vfs.c, initrd.c, tmpfs.c  # Файловая система и RAM-диски
-├── gdt.c, idt.c, isr.c       # Дескрипторы и прерывания
-├── pic.c, tss.c, syscall.c   # Железо и системные вызовы
-├── vga.c, framebuffer.c      # Графика (Text 80x50 + GUI 1024x768)
-├── keyboard.c, timer.c       # Драйверы PS/2 и PIT
-├── serial.c                  # COM1 (Headless debug)
-├── ata.c                     # ATA PIO Driver & MBR Parser (Day 8.2)
-├── klib.c, shell.c           # Утилиты и CLI
-├── Makefile                  # Автоматизация сборки
+├── pmm.c, paging.c, heap.c       # Memory Management
+├── vma.c, elf.c                  # VMA + ELF Loader
+├── task.c                        # Scheduler, Supervisor Trees
+├── vfs.c, initrd.c, tmpfs.c      # VFS + RAM Disks
+├── devfs.c                       # ⭐ DevFS /dev/console
+├── gdt.c, idt.c, isr.c, pic.c    # Descriptors + Interrupts
+├── tss.c, syscall.c              # TSS + Syscalls
+├── vga.c, framebuffer.c          # Graphics
+├── keyboard.c, timer.c           # PS/2 + PIT
+├── serial.c                      # COM1 (headless debug)
+├── ata.c, fat32.c                # ATA PIO + FAT32
+├── klib.c                        # Kernel utilities
+├── Makefile
 │
-├── user_src/                 # User Space программы
-│   ├── user_syscalls.h       # API системных вызовов для Ring 3
-│   ├── user_linker.ld        # Linker script для ELF-бинарников
-│   ├── user_libc.h           # POSIX-совместимый API для Ring 3 (variadic open, stdio, stdlib)
-│   ├── user_libc.c           # Реализация libc через syscalls (Bump Allocator)
-│   ├── test_hello.c          # Тест: базовый sys_write + sys_exit
-│   ├── test_segfault.c       # Тест: NULL Pointer Dereference
-│   ├── test_write_text.c     # Тест: W^X Violation (запись в .text)
-│   ├── test_stack_overflow.c # Тест: Stack Overflow (рекурсия)
-│   ├── test_oom.c            # Тест: OOM Killer (sys_brk)
-│   ├── test_vfs_stress.c     # Тест: VFS Stress (1000 файлов в TMPFS + CRC32)
-│   ├── test_memory_torture.c # Тест: 6-этапный стресс VMM + Heap + TLB
-│   ├── test_mmap.c           # Тест: mmap + mprotect + munmap
-│   └── test_fork.c           # Тест: sys_fork + Copy-on-Write + waitpid
-│
-└── .gitignore
+└── user_src/                     # ⭐ User Space (Ring 3)
+    ├── user_syscalls.h           # Syscall wrappers (inline asm)
+    ├── user_linker.ld            # ELF linker script
+    ├── user_libc.h               # ⭐ Monolithic SSOT header
+    ├── user_libc.c               # POSIX libc (Bump Allocator)
+    ├── tcc_lib_os.c              # TinyCC adaptation layer
+    ├── setjmp.asm                # setjmp/longjmp (NASM)
+    ├── crt0.asm                  # C Runtime Startup
+    ├── init.c                    # ⭐ PID 1 (/sbin/init.elf)
+    ├── shell_user.c              # ⭐ Ring 3 Shell
+        config.h                  # Config TinyCC
+```
 
-ВАЖНО "Если что-то кажется костылём — проверь,
- не нарушаешь ли ты безопастность и видение нашей ОС."
+---
 
-3. СТРУКТУРА ФАЙЛОВ И СИСТЕМ (Глубокое погружение)
-🚀 Загрузчик и Инициализация
-boot.asm:
-* Содержит Multiboot Header (magic 0x1BADB002).
-* Инициализирует Bochs VBE (1024x768x32bpp) через порты 0x01CE/0x01CF.
-* Higher Half Trampoline: Создает Identity Map (0-512MB) и Higher Half Map (0xC0000000+). Использует раздельные Page Tables (boot_page_tables и boot_page_tables_hh) для предотвращения затирания PTE.
-* Маппит Framebuffer (0xFD000000) с флагом PAGE_PCD (Cache Disable).
-* Сохраняет eax (magic) и ebx (mmap) в глобальные переменные .boot.data, избегая уязвимостей стека.
-* **Defensive Handover:** Переход в `kernel_main` осуществляется через `call`, а не `jmp`. Это гарантирует, что при случайном `return` из ядра процессор корректно попадет в `.halt_loop`, а не получит Triple Fault.
-* **Multiboot Flags Trap:** В заголовке ядра биты 3-15 ЗАРЕЗЕРВИРОВАНЫ (обязаны быть 0). Установка бита 3 (`MBOOT_INFO_MODS`) здесь приведет к отказу GRUB грузить ядро. Флаг модулей выставляется GRUB'ом автоматически в структуре `multiboot_info_t`, если в `grub.cfg` есть директива `module`.
-* **NASM Local Labels:** Локальные метки (начинающиеся с точки, например `.halt_loop`) привязаны к последней глобальной метке. Дублирование локальных меток в одном скоупе вызывает ошибку ассемблера `inconsistently redefined`.
-linker.ld:
-Разделяет секции на физические (.boot*) и виртуальные (.text, .data, .bss).
-Использует AT(ADDR(...) - 0xC0000000) для корректной LMA (Load Memory Address).
-Экспортирует символы _boot_start, _kernel_start, _kernel_end для PMM.
-kernel.c:
-Точка входа kernel_main. Реализует жесткую последовательность Bootstrap.
-Содержит стресс-тесты: Day 6.3 (On-Demand Paging), Ring 3 Transition, x87 FPU Math Task.
-🧠 Управление Памятью (Memory Management)
-config.h (Single Source of Truth):
-* Все глобальные константы памяти собраны в одном файле
-* USER_SPACE_START/END — границы пользовательского пространства (0x00000000 - 0xBFFFFFFF)
-* KERNEL_SPACE_START — начало ядра (0xC0000000)
-* LOWER_MEM_START/END — нижняя память (0x00000000 - 0x00100000)
-* PCI_MMIO_HOLE_START/END — PCI MMIO (0xE0000000 - 0xFFFFFFFF)
-* USER_STACK_VIRT_TOP/SIZE/GUARD_SIZE — стек пользователя (64KB + 4KB Guard Page)
-* USER_HEAP_START/MAX_SIZE — куча процесса (64MB максимум)
-* KERNEL_HEAP_VIRT/SIZE/END — куча ядра (32MB виртуальный пул)
-* FB_VIRT_BASE/PHYS_BASE/SIZE_MB — фреймбуфер (16MB)
-pmm.c (Physical Memory Manager):
-* Safe by Default: Изначально вся память помечена как занятая.
-* E820 Parsing & Dynamic Sizing: Читает карту памяти от GRUB. Статический битмап рассчитан на 4GB (128KB в .bss), но динамическая переменная `pmm_max_page` ограничивает сканирование только реальным объемом RAM, найденным в E820. Это предотвращает выход за пределы физически существующей памяти.
-* Punching Holes: Резервирует нижний 1MB, образ ядра, Multiboot info, PCI MMIO Hole (использует константы из config.h).
-* O(1) Allocation: Использует битмап и аппаратную инструкцию __builtin_ctz (BSF/TZCNT).
-* **Two-Pass E820 Parsing:** Сканирование карты памяти выполняется в два прохода. Pass 1 находит `max_addr` и вычисляет `pmm_max_page`. Pass 2 освобождает доступные регионы. Объединение в один проход приводит к OOM, так как `pmm_free_region()` вызывается при `pmm_max_page == 0`.
-* **Initrd Memory Protection:** Физические страницы, занятые модулями GRUB (например, `initrd.tar`), ОБЯЗАТЕЛЬНО резервируются в PMM сразу после резервирования ядра. Иначе VMM при создании Page Tables затрет TAR-архив, что приведет к монтированию пустой ФС.
-* **IRQ Safety:** Все операции с битмапом защищены cli/sti для предотвращения race conditions.
-* **PMM Accounting:** Глобальные счетчики `pmm_total_allocs` и `pmm_total_frees` для детекции утечек памяти. API: `pmm_check_balance()` возвращает 0, если все ресурсы освобождены.
-* **PMM Reference Counting:** Параллельный массив `pmm_refcounts[]` для подсчета ссылок на физические страницы. Критически важен для Copy-on-Write в sys_fork.
-paging.c (Virtual Memory Manager):
-* Direct Map: Первые 512MB RAM замаплены в 0xC0000000+ (Kernel Space).
-* On-Demand Paging (Lazy Allocation): Обработчик Page Fault (INT 14) перехватывает обращения к 0xD0000000 - 0xE0000000, выделяет Zero-filled page и делает return. Процессор аппаратно повторяет инструкцию.
-* **Copy-on-Write (CoW) Page Fault Handler:** При обнаружении PAGE_COW флага в PTE, VMM выделяет личную копию физической страницы, копирует данные, обновляет PTE с WRITE-правами и продолжает выполнение. Прозрачен для User Space.
-* Security Fix: Диапазон Kernel Heap (0xD0000000) мапится без флага PAGE_USER, чтобы защитить память ядра от доступа из Ring 3.
-* Deep Destroy: `vmm_destroy_address_space()` корректно освобождает не только Page Tables, но и сами физические страницы данных (PTE), предотвращая утечки памяти при завершении процессов.
-* Shared Kernel Space: vmm_create_address_space() клонирует индексы 768-1023 из глобального PD.
-* **PAGE_PS Hardware Check:** 7-й бит в PDE аппаратно называется PS (Page Size Extension). VMM проверяет `pde & PAGE_PS` перед созданием Page Tables, чтобы предотвратить коррупцию памяти внутри 4MB регионов.
-* **SSOT Macros:** Макросы трансляции адресов (`VIRT_TO_PHYS`, `PHYS_TO_VIRT`) определены СТРОГО ОДИН РАЗ в `paging.h`. Переопределение их в `.c` файлах нарушает Single Source of Truth.
-* **Paranoid Page Fault Handler (Zero Trust Sandbox):**
-- NULL Pointer Guard — мгновенный SIGSEGV при обращении к 0x00000000
-- Kernel Space Protection — SIGSEGV при попытке Ring 3 доступа к ядру
-- VMA Enforcement — проверка наличия VMA перед выделением страниц
-- W^X Enforcement — защита от записи в Read-Only память
-- CoW Interception — перехват записи в shared страницы с созданием приватной копии
-- OOM Trap — реактивное убийство процесса при исчерпании RAM
-heap.c (Kernel Heap):
-* Buddy System: Неявное бинарное дерево (tree[TREE_SIZE]). O(1) Merge через XOR (buddy = curr ^ 1).
-* Zero-Cost Lazy Heap: Heap больше не "съедает" 32 МБ физической RAM на старте. Он только резервирует виртуальный диапазон. Физические страницы выделяются аппаратно через Page Fault (INT 14) только в момент первой записи (например, при сохранении BlockHeader).
-* Защита: BlockHeader с magic = 0xDEADBEEF для детекта double-free и повреждения границ.
-* IRQ Safety: Все операции с деревом защищены cli/sti.
-* Bounds Checking: kfree() проверяет, что указатель принадлежит диапазону Heap'а.
-* Heap Accounting: Глобальные счетчики `heap_total_allocs` и `heap_total_frees` для детекции утечек. API: `heap_check_balance()`.
-vma.c (Virtual Memory Areas):
-* Сортированный связный список VMA для каждого процесса
-* vma_add() — добавление VMA с автоматической сортировкой по start адресу
-* vma_find() — линейный поиск VMA, содержащей заданный адрес
-* vma_clone() — глубокое клонирование списка VMA (используется в sys_fork)
-* vma_intersects() — проверка пересечений диапазонов (для Collision Detection)
-* vma_find_free_area() — поиск "дырок" для sys_mmap
-* vma_unmap_range() — умное удаление с поддержкой Split VMA
-* vma_destroy_all() — очистка всех VMA процесса (вызывается Grim Reaper'ом)
-* Интеграция в task_t через поле vma_head
-elf.c (ELF Loader):
-* Парсинг ELF32 Header и Program Headers (PT_LOAD сегменты)
-* Загрузка .text, .data, .bss с правильными правами доступа (Read/Write/Execute)
-* Создание VMA для каждого сегмента с флагами из ELF
-* Маппинг физических страниц в Page Directory процесса
-* Копирование данных из файла в выделенные страницы
-* Интеграция с sys_exec для запуска ELF-бинарников в Ring 3
-⚙️ Многозадачность (Day 7-9, Day 14)
-task.c (Scheduler + Supervisor Trees):
-PCB (task_t): Хранит PID, State, ESP, CR3, FD Table, VMA List, FPU State (512 байт, 16-byte aligned) и дерево процессов (parent, children, next_sibling).
-Round-Robin: Кольцевой двусвязный список. schedule() вызывается из PIT (каждые 20мс) или добровольно (sys_yield).
-Lazy FPU: Бит CR0.TS (Task Switched) устанавливается при переключении. При FPU-инструкции возникает #NM (INT 7), который делает fxsave/fxrstor.
-Reaper Queue: Мертвые задачи добавляются в односвязный список `dead_tasks_head` через поле `reaper_next`. Следующая запланированная задача после возврата из switch_context очищает ВСЕ задачи из очереди, предотвращая утечки памяти.
-Zombie State Machine: При вызове sys_exit процесс переходит в TASK_ZOMBIE, сохраняя exit_code до тех пор, пока родитель не заберет статус через sys_waitpid.
-Orphan Adoption: Unix-style усыновление сирот Init Task'ом (PID 1) или Erlang-style каскадное убийство детей (monitor_children).
-task_create(): Принимает опциональный параметр `custom_pdir` для передачи готового Address Space (используется sys_exec для загрузки ELF). Выделяет 16KB Kernel Stack через Kernel Heap для предотвращения Stack Overflow.
-task_fork(): Создает ребенка с CoW Address Space, клонирует FD Table, VMA List, FPU State. Ребенок видит 0 как результат fork(), родитель — PID ребенка.
-task_kill_current(): Принудительное убийство процесса из Page Fault Handler (включает прерывания перед вызовом task_exit).
-Task Accounting: Глобальный счетчик `task_count` для детекции zombie processes. API: `task_get_count()`.
-context_switch.asm:
-Сохраняет callee-saved регистры (EBX, ESI, EDI, EBP).
-Меняет ESP и загружает новый CR3 (TLB Flush).
-Устанавливает CR0.TS (взводит курок для Lazy FPU).
-usermode.asm:
-Готовит стек для IRET в Ring 3.
-Загружает пользовательские сегменты (SS=0x23, CS=0x1B).
-Включает прерывания (IF bit в EFLAGS).
-Делает iret для перехода в Ring 3.
-syscall.c (System Calls):
-INT 0x80 (DPL=3) — точка входа для Ring 3.
-sys_exit — вызывает task_exit(), который запускает Grim Reaper.
-sys_write/sys_read — проверка указателей через is_user_pointer(), делегирование в VFS.
-sys_yield — добровольная передача CPU через schedule().
-sys_brk — динамическое управление кучей процесса (расширение VMA без физического выделения).
-sys_open/sys_close/sys_unlink — POSIX VFS операции с поддержкой O_CREAT, O_TRUNC и Zero Trust Sandbox.
-sys_fork/sys_waitpid/sys_getpid — Process Management с Copy-on-Write.
-sys_mmap/sys_munmap/sys_mprotect — On-Demand Paging для user-space.
-sys_lseek/sys_fstat/sys_ioctl — Advanced File I/O.
-sys_gettimeofday/sys_sleep/sys_uname/sys_sysinfo — Time & System Info.
-sys_exec — загрузка и запуск ELF-бинарников в Ring 3:
-1. Создание нового Address Space через vmm_create_address_space()
-2. Загрузка ELF через elf_load() (создает VMA для сегментов)
-3. Создание задачи через task_create() с передачей готового pdir_virt
-4. Добавление VMA для стека и кучи в новый процесс
-💾 Storage & ATA (Day 8.2)
-ata.c (ATA PIO Driver + MBR Parser + FAT32):
-ATA PIO Driver:
-* Port I/O: Работа с регистрами Primary IDE Bus (0x1F0-0x1F7).
-* Polling Mode: Ожидание BSY/DRQ через циклы с io_delay() (без IRQ14 для простоты).
-* IDENTIFY Command: Чтение 512-байтной структуры с информацией о диске (модель, сериал, LBA capacity).
-* LBA28 Addressing: Чтение секторов через 28-битный LBA (лимит 128 GB).
-* ATAPI Detection: Проверка регистров LBA_MID (0x14) и LBA_HI (0xEB) для отличия ATA от ATAPI (CD-ROM).
-* Byte-Swap Fix: ASCII строки в IDENTIFY (model, serial, firmware) хранятся в byte-swapped формате, требуют обмена байтов перед выводом.
-* BSY/DRQ Timeout Protection: Защита от зависания на неисправных дисках (100000 итераций с io_delay).
-* Sector Count Edge Case: Поддержка sector_count=0 как 256 секторов (ATA спецификация).
-* Error Handling: Чтение регистра ATA_REG_ERROR при сбое, детальное логирование в Serial.
-MBR Parser (внутри ata.c):
-* MBR Signature: Проверка magic 0xAA55 в последних 2 байтах сектора 0.
-* Partition Table: Парсинг 4-х записей по 16 байт (offset 446-509).
-* FAT32 Detection: Поиск разделов с типом 0x0B (FAT32 CHS) или 0x0C (F32 LBA).
-* Partition Registry: Глобальный массив partition_info_t[] для хранения LBA-адресов начала разделов.
-FAT32 Read-Only Driver (fat32.c):
-* BPB Parsing: Чтение BIOS Parameter Block из Boot Sector (первый сектор раздела).
-* Cluster Math: Вычисление first_data_sector = reserved_sectors + (num_fats * fat_size_32).
-* Cluster → LBA Translation: Формула lba = partition_lba + first_data_sector + (cluster - 2) * sectors_per_cluster.
-* FAT Caching: Статический буфер fat_sector_buffer[512] для кэширования текущего сектора FAT (избегаем повторных чтений).
-* Chain Traversal: Функция fat32_next_cluster() читает следующий кластер из FAT-таблицы (маскирует верхние 4 бита).
-* EOF Detection: Проверка cluster >= 0x0FFFFFF8 (End of File).
-* VFS Integration: Каждый vfs_node_t хранит fat32_node_data_t (start_cluster, size, fs pointer).
-* Polymorphic Callbacks: fat32_read(), fat32_readdir(), fat32_finddir() интегрированы в VFS через указатели на функции.
-VFAT (Long File Names) Support:
-* LFN Entry Structure: Парсинг 32-байтных записей с атрибутом 0x0F (READ_ONLY|HIDDEN|SYSTEM|VOLUME_ID).
-* Reverse Order: LFN записи идут в обратном порядке (последний фрагмент первым, bit 6 в order = last entry).
-* UCS-2 Accumulation: Накопление символов из name1[5], name2[6], name3[2] (всего 13 UCS-2 символов на запись).
-* UCS-2 → UTF-8 Conversion: Функция ucs2_to_utf8() конвертирует 16-бит Unicode в variable-length UTF-8 (1-3 байта).
-* Checksum Verification: Функция lfn_checksum() вычисляет контрольную сумму 8.3 имени для верификации LFN записей.
-* 8.3 Fallback: Если LFN отсутствует или checksum не совпадает, используется классическое 8.3 имя (space-padded).
-* Cyrillic Support: Кириллица в именах файлов корректно отображается благодаря UTF-8 кодировке.
-* Volume Label Filter: Игнорирование записей с атрибутом FAT32_ATTR_VOLUME_ID (метка тома).
-* Deleted Entry Filter: Игнорирование записей с первым байтом 0xE5 (удаленные файлы).
-⚠️ Архитектурное решение (День 8.2):
-MBR Parser интегрирован в ata.c для упрощения отладки и снижения связанности.
-Разделение на отдельный partition.c планируется на День 16 (User-Mode Drivers),
-когда ATA драйвер будет вынесен в Ring 3 как ata_server процесс, а partition_scan()
-станет отдельным IPC-сервисом или библиотечной функцией.
-📂 Файловая Система (Day 8, Day 13, Day 16)
-vfs.c (Virtual File System):
-Полиморфизм: vfs_node_t содержит указатели на функции (read, write, readdir, create, unlink, open). VFS не знает о FAT32 или RAM.
-LCRS Tree: Left-Child Right-Sibling для каталогов (отказ от realloc).
-3-звенная модель FD: vfs_node_t (Inode) -> open_file_t (offset, ref_count) -> fd_table в PCB.
-RBAC: Флаг FS_SYSTEM. Ядро игнорирует его, Ring 3 получает EACCES.
-**True Mountpoints:** Флаг FS_MOUNTPOINT активирует механизм "телепортации" при обходе дерева. При встрече mountpoint-ноды VFS переходит к корню примонтированной ФС (mountpoint_node), предотвращая shadowing нод от initrd.
-POSIX Syscalls: sys_open (с O_CREAT, O_TRUNC, variadic mode), sys_close, sys_read, sys_write, sys_readdir, sys_unlink, sys_lseek, sys_fstat, sys_ioctl.
-initrd.c (RAM Disk):
-Парсит TAR UStar из GRUB Module.
-Разворачивает структуру в tmpfs (Heap). Автоматически создает промежуточные директории.
-* **Makefile POSIX Compliance:** Команда `tar` в Makefile использует только стандартные флаги (`--format=ustar -cf`). Очистка путей (снятие `./`) выполняется парсером, а не через `--transform`, что гарантирует кроссплатформенность.
-* **Binary Magic Comparison:** UStar magic (`"ustar"`) проверяется через `k_memcmp`, а не `strncmp`. Строковые функции дают ложные срабатывания на нулевых блоках (TAR EOF padding).
-* **TAR Padding Tolerance:** Парсер сканирует первые 8KB модуля в поисках валидного magic, что делает его устойчивым к padding'у от GRUB или специфичных версий `tar`.
-tmpfs.c (Writable RAM Disk):
-Динамическое расширение файлов через kmalloc/kfree с перевыделением (capacity *= 2).
-Polymorphic Callbacks: tmpfs_read, tmpfs_write, tmpfs_create, tmpfs_unlink, tmpfs_open интегрированы в VFS.
-**tmpfs_open с O_TRUNC:** При открытии существующего файла с флагом O_TRUNC, обнуляется size, но сохраняется capacity для переиспользования буфера (heap-оптимизация).
-Автоматическое монтирование в /tmp через vfs_mount() при загрузке (активация FS_MOUNTPOINT).
-🖥 Графика и Вывод
-framebuffer.c:
-Double Buffering: Рисование в back_buffer (RAM).
-Dirty Rectangles: fb_flush() копирует в LFB только изменившийся бокс через rep movsl.
-Unicode: Встроенный UTF-8 State Machine и чтение UCS-2 таблиц из PSF1 шрифтов.
-vga.c: Текстовый режим 80x50. Загрузка кастомного шрифта 8x8 в Plane 2 через порты VGA Controller.
-klib.c: Паттерн Strategy. output_char() прозрачно маршрутизирует вывод в FB или VGA.
-🛡 Прерывания и Железо
-gdt.c: Flat Model (4GB), Ring 0/3 Code/Data сегменты, TSS Descriptor.
-idt.c: 256 векторов. EOI Lock Bypass: outb(0x20, 0x20) отправляется в PIC ДО вызова C-обработчика, чтобы schedule() не заблокировал IRQ.
-tss.c: Настройка ESP0 для аппаратного переключения стека при прерываниях из Ring 3.
-timer.c: PIT (1000 Hz). Квант времени = 10 тиков.
-keyboard.c: PS/2 (IRQ1). Ring Buffer (Producer-Consumer), обработка Make/Break кодов, Shift/Ctrl/CapsLock.
-ОПИСАНИЕ ФУНКЦИЙ БИБЛИОТЕКИ klib.c
-klib.c — это стандартная библиотека ядра, заменяющая libc. Она полностью freestanding и не использует системные вызовы.
-📦 Работа с памятью
-void* k_memset(void* ptr, int value, size_t num) — Заполнение памяти байтом.
-void* k_memcpy(void* dest, const void* src, size_t num) — Копирование блока.
-int k_memcmp(const void* s1, const void* s2, size_t n) — Побайтовое сравнение.
-🔤 Строковые функции
-size_t k_strlen(const char* str) — Длина строки.
-int k_strcmp(const char* s1, const char* s2) — Полное сравнение.
-int k_strncmp(const char* s1, const char* s2, size_t n) — Сравнение первых n символов.
-char* k_strncpy(char* dest, const char* src, size_t n) — Безопасное копирование не более n символов.
-Если src короче n, остаток буфера dest принудительно заполняется нулями ('\0').
-Критично для предотвращения утечки данных из стека/кучи (например, при парсинге FAT32 LFN имен и передаче их в структуры VFS dirent_t).
-🔢 Конвертация чисел
-void k_itoa(int value, char* buf, int base) — Int to ASCII (поддержка base 10/16).
-void k_uitoa(unsigned int value, char* buf, int base) — Unsigned Int to ASCII.
-int k_atoi(const char* str) — ASCII to Int (игнорирует пробелы, поддерживает знак).
-uint32_t k_atoh(const char* str) — ASCII to Hex (поддержка префикса 0x).
-🖨 Вывод и Форматирование
-void k_print(const char* str) — Печать строки (через Strategy Pattern).
-void k_putchar(char c) — Печать одного символа.
-void k_clear(void) — Очистка экрана (FB или VGA).
-void k_set_color(uint8_t vga_fg, uint8_t vga_bg) — Установка цвета. Маппит 16-цветную палитру VGA в 32-битный RGB для синхронизации с Framebuffer.
-void k_printf(const char* fmt, ...) — Форматированный вывод. Поддерживает %d, %u, %x, %p, %s, %c, %%. (Внимание: модификаторы ширины типа %08x не поддерживаются и ломают va_list).
-int k_vsprintf(char* buf, const char* fmt, va_list args) — Форматирование в буфер (используется fb_printf).
-serial.h
-#ifndef SERIAL_H
-#define SERIAL_H
-void serial_init(void);
-void serial_putc(char c);
-void serial_print(const char* str);
-// Форматированный вывод в Serial-порт (поддерживает %x, %p, %d, %u, %s, %c)
-void serial_printf(const char* fmt, ...);
-#endif
-5. АРХИТЕКТУРНЫЕ ТОНКОСТИ И TODO
-🔄 Порядок инициализации подсистем (Bootstrap)
-Строгая последовательность в kernel_main. Нарушение порядка ведет к Triple Fault.
-1. fb_init() (Временный, физический адрес LFB)
-2. gdt_install() (Flat Model + TSS)
-3. idt_install() (256 векторов)
-4. tss_install() (Load TR)
-5. syscall_init() (INT 0x80)
-6. pmm_init() (Two-Pass E820 + Reserve Modules, Safe by Default)
-7. paging_init() (Включение CR0.PG, Direct Map, Reserving)
-8. fb_init() (Resurrect: перепривязка к виртуальному адресу 0xFD000000)
-9. heap_init() (Buddy System в 0xD0000000)
-10. vfs_init() & initrd_init() (Mount tmpfs через vfs_mount)
-11. fat32_init()
-12. tasking_init() (Создание main_task как Init Task PID 1, FPU setup)
-13. keyboard_install() & timer_init() (Включение IRQ)
-14. shell_run() (Бесконечный цикл CLI)
-⚠️ Критические архитектурные нюансы (Выжимка из Базы Знаний)
-Framebuffer PCD (Page Cache Disable): При маппинге LFB (Linear Framebuffer) в boot.asm и paging.c ОБЯЗАТЕЛЬНО использовать флаг PAGE_PCD (0x10). Без него CPU кэширует записи в видеопамять, что вызывает артефакты, тиринг и падение FPS.
-Virtual Stack Switch: Сразу после включения CR0.PG в boot.asm необходимо выполнить mov esp, stack_top, чтобы переключиться с временного физического стека (16KB) на полноценный виртуальный стек в Higher Half (256KB). Иначе ядро упадет в Triple Fault при отключении Identity Map.
-Context Hijacking is Dead: sys_exit больше не запускает shell_run() напрямую. Он вызывает task_exit(), что гарантирует освобождение стека, Page Directory и FD таблицы через механизм Grim Reaper в schedule().
-Reaper Queue Pattern: Освобождение ресурсов TASK_DEAD задачи невозможно в её собственном контексте (так как switch_context использует её стек для выхода). Мертвые задачи добавляются в глобальную очередь `dead_tasks_head` через поле `reaper_next`, которая очищается следующей запланированной задачей сразу после возврата из switch_context. Это предотвращает потерю задач при race conditions.
-Scheduler IRQ Safety: schedule() обязан сохранять EFLAGS и выполнять cli на входе, чтобы предотвратить повреждение связного списка задач, если schedule() вызван добровольно (sys_yield) при активных прерываниях.
-Heap-VMM Synergy (Lazy Write): `kmalloc()` возвращает виртуальный адрес, у которого нет физической страницы (PTE пуст). Физическая страница аллоцируется из PMM только когда ядро попытается записать туда данные (например, `header->magic = 0xDEADBEEF`), что триггерит INT 14. Это экономит десятки мегабайт RAM.
-VMM Deep Free Trap: При уничтожении адресного пространства (смерть процесса) недостаточно освободить только Page Directory и Page Tables. Необходимо пройтись по всем валидным PTE и вызвать `pmm_free_page()` для самих страниц данных, иначе система быстро упадет в OOM из-за утечки физической памяти.
-Kernel Heap Isolation: Обработчик Page Fault для диапазона 0xD0000000 (Kernel Heap) ОБЯЗАН мапить страницы без флага `PAGE_USER`. Иначе пользовательский процесс сможет легально читать/писать в кучу ядра, просто обратившись по этому адресу.
-VIRT_TO_PHYS Underflow: Секции .boot имеют адреса < 0xC0000000. Макрос VIRT_TO_PHYS обязан содержать проверку addr >= 0xC0000000, иначе произойдет unsigned underflow и загрузка мусора в CR3.
-TSS ESP0 Virtual Address: В schedule() при обновлении TSS нужно передавать виртуальный адрес стека ядра (PHYS_TO_VIRT), иначе MMU не найдет стек при прерывании из Ring 3.
-EOI Lock: Отправка EOI в PIC должна быть ДО вызова C-обработчика IRQ, иначе schedule() переключит задачу, и линия IRQ заблокируется навсегда.
-FXSAVE Trap (#NM Recursion): В обработчике INT 7 (#NM) инструкция clts (сброс бита CR0.TS) должна быть выполнена ДО fxsave, иначе fxsave сам вызовет #NM (бесконечная рекурсия).
-All-Zero FXRSTOR: Буфер fpu_state нельзя оставлять нулевым. После fninit нужно сразу сделать fxsave, чтобы сохранить валидный "слепок" FPU, иначе следующий fxrstor вызовет #GP.
-16-Byte Alignment: Поле fpu_state[512] должно быть первым в структуре task_t. pmm_alloc_page() возвращает адреса кратные 4096, что гарантирует аппаратное выравнивание для fxsave.
-Stack Forging (ABI): При создании задачи стек "подделывается" вручную. Перед первой инструкцией ret в switch_context на стеке должны лежать callee-saved регистры и адрес task_entry_trampoline.
-Signed Char Trap: В Shell при фильтрации ввода всегда приводить char к uint8_t, иначе UTF-8 байты (кириллица) интерпретируются как отрицательные числа и отбрасываются.
-PSF1 UCS-2: Таблицы Unicode в PSF1 шрифтах закодированы в UTF-16LE. Читать их нужно через uint16_t*, а не посимвольно.
-sys_exec Address Space Handover: sys_exec создает новый Address Space, загружает в него ELF (создавая VMA для сегментов), и передает готовый pdir_virt в task_create(). Это предотвращает двойное создание Page Directory и утечки памяти.
-16KB Kernel Stack: Kernel Stack выделяется через kmalloc(16384) вместо pmm_alloc_page(). Это гарантирует виртуальную смежность и защиту от Kernel Stack Overflow при глубокой вложенности вызовов ядра (serial_printf + VFS + Scheduler).
-Tail Call Optimization Trap: User Space программы компилируются с флагом -fno-optimize-sibling-calls для предотвращения превращения рекурсии в бесконечный цикл (что ломает тесты Stack Overflow).
-W^X Enforcement: user_linker.ld явно разделяет сегменты на Read+Execute (.text) и Read+Write (.data) с ALIGN(4096) для физической изоляции кода от данных.
-Mountpoint Teleportation: В sys_open и vfs_findnode при встрече флага FS_MOUNTPOINT происходит "телепортация" к mountpoint_node. Это решает проблему shadowing нод, когда initrd и tmpfs создают одноименные директории (например, /tmp).
-SSOT Syscall Constants: Все POSIX-константы (O_CREAT=0x0040, O_TRUNC=0x0200 и т.д.) синхронизированы с Linux i386 ABI и определены строго один раз в vfs.h и user_syscalls.h. Рассинхронизация приводит к тому, что ядро "не видит" флаги от user-space программ.
-🏗 Принципы проектирования API
-* **Dependency Inversion (DIP):** Высокоуровневые подсистемы (`heap.c`, `vfs.c`) не включают заголовки низкоуровневых драйверов (`vga.h`). Определения цветов перенесены в `klib.h`, делая API самодостаточным. Подсистемы памяти остаются в неведении о том, используется ли VGA или Framebuffer (Strategy Pattern).
-* **Header Self-Sufficiency:** Заголовочный файл, использующий `bool`/`true`/`false`, обязан включать `<stdbool.h>` напрямую, чтобы любой `.c` файл, сделавший `#include`, автоматически получил все необходимые типы.
-* **Implicit Function Declaration:** Компиляция с `-Wall -Wextra` требует явного подключения заголовков. Использование `serial_printf` в `isr.c` требует `#include "serial.h"`.
-* **Double Dump for Panic:** Фатальные исключения (ISR) выводят дамп регистров ОДНОВРЕМЕННО в VGA (для локального пользователя) и Serial COM1 (для headless-отладки), так как видеодрайвер может быть в невалидном состоянии.
-* **Double Dump for Diagnostics:** Test Runner дублирует `[PASS]`/`[FAIL]` сообщения и в Serial, и в VGA через String Builder паттерн (k_memcpy + k_itoa), так как k_sprintf отсутствует в ядре.
-* **Single Source of Truth (SSOT):** Все глобальные константы памяти (границы User/Kernel Space, Heap, Stack, Framebuffer) определены СТРОГО ОДИН РАЗ в `include/config.h`. Любой файл, использующий эти константы, обязан делать `#include "config.h"`.
-📅 День 9: User Space & Memory Protection
-✅ Реализовано
-Инфраструктура VMA (Virtual Memory Areas):
-* include/config.h — Single Source of Truth для всех границ памяти (User Space, Kernel Heap, Stack, Framebuffer)
-* include/vma.h + src/vma.c — подсистема VMA с сортированным связным списком
-* Интеграция VMA в task_t и автоматическая очистка через Grim Reaper
-Защита памяти (Zero Trust Sandbox):
-* Параноидальный page_fault_handler с проверкой VMA перед выделением страниц
-* NULL Pointer Guard — мгновенный SIGSEGV при обращении к 0x00000000
-* Kernel Space Protection — SIGSEGV при попытке Ring 3 доступа к ядру
-* W^X Enforcement — защита от записи в .text секции
-* OOM Trap — проактивная проверка в sys_brk и реактивное убийство процесса при исчерпании RAM
-Системные вызовы:
-* sys_brk — динамическое управление кучей (расширение VMA без физического выделения)
-* sys_exec — загрузка и запуск ELF-бинарников в Ring 3
-ELF Loader:
-* include/elf.h + src/elf.c — парсинг ELF Header и Program Headers (PT_LOAD)
-* Загрузка сегментов .text, .data, .bss с правильными правами доступа
-* Создание VMA для каждого сегмента ELF
-* Интеграция с task_create() через передачу готового Address Space
-Инфраструктура сборки:
-* Переделан Makefile — все артефакты в build/, автоматическая компиляция user-space программ
-* user_linker.ld — linker script для ELF-бинарников
-6. ПЛАН РАЗВИТИЯ (Дорожная карта)
-✅ ЧТО РАБОТАЕТ (Завершено на День 16 — Alpha 0.2)
-День 1-3: Загрузчик, GDT/IDT, VGA, Keyboard, базовый Shell.
-День 4: Privilege Separation (Ring 0/3), TSS, Syscalls (INT 0x80), Context Hijacking.
-День 5: Оптимизация PMM (__builtin_ctz), Double Buffering, Dirty Rectangles, PSF1 Unicode.
-День 6: Higher Half Kernel, E820 Parsing, On-Demand Paging (Page Fault Handler).
-День 7: Preemptive Multitasking (Round-Robin), Hardware Memory Isolation (CR3 Switch), Lazy FPU Switching (#NM, fxsave).
-День 8.1: VFS (Полиморфизм, LCRS), Initrd (TAR UStar tmpfs), 3-звенная модель File Descriptors, Ring-Based Access Control (RBAC), POSIX Syscalls (ls, cat).
-* **Robust Initrd Parser:** Автоматический поиск UStar magic, защита от пустых блоков, корректная работа с GNU tar и bsdtar.
-* **PMM Module Protection:** Резервирование физических страниц GRUB-модулей предотвращает Memory Corruption при создании Page Tables.
-День 8.2: Storage & FAT32 (ATA PIO + VFAT)
-* ATA PIO Driver: Работа с портами 0x1F0-0x1F7, LBA28 addressing, Polling Mode (без IRQ14).
-* IDENTIFY Command: Чтение 512-байтной структуры диска (модель, сериал, firmware, LBA capacity).
-* ATAPI Detection: Проверка регистров LBA_MID/LBA_HI для отличия ATA от CD-ROM.
-* Byte-Swap Fix: Корректная обработка ASCII строк в IDENTIFY (модель, сериал хранятся в byte-swapped формате).
-* BSY/DRQ Timeout Protection: Защита от зависания на неисправных дисках (100000 итераций с io_delay).
-* MBR Parser: Парсинг таблицы разделов (4 записи по 16 байт, offset 446-509), валидация сигнатуры 0xAA55.
-* FAT32 Read-Only: Парсинг BPB (BIOS Parameter Block), вычисление first_data_sector, fat1_lba.
-* Cluster Chain Navigation: Чтение FAT-таблицы, обход цепочек кластеров через fat32_next_cluster().
-* VFAT (Long File Names): Парсинг LFN записей (атрибут 0x0F), накопление UCS-2 символов.
-* UCS-2 → UTF-8 Conversion: Поддержка кириллицы и Unicode в именах файлов (до 255 символов).
-* LFN Checksum Verification: Проверка контрольной суммы 8.3 имени для верификации LFN записей.
-* VFS Mount: Флаг FS_MOUNTPOINT для "телепортации" по дереву (transparent mount).
-День 9: User Space & Memory Protection
-* VMA (Virtual Memory Areas): Инфраструктура для управления виртуальной памятью процессов
-* Zero Trust Sandbox: Параноидальная защита памяти (NULL Guard, W^X, OOM Trap)
-* ELF Loader: Загрузка и запуск ELF-бинарников в Ring 3
-* sys_brk/sys_exec: Динамическое управление памятью и запуск процессов
-* Reaper Queue: Безопасное освобождение ресурсов мертвых процессов
-День 10: Testing Suite (Alpha 0.1 Release)
-* **Pillar 1: ELF Test Suite** — 6 тестовых бинарников (test_hello, test_segfault, test_write_text, test_stack_overflow, test_oom, test_vfs_stress)
-* **Pillar 2: Stress Tests** — Mass Spawn 1000 kernel-level задач с проверкой Reaper Queue
-* **Pillar 3: VFS Stress** — Создание/удаление 1000 файлов в TMPFS с CRC32 верификацией
-* **PMM/Heap/Task Accounting** — Глобальные счетчики alloc/free для детекции утечек памяти
-* **Test Runner** — Shell-команды run_tests и stress spawn для автоматизации
-* **POSIX VFS Syscalls** — sys_open (с O_CREAT), sys_close, sys_unlink с Zero Trust Sandbox
-* **TMPFS Dynamic Growth** — Writable RAM Disk с автоматическим расширением через kmalloc
-* **16KB Kernel Stack** — Переход с PMM на Kernel Heap для предотвращения Stack Overflow
-* **W^X Enforcement** — user_linker.ld с явным разделением Read+Execute и Read+Write сегментов
-* **Tail Call Optimization Fix** — Флаг -fno-optimize-sibling-calls для корректной работы рекурсии
-# 📘 BARE METAL OS — План реализации POSIX Syscalls и TinyCC Integration
-## Self-Hosting Toolchain | Версия: Day 11-25 | Статус: Day 16 Завершен, Готовность к TinyCC
----
-## 🎯 ЦЕЛЬ ПРОЕКТА
-Превратить Bare Metal OS из "учебного проекта" в **настоящую self-hosting платформу**, которая может:
-- Компилировать программы **внутри своей ОС** через TinyCC
-- Предоставлять **25 POSIX-like syscalls** для user-space программ
-- Обеспечивать **Zero Trust Sandbox** через валидацию всех системных вызовов
-- Демонстрировать **production-ready** архитектуру (как Minix 3 / seL4)
-**Ключевое отличие от других hobby OS:** Self-hosting capability — ОС компилирует программы сама для себя.
----
-## 🏗 АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
-### Single Source of Truth (SSOT)
-Все syscall numbers, константы памяти и API определены **строго один раз** в заголовочных файлах. Никаких дублирований в `.c` файлах.
-### Zero Trust Sandbox
+## 3. АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
+
+### 3.1 Single Source of Truth (SSOT)
+
+Все глобальные константы памяти определены **строго один раз** в `include/config.h`. Любой файл, использующий эти константы, обязан делать `#include "config.h"`.
+
+> ⚠️ **Нахождение ревью [C1]:** Макросы `VIRT_TO_PHYS`/`PHYS_TO_VIRT` были перенесены в `config.h`, но SSOT-документация указывала на `paging.h`. **Решение:** `config.h` является единственным источником, `paging.h` делает `#include "config.h"`.
+
+### 3.2 Zero Trust Sandbox
+
 **Каждый** syscall ОБЯЗАН:
 - Валидировать номера системных вызовов
 - Проверять указатели через `is_user_pointer()`
-- Проверять Resource Container лимиты
+- Копировать строки через `copy_string_from_user()`
 - Enforce W^X (Write XOR Execute) политику
-- Возвращать стандартные errno коды (-EINVAL, -ENOMEM, -EPERM)
-### Two-Tier Library System
-**Строгое разделение** Ring 0 и Ring 3:
-- `klib.c` (Ring 0) — прямой доступ к kernel heap, PMM, VGA
-- `user_libc.c` (Ring 3) — только через syscalls (sys_brk, sys_mmap, sys_write)
+- Возвращать стандартные errno коды
+
+### 3.3 Two-Tier Library System
+
+| Уровень | Библиотека | Доступ |
+|---|---|---|
+| Ring 0 | `klib.c` | Прямой доступ к kernel heap, PMM, VGA/FB |
+| Ring 3 | `user_libc.c` | **Только** через syscalls |
+
 Попытка дать Ring 3 доступ к `kmalloc()` **полностью ломает** Zero Trust Sandbox.
-### Syscall Table Pattern
-Единая таблица `syscall_table[256]` с function pointers. Dispatcher валидирует номер и вызывает соответствующую функцию. Это индустриальный стандарт (Linux, FreeBSD).
----
-## 📅 ФАЗА 1: POSIX-LIKE SYSCALL INFRASTRUCTURE (День 11-15)
----
-## 📋 СТАТУС ДНЯ 11: Syscall Table Expansion & Memory Hardening (ЗАВЕРШЕНО)
-### ✅ Реализовано
-- Создан `include/kerrno.h` с полным набором POSIX-совместимых кодов ошибок (EPERM, ENOENT, ENOMEM, EFAULT, EINVAL, ENOSYS, ENAMETOOLONG и др.)
-- Переработан `include/syscall.h`: добавлены номера syscall'ов для будущей POSIX-инфраструктуры (SYS_WAITPID, SYS_GETPID, SYS_CREAT и др.), подключен `kerrno.h`
-- Полностью переписан `src/syscall.c`:
-* Таблица `syscall_table[256]` переведена на **Designated Initializers** (инициализация на этапе компиляции, NULL для пропусков)
-* Диспатчер возвращает `-ENOSYS` для несуществующих syscall'ов
-* Добавлена функция `copy_string_from_user()` с побайтовой проверкой (Zero Trust защита от выхода строк в Kernel Space)
-* Улучшена `is_user_pointer()` — корректная проверка переполнения `addr + size`
-* `sys_brk` теперь использует точный поиск VMA по `start == USER_HEAP_START` и возвращает `-ENOMEM` при OOM
-* VFS-обработчики (open/unlink/exec) используют безопасное копирование строк вместо прямой передачи указателей
-- Обновлен `src/paging.c`:
-* `vmm_map_page_in_pd()` возвращает `int` (0 = успех, -1 = OOM PT) и освобождает старую физическую страницу при пере-маппинге (защита от утечки PMM)
-* `vmm_destroy_address_space()` обнуляет PDE после освобождения (защита от Double Free), поддерживает 4MB страницы (PAGE_PS)
-* Добавлена диагностическая телеметрия освобожденных страниц
-* `page_fault_handler` реализует **Strict Error Propagation**: при сбое маппинга из-за OOM PT принудительно вызывает `pmm_free_page(phys)` для отката выделения страницы данных
-- Обновлен `src/vma.h` и `src/vma.c`: функция `vma_add()` теперь возвращает `int` (0 при успехе, -ENOMEM при OOM), что позволяет корректно обрабатывать ошибки выделения в syscall'ах
-- Обновлен `src/elf.c`:
-* Добавлена защита от corrupted ELF-файлов (проверка `filesz <= memsz`, clamping при нарушении)
-* Реализован rollback `pmm_free_page(phys)` при сбое `vmm_map_page_in_pd`, предотвращающий Orphaned Page Leak
-- Обновлен `test_runner.c`:
-* Добавлен **Warmup Phase** Kernel Heap (kmalloc/kfree для типичных размеров блоков), который триггерит первичные Page Fault для Buddy System до начала замеров PMM
-* Реализован паттерн **Quiescent State Convergence**: `get_stable_heap_balance()` опрашивает баланс кучи в цикле до схождения (5 неизменных чтений подряд), устраняя "плавающие" утечки от фоновых задач
-* `spawn_process` оборачивает `task_create` + `vma_add` в критическую секцию `cli/sti`, предотвращая race condition между PIT и созданием Address Space
-- Обновлен `src/pmm.c`: удалены дубликаты макросов `VIRT_TO_PHYS`/`PHYS_TO_VIRT` (SSOT Compliance)
-- Обновлен `include/paging.h`: добавлено `extern uint32_t boot_page_directory[]` для корректной линковки с `boot.asm`
-- Синхронизированы номера syscall'ов между `include/syscall.h` и `user_src/user_syscalls.h` (`SYS_YIELD = 158` — стандарт Linux sched_yield)
-- **Memory Torture Test (Day 11 Bonus):** добавлен многоступенчатый стресс-тест `test_memory_torture.elf` с 6 этапами (Linear Demand Storm, Random Access Matrix с LCG state recovery, Brk Staircase, OOM Boundary Probe, Yield Storm Coherency, Final Integrity Sweep), доказывающий production-ready когерентность VMM + TLB + Scheduler
-### 🏛 Архитектурные решения
-1. **True POSIX exec**: `sys_exec` теперь **заменяет** текущий процесс (сохраняя PID и FD table), а не создает новую задачу. Это критически важно для будущего `fork/exec` паттерна Unix.
-2. **Zero Trust Sandbox**: Все указатели из Ring 3 проходят проверку `is_user_pointer()`, все строки копируются через `copy_string_from_user()`.
-3. **POSIX errno**: Все syscall'ы возвращают стандартные отрицательные errno-коды вместо магических чисел.
-4. **Compile-time инициализация**: Таблица syscall'ов готова до запуска ядра, что исключает race conditions при раннем обращении к syscall'ам.
-5. **Strict Error Propagation в VMM**: Любая функция маппинга, способная вернуть OOM, возвращает `int`. Вызывающий код обязан проверить результат и выполнить rollback аллокаций, предотвращая silent memory corruption.
-6. **Atomic Metrics**: Глобальные счетчики PMM/Heap считываются под `cli/sti` для предотвращения Torn Read race conditions между аллокатором и прерываниями.
-7. **Quiescent State Testing**: Test Suite использует конвергентный опрос баланса вместо одноразового снапшота, что математически гарантирует детерминированность результатов в preemptive multitasking среде.
-### 🐛 Исправленные критические баги (Memory Hardening)
-1. **Orphaned Page Trap (PMM Leak при OOM)**: При исчерпании PMM во время аллокации Page Table внутри `vmm_map_page_in_pd`, страница данных, выделенная ранее, терялась навсегда (не была записана в PTE, поэтому Reaper не мог её освободить). Исправлено через Strict Error Propagation и явный `pmm_free_page(phys)` в `page_fault_handler` и `elf_load`.
-2. **Transient Heap Leak (плавающая утечка 1-5 блоков)**: Вызвана race condition между `test_runner` и фоновыми задачами (Shell, Serial buffers, Reaper logging). Фоновые задачи выполняли временные `kmalloc/kfree` в момент замера метрик. Исправлено паттерном Quiescent State Convergence в `get_stable_heap_balance()`.
-3. **Task Creation Preemption Race (SIGSEGV при старте ELF)**: PIT мог прервать `spawn_process`/`sys_exec` после `task_create()`, но до `vma_add()` для стека/кучи. Задача получала CPU с невалидным Address Space и падала при первом же `push` в стек. Исправлено через оборачивание создания задачи в критическую секцию `cli/sti`.
-4. **SSOT Macro Duplication**: Макросы трансляции адресов дублировались в `pmm.c` и `paging.h`, создавая архитектурный долг. Исправлено удалением дубликатов и централизацией в `paging.h`.
-5. **Syscall Number Desync**: `SYS_YIELD` имел номер 24 в user-space и 200 в ядре, приводя к `Unimplemented syscall` и неработающему планировщику в user-тестах. Исправлено синхронизацией со стандартом Linux (158).
-### ⚠️ Известные ограничения (Принято как архитектурные особенности)
-**VMA Collision Detection в sys_brk (TODO на День 12)**:
-Текущая реализация `sys_brk` расширяет VMA кучи без проверки пересечений с другими VMA (ELF segments, Stack). Если пользовательский процесс через `sys_brk` вырастит кучу до адреса `.text` сегмента (например, `0x08048000`), произойдет Memory Layout Collision — куча "съест" исполняемый код, что приведет к silent corruption и последующему SIGSEGV. `test_memory_torture.elf` использует программный предохранитель (`ELF_BASE_LIMIT = 0x08040000`) для обхода этой проблемы. Полноценное решение (цикл проверки пересечений через `vma_find_intersection`) запланировано на День 12 в рамках рефакторинга `sys_mmap`.
-### 🎯 Готовность к следующему этапу
-Инфраструктура Дня 11 **полностью готова**, протестирована и hardened. Test Suite (Pillar 1: 6 ELF тестов + Memory Torture, Pillar 2: Mass Spawn Stress, Pillar 3: VFS Stress) проходит со 100% детерминированным результатом `[PASS] No leaks, no zombies.`. Подсистема памяти (PMM + VMM + Demand Paging + TLB Invalidation + Heap) достигла production-ready SLA.
-**Следующие логические шаги по роадмапу:**
-- **День 12**: `sys_mmap` / `sys_munmap` / `sys_mprotect` + VMA Collision Detection в `sys_brk` (требуется для TinyCC и продвинутого управления памятью)
-- **День 14**: `sys_fork` / `sys_waitpid` / `sys_getpid` + Init Task (PID 1) + Supervisor Trees (фундамент для "Бессмертной крепости")
-Рекомендуется начать с **Дня 14**, так как `sys_fork` с Copy-on-Write критически важен для паттерна `fork/exec`, который мы зафиксировали в True POSIX `sys_exec` на этом дне. День 12 (mmap) можно реализовать параллельно или после, так как TinyCC появится только на Дне 17-20.
----
-## 📋 СТАТУС ДНЯ 12: Memory Management Syscalls & VMA Hardening (ЗАВЕРШЕНО)
-### ✅ Реализовано
-- Добавлены POSIX-совместимые системные вызовы управления памятью: `sys_mmap` (90), `sys_munmap` (91), `sys_mprotect` (125).
-- Внедрены константы `PROT_READ/WRITE/EXEC` и `MAP_ANONYMOUS/PRIVATE` в `syscall.h` и `user_syscalls.h` (SSOT).
-- Расширена подсистема VMA (`vma.h` / `vma.c`):
-* `vma_intersects()` — проверка пересечений диапазонов (используется для защиты от коллизий).
-* `vma_find_free_area()` — алгоритм поиска свободных "дырок" в виртуальном пространстве для `mmap`.
-* `vma_unmap_range()` — умное удаление регионов с поддержкой **Split VMA** (разделение ноды при `munmap` из середины диапазона).
-- Расширена подсистема VMM (`paging.h` / `paging.c`):
-* `vmm_unmap_and_free_page_in_pd()` — корректный unmap с возвратом физической страницы в PMM (защита от PMM Leak).
-* `vmm_protect_page_in_pd()` — изменение флагов PTE без пересоздания маппинга (для `mprotect`).
-- Обновлен `sys_brk_handler`: внедрен **VMA Collision Detection**. Куча больше не может молча затереть `.text` сегменты или `mmap`-регионы.
-- Обновлен Memory Layout в `config.h`: `USER_HEAP_START` сдвинут на `0x10000000` (256 MB), добавлена зона `USER_MMAP_START` на `0x40000000` (1 GB). Созданы гигантские "воздушные подушки" (Air Gaps) между кучей, mmap и стеком.
-- Обновлен `user_syscalls.h`: добавлен безопасный inline-ассемблер для `sys_mmap` (с сохранением `EBP` на стек, так как syscall требует 6 аргументов).
-### 🏛 Архитектурные решения
-1. **On-Demand Paging для mmap**: `sys_mmap` не выделяет физическую память сразу. Он создает VMA и возвращает виртуальный адрес. Физические страницы выделяются аппаратно через Page Fault (INT 14) при первом обращении.
-2. **Атомарный sys_munmap (Strict Error Propagation)**: Сначала модифицируется список VMA (что может вызвать OOM при `kmalloc` для Split VMA). Если OOM — операция прерывается, Page Tables не трогаются. Только при успехе начинается освобождение физических страниц.
-3. **W^X Enforcement на уровне Syscall**: `sys_mmap` и `sys_mprotect` жестко.reject'ят запросы с флагами `PROT_WRITE | PROT_EXEC`, возвращая `-EPERM`.
-4. **Zero Trust Sandbox для VMA**: Добавлена защита от создания User VMA в Kernel Space (адреса >= `0xC0000000`).
-5. **Синергия mprotect и Demand Paging**: Если `mprotect` вызывается на еще не выделенной странице, меняются только флаги в VMA. При первом Page Fault ядро выделит страницу уже с обновленными правами.
-### 🐛 Исправленные критические баги
-1. **PMM Leak в vmm_unmap_page_in_pd**: Старая функция просто обнуляла PTE, но не освещала физическую страницу в PMM. При активном использовании `munmap` система быстро уходила в OOM. Исправлено внедрением `vmm_unmap_and_free_page_in_pd()`.
-2. **Silent Memory Corruption в sys_brk**: Ранее `sys_brk` мог расширить кучу до адресов `.text` сегмента (`0x08048000`), затирая исполняемый код процесса. Исправлено через `vma_intersects()`.
-3. **Memory Layout Collision**: Куча (`0x08000000`) находилась слишком близко к стандартным адресам загрузки ELF. Сдвиг `USER_HEAP_START` на `0x10000000` архитектурно разделил пользовательские данные и код.
-### 🧪 Пройденные тесты
-- **test_mmap.elf**: Успешное выделение 8KB, запись (Demand Paging), `mprotect(PROT_READ)`, чтение, `munmap`.
-- **test_memory_torture.elf**: Пройдены все 6 этапов стресс-тестирования:
-1. Linear Demand Paging Storm
-2. Random Access Matrix (с LCG state recovery для верификации)
-3. Brk Staircase Expansion (проверка VMA Collision Detection)
-4. OOM Boundary Probe (graceful failure при попытке выделить 256MB)
-5. Yield Storm Coherency (проверка TLB/Scheduler race conditions)
-6. Final Integrity Sweep
-### 🎯 Готовность к следующему этапу
-Подсистема памяти (PMM + VMM + VMA + Demand Paging + Syscalls) достигла production-ready SLA. ОС готова к портированию TinyCC (которому критически важен `mmap` для JIT-аллокаций) и реализации `sys_fork` с Copy-on-Write (День 14).
-### День 13: Advanced File I/O Syscalls
-**Цель:** Реализовать sys_lseek/sys_fstat/sys_ioctl для полноценной работы с файлами.
-**Задачи:**
-- ✅ Реализовать `sys_lseek()` с offset tracking
-- Поддержка SEEK_SET, SEEK_CUR, SEEK_END
-- Валидация нового offset (>= 0)
-- Обновление `open_file_t->offset`
-- Возврат новой позиции
-- ✅ Реализовать `sys_fstat()` с metadata extraction
-- Заполнение `struct stat` из `vfs_node_t`
-- st_size, st_mode, st_mtime (timestamp пока 0)
-- Валидация указателя через is_user_pointer
-- ✅ Реализовать `sys_ioctl()` (базовый)
-- Поддержка TIOCGWINSZ (размер терминала)
-- Возврат -ENOTTY для неподдерживаемых запросов
-- Расширяемая архитектура для будущих устройств
-**Архитектурное решение:**
-sys_lseek работает с `open_file_t->offset`, а не с файлом напрямую. Это позволяет нескольким FD на один файл иметь **независимые** позиции (POSIX compliance).
-**Тесты:**
-- open + lseek(fd, 10, SEEK_SET) + read = чтение с позиции 10
-- fstat + проверка st_size == размер файла
-- ioctl(TIOCGWINSZ) + проверка 80x50 (VGA) или 1024x768 (FB)
----
-СТАТУС ДНЯ 13: Advanced File I/O Syscalls (ЗАВЕРШЕНО)
-✅ Реализовано
-Добавлены три POSIX-совместимых системных вызова для продвинутой работы с файлами: sys_lseek (19), sys_fstat (28), sys_ioctl (54).
-Внедрены POSIX-константы в syscall.h и user_syscalls.h (SSOT): SEEK_SET/SEEK_CUR/SEEK_END, TIOCGWINSZ, POSIX file mode bits (S_IFMT, S_IFREG, S_IFDIR, S_IFCHR, S_IFBLK).
-Добавлены POSIX-совместимые структуры данных:
-stat_t — полная структура метаданных файла (st_dev, st_ino, st_mode, st_nlink, st_uid, st_gid, st_rdev, st_size, st_blksize, st_blocks, st_atime/mtime/ctime)
-winsize_t — структура размера терминала для TIOCGWINSZ (ws_row, ws_col, ws_xpixel, ws_ypixel)
-Расширена подсистема VFS-обработчиков с Zero Trust Sandbox:
-Валидация файлового дескриптора через bounds-checking (fd >= 0 && fd < TASK_MAX_OPEN_FILES)
-Проверка валидности open_file и vfs_node (защита от NULL pointer dereference в ядре)
-is_user_pointer() для всех указателей, передаваемых из Ring 3 (stat buffer, winsize buffer)
-Обновлен user_syscalls.h: добавлены inline-ассемблерные wrapper'ы для sys_lseek, sys_fstat, sys_ioctl с правильным маппингом регистров (EBX/ECX/EDX) и сохранением clobber registers.
-Интеграция с VFS: автоматическое определение типа файла из vfs_node->flags (FS_DIRECTORY → S_IFDIR | 0755, FS_FILE → S_IFREG | 0644, FS_MOUNTPOINT → S_IFDIR | 0755).
-🏛 Архитектурные решения
-FD-Centric Offset Tracking (POSIX Compliance): sys_lseek работает с open_file_t->offset, а не с файлом напрямую. Это позволяет нескольким файловым дескрипторам на один и тот же файл иметь независимые позиции чтения/записи — фундаментальное требование POSIX.
-Kernel-Buffer Pattern (Race-Condition Protection): sys_fstat сначала заполняет stat_t в kernel space (на стеке), затем одним атомарным k_memcpy копирует в user space. Это защищает от race conditions, когда пользовательский процесс мог бы попытаться изменить буфер во время заполнения его ядром.
-Sparse File Support (True POSIX): sys_lseek разрешает seek за пределы файла (new_offset > file_size), что соответствует POSIX-семантике sparse files. Следующая запись через sys_write расширит файл, заполнив промежуток нулями (gap). Отрицательный new_offset возвращает -EINVAL (строго по POSIX).
-Extensible IOCTL Dispatcher: sys_ioctl реализован через switch-case архитектуру с fallback на -ENOTTY (Not a typewriter / inappropriate ioctl for device). Это позволяет легко добавлять новые device-specific запросы (в будущем: FIONBIO, FIONREAD, disk ioctls) без изменения dispatcher'а.
-Automatic GUI/Text Mode Detection: TIOCGWINSZ автоматически определяет режим терминала через флаг fb_is_active из framebuffer.c: в GUI-режиме возвращает 128x48 символов (1024x768 / 8x16 font), в text-mode — классические 80x50 VGA. Это обеспечивает прозрачную работу консольных утилит (cat, ls, grep) в обоих режимах.
-Strict Error Propagation: Все три syscall'а возвращают стандартные POSIX errno коды: -EBADF (невалидный fd), -EFAULT (невалидный указатель в Ring 3), -EINVAL (неверные аргументы), -ENOTTY (неподдерживаемый ioctl), что позволяет user-space программам использовать стандартные паттерны обработки ошибок.
-🐛 Исправленные архитектурные пробелы
-Missing POSIX Foundation для TinyCC: До Дня 13 отсутствовали критически важные для компиляторов syscalls. TinyCC использует lseek для random-access в исходных файлах, fstat для определения размеров файлов перед mmap, и ioctl(TIOCGWINSZ) для адаптации вывода под размер терминала. Без этих syscall'ов портирование TinyCC (День 17-20) было бы невозможно.
-File Descriptor Abstraction Leak: Ранее VFS-операции работали напрямую с vfs_node_t, что нарушало 3-звенную POSIX-модель (inode → open_file → fd). sys_lseek закрывает этот пробел, работая строго через open_file_t, что обеспечивает корректное поведение при dup()/dup2() в будущем.
-### День 14: Process Management Syscalls
-**Цель:** Реализовать sys_fork/sys_waitpid/sys_getpid для Supervisor Trees.
-**Задачи:**
-- ✅ Реализовать `sys_fork()` с Copy-on-Write
-- Создание нового Address Space через vmm_clone_address_space
-- Copy-on-Write: пометка всех страниц READ-ONLY + PAGE_COW флаг
-- Копирование контекста (регистры, FD table, VMA list)
-- Ребенок видит 0 как результат fork()
-- Родитель видит PID ребенка
-- ✅ Реализовать `sys_waitpid()` с status tracking
-- Поиск ребенка по PID (или -1 для любого)
-- Ожидание TASK_ZOMBIE → TASK_DEAD переход
-- Извлечение exit_code из task_t
-- Освобождение ресурсов через Reaper Queue
-- Поддержка WNOHANG (non-blocking)
-- ✅ Реализовать `sys_getpid()`
-- Возврат `current_task->pid`
-- ✅ Создать Init Task (PID 1)
-- main_task выступает корнем дерева процессов
-- Orphan adoption (усыновление сирот)
-- Hybrid Process Model (Unix-style + Erlang-style)
-**Архитектурное решение:**
-Copy-on-Write (CoW) — ключевая оптимизация. fork() **не копирует** память. Он создает новые Page Tables, ссылающиеся на те же физические страницы с флагом READ-ONLY + PAGE_COW. При записи срабатывает Page Fault, VMM выделяет личную копию страницы. Результат: перезапуск сервиса весом 10 МБ занимает микросекунды.
-**Тесты:**
-- fork + child sys_exit(42) + parent waitpid = status 42
-- fork + CoW: родитель и ребенок пишут в одну страницу = разные значения (родитель видит 100, ребенок 999)
-- waitpid с WNOHANG на живого ребенка = 0
----
-# ИТОГИ ДНЯ 14: Process Management & Supervisor Trees (ЗАВЕРШЕНО)
-## ✅ Успешно реализовано и интегрировано в ядро:
-1. **Архитектура дерева процессов**: в структуру task_t добавлены указатели parent, children и next_sibling для построения иерархии.
-2. **Механизм зомби (Zombie State Machine)**: процессы больше не уничтожаются мгновенно. При вызове sys_exit они переходят в состояние TASK_ZOMBIE, сохраняя exit_code и PCB до тех пор, пока родитель не заберет статус.
-3. **POSIX sys_waitpid**: реализована блокирующая и неблокирующая (WNOHANG) семантика ожидания детей. Родитель корректно переходит в TASK_SLEEPING и пробуждается при смерти ребенка.
-4. **Orphan Adoption и Supervisor Trees**: реализован гибридный жизненный цикл. При смерти родителя дети либо усыновляются Init Task (Unix-style), либо каскадно убиваются (Erlang-style linked processes).
-5. **Init Task (PID 1)**: главный процесс ядра (main_task) теперь выступает корнем дерева процессов и глобальным сборщиком сирот.
-6. **PMM Reference Counting**: внедрен параллельный массив pmm_refcounts для подсчета ссылок на физические страницы, что является обязательным фундаментом для Copy-on-Write.
-7. **Интеграция с Test Runner и Shell**: обновлены циклы ожидания. Теперь они используют waitpid для корректного сбора зомби, что полностью устранило баг "TIMEOUT: Task did not exit", доставшийся нам со Дня 10.
-8. **Copy-on-Working Implementation**: добавлен OS-специфичный флаг PAGE_COW (9-й бит PTE), реализовано клонирование списка VMA (vma_clone) и создана базовая структура task_fork с математическим копированием Kernel Stack и обнулением EAX для ребенка.
-9. **Победа над FATAL PAGE FAULT**: Устранена проблема чтения физического адреса вместо виртуального при клонировании Page Tables родителя. VMM корректно использует PHYS_TO_VIRT для доступа к PTE.
-10. **Прозрачный CoW Page Fault**: User Space процесс не замечает, что страницы shared. Page Fault Handler вклинивается прямо посреди printf, выделяет личную копию страницы и возвращает управление — процессор аппаратно повторяет инструкцию.
-## 🧪 Успешно пройденные тесты:
-**test_fork.elf** — полное прохождение со 100% детерминированным результатом:
-- [PARENT] Fork вернул PID ребенка (11)
-- [CHILD] Модифицирует shared_var в 999 (триггерит CoW Page Fault)
-- [PARENT] Видит shared_var = 100 (математическое доказательство изоляции памяти)
-- [PARENT] waitpid корректно перехватил exit_code = 42 от зомби-ребенка
-- `[PASS] Test logic OK, No leaks, no zombies.`
-- `[WAIT] ✓ Reaper confirmed: resources freed.`
-## 🎯 Готовность к следующему этапу:
-Подсистема Process Management достигла production-ready SLA. Copy-on-Write работает идеально, waitpid корректно собирает зомби, Supervisor Trees обеспечивают отказоустойчивость критичных сервисов. ОС готова к реализации Time & System Info syscalls (День 15) и переходу к портированию TinyCC (День 17-20).
-### День 15: Time & System Info Syscalls
-**Цель:** Реализовать sys_gettimeofday/sys_sleep/sys_uname/sys_sysinfo для profiling и диагностики.
-**Задачи:**
-- ✅ Реализовать `sys_gettimeofday()` через PIT ticks
-- Конвертация ticks в секунды и микросекунды
-- Заполнение `struct timeval`
-- Валидация указателя
-- ✅ Реализовать `sys_sleep()` через timer queue
-- Вычисление wake_time = current_ticks + seconds * 1000
-- Перевод задачи в TASK_SLEEPING
-- Добавление в timer queue
-- schedule() для передачи CPU
-- ✅ Реализовать `sys_uname()` с информацией об ОС
-- Заполнение `struct utsname` (sysname, release, version, machine)
-- "Bare Metal OS", "0.1-alpha", "Day 15 Build", "i686"
-- ✅ Реализовать `sys_sysinfo()` с статистикой системы
-- PMM: total_pages, free_pages, allocated_pages
-- Heap: total_allocs, total_frees, balance
-- Tasks: task_count, zombie_count
-**Архитектурное решение:**
-sys_sleep использует **timer queue** (связный список спящих задач), а не busy-wait. Это позволяет CPU выполнять другие задачи или hlt для экономии энергии.
-**Тесты:**
-- gettimeofday + sleep(2) + gettimeofday = разница ~2 секунды
-- uname + проверка "Bare Metal OS"
-- sysinfo + проверка PMM balance == 0 (нет утечек)
-🎯 Итог Дня 15
-Теперь у тебя:
-✅ Исправленный планировщик с пропуском спящих задач и Idle HLT
-✅ Timer Queue для sys_sleep (через поле sleep_until)
-✅ 4 новых syscall: gettimeofday, sleep, uname, sysinfo
-✅ Zero Trust сохранен во всех новых функциях
-✅ Энергосбережение через sti; hlt; cli когда нет готовых задач
----
-## 📅 ФАЗА 2: TINYCC PORTING (День 16-20)
-### День 16: User Libc Foundation
-**Цель:** Создать минимальную libc для Ring 3 программ.
-**Задачи:**
-- ✅ Создать `include/user_libc.h` с POSIX-совместимым API
-- Memory: malloc, free, memset, memcpy
-- String: strlen, strcmp, strcpy
-- File I/O: open, close, read, write
-- Output: printf
-- Process: exit
-- ✅ Реализовать `src/user_libc.c`
-- malloc/free через sys_brk (простой bump allocator)
-- String functions (копирование из klib.c)
-- File I/O через syscalls
-- printf через sys_write (упрощенная реализация)
-**Архитектурное решение:**
-malloc использует **bump allocator** — просто увеличивает heap_end через sys_brk. free() ничего не делает (утечка памяти). Это достаточно для TinyCC и тестовых программ. Production-ready malloc (buddy system) — отдельная задача.
-**Тесты:**
-- malloc(1024) + memset + free
-- printf("Hello %s, %d
-", "World", 42)
-- open + write + close + open + read + close
----
-# ИТОГИ ДНЯ 16: User Libc Foundation + VFS Hardening (ЗАВЕРШЕНО)
-## ✅ Успешно реализовано и интегрировано:
 
-### 1. Полноценная POSIX libc для Ring 3 (`user_libc.h` / `user_libc.c`)
-- **Bump Allocator**: malloc/calloc/realloc через sys_brk (утечка памяти by design для простоты, подходит для TinyCC)
-- **String/Memory Functions**: memset, memcpy, memmove, strlen, strcmp, strstr, strtol, atoi
-- **FILE* API**: fopen/fread/fwrite/fclose через syscalls с минимальным buffering
-- **printf family**: printf, fprintf, sprintf, snprintf, vsnprintf с поддержкой width/padding
-- **Process Control**: exit, fork, waitpid, getpid
-- **Time & System**: gettimeofday, uname, sysinfo, sleep
-- **SSOT Fix**: Синхронизированы номера syscall'ов между ядром и user-space (особенно SYS_GETPID: было 20, стало 122 по Linux i386 ABI)
+### 3.4 Dependency Inversion (DIP)
 
-### 2. POSIX Variadic `open` (Критично для TinyCC)
-- `user_libc.h`: `int open(const char* pathname, int flags, ...)` — variadic signature по POSIX
-- Извлечение `mode` через `va_arg` только при наличии флага `O_CREAT`
-- Дефолтные права `0644` (rw-r--r--) если `O_CREAT` не указан
-- Полная совместимость с TinyCC и стандартными C-программами
+Высокоуровневые подсистемы (`heap.c`, `vfs.c`) не включают заголовки низкоуровневых драйверов (`vga.h`). Определения цветов перенесены в `klib.h`. Подсистемы памяти не знают, используется ли VGA или Framebuffer (**Strategy Pattern**).
 
-### 3. SSOT Constant Synchronization (Linux i386 ABI)
-- **vfs.h**: `O_CREAT = 0x0040` (было ошибочно `0x0100`)
-- **vfs.h**: `O_TRUNC = 0x0200`, `O_APPEND = 0x0400`
-- Синхронизация с `user_libc.h` и `user_syscalls.h`
-- Без этой синхронизации ядро "не видит" флаги от user-space программ (диагностировано через Serial телеметрию)
+### 3.5 Header Self-Sufficiency
 
-### 4. True VFS Mountpoints (Решение Shadowing Nodes)
-- **tmpfs_init()**: Использует `vfs_mount("/tmp", tmpfs_root)` вместо `vfs_add_child`
-- **FS_MOUNTPOINT Teleportation**: `vfs_findnode` и `sys_open` "телепортируются" через `mountpoint_node`
-- **Проблема решена**: initrd больше не создает shadowing-ноды `/tmp`, блокирующие tmpfs
-- **Истинная POSIX семантика**: как в Linux, FreeBSD, Minix
+Заголовочный файл, использующий `bool`/`true`/`false`, обязан включать `<stdbool.h>` напрямую. `user_libc.h` использует **Monolithic Bypass** — все типы определяются через примитивы C и `__builtin_va_list`, без `#include <stdint.h>`.
 
-### 5. tmpfs с поддержкой O_TRUNC
-- **tmpfs_open callback**: перехватывает флаг `O_TRUNC` и обнуляет `size` файла
-- **Capacity Retention**: сохраняет `capacity` для переиспользования буфера (heap-оптимизация)
-- **Интеграция с VFS**: через `open_type_t` polymorphic callback
+### 3.6 Double Dump Pattern
 
-### 6. Double Dump Pattern для диагностики
-- **Test Runner**: дублирует `[PASS]`/`[FAIL]` и в Serial (headless debug), и в VGA (локальный пользователь)
-- **String Builder**: безопасная конкатенация через k_memcpy + k_itoa без k_sprintf
-- **Буфер 256 байт** с защитой от переполнения (`< 255`)
+Фатальные исключения выводят дамп **одновременно** в VGA/FB (локальный пользователь) и Serial COM1 (headless-отладка).
 
-### 7. Deterministic Reaping в Test Runner
-- **wait_for_cleanup(pid, tasks_before)**: Hard Sync — ждет пока `task_count` вернется к исходному значению
-- **Исчезли "фантомные утечки"** (PMM: 1, Heap: 1, Zombies: 1)
-- **100% детерминированные метрики** для всех 9 тестов
+### 3.7 Визия: "Бессмертная Крепость"
 
-## 🧪 Test Suite Day 16 — Все 9 тестов проходят с идеальными метриками:
-1. **test_hello.elf** — базовый sys_write + sys_exit ✅
-2. **test_segfault.elf** — NULL Pointer Dereference (SIGSEGV) ✅
-3. **test_write_text.elf** — W^X Violation (запись в .text) ✅
-4. **test_stack_overflow.elf** — Stack Guard Page (No VMA SIGSEGV) ✅
-5. **test_oom.elf** — OOM Protection (malloc returns NULL, errno=12) ✅
-6. **test_vfs_stress.elf** — **1000 файлов в tmpfs, CRC32 верификация, без утечек** ✅
-7. **test_memory_torture.elf** — 6 stages (Demand Storm, Random Matrix, Brk Staircase, OOM Probe, Yield Storm, Integrity Sweep) ✅
-8. **test_mmap.elf** — mmap + mprotect + munmap + Demand Paging ✅
-9. **test_fork.elf** — **sys_fork + Copy-on-Write + waitpid (ребенок=999, родитель=100, status=42)** ✅
-
-**Финальный вердикт Test Runner:** `[PASS] Test logic OK, No leaks, no zombies.` для всех 9 тестов.
-
-## 🏛 Архитектурные решения Дня 16:
-1. **POSIX Compliance First**: variadic `open`, O_TRUNC, O_CREAT с mode — все по POSIX spec
-2. **SSOT Constants**: Linux i386 ABI синхронизирован между vfs.h, user_libc.h, user_syscalls.h
-3. **True Mountpoints**: vfs_mount + FS_MOUNTPOINT teleportation — production-ready VFS
-4. **Deterministic Reaping**: test runner дожидается физического освобождения ресурсов Reaper'ом
-5. **Zero Trust Preserved**: все libc функции работают ТОЛЬКО через syscalls, Ring 3 не имеет доступа к kernel heap
-
-## 🎯 Готовность к следующему этапу:
-Инфраструктура Дня 16 **полностью готова** для портирования TinyCC:
-- ✅ libc с POSIX variadic open (TinyCC использует open с mode)
-- ✅ sys_mmap для JIT-аллокаций кода
-- ✅ sys_lseek для random-access в исходных файлах
-- ✅ sys_fstat для определения размеров файлов
-- ✅ sys_fork + sys_waitpid для паттерна fork/exec
-- ✅ sys_gettimeofday для profiling
-- ✅ Zero Trust Sandbox сохранен на всех уровнях
-
-**Следующий логический шаг:** День 17 — TinyCC Dependency Analysis (скачать исходники, проанализировать #include директивы, составить матрицу недостающих функций).
-
----
-### День 17: TinyCC Dependency Analysis
-**Цель:** Проанализировать зависимости TinyCC от libc.
-**Задачи:**
-- ✅ Скачать исходники TinyCC (git clone https://repo.or.cz/tinycc.git)
-- ✅ Проанализировать все `#include` директивы
-- stdio.h → fopen, fread, fwrite, fclose
-- stdlib.h → malloc, free, exit
-- string.h → memcpy, strlen, strcmp
-- unistd.h → read, write, open, close, lseek
-- sys/mman.h → mmap, munmap
-- fcntl.h → O_RDONLY, O_WRONLY, O_CREAT
-- errno.h → errno глобальная переменная
-- ✅ Составить список необходимых функций libc
-- ✅ Определить, какие функции можно упростить или эмулировать
-**Архитектурное решение:**
-TinyCC использует `mmap` для code generation. Мы уже реализовали sys_mmap на День 12, поэтому TinyCC сможет работать без модификаций.
-**Результат:**
-Полный список зависимостей и план адаптации.
-
-# 📋 ИТОГИ ДНЯ 17: TinyCC Dependency Analysis & POSIX Foundation
-
-## ✅ РЕАЛИЗОВАНО
-
-### 1. FILE* Buffering Infrastructure
-- Добавлен 4KB буфер в структуру `FILE` для ускорения fread/fgetc в 10-100x
-- Реализованы `fgetc()`, `fputc()`, `fgets()` с прозрачной буферизацией
-- Оптимизированы `fread()`/`fwrite()` для минимизации syscall'ов
-- Критически важно для производительности парсинга исходников TinyCC
-
-### 2. Process Execution Layer
-- Реализована упрощенная `system()` через fork/exec/waitpid (~40 строк)
-- Парсер командной строки на argv[] массив
-- Интеграция с существующими sys_fork + sys_exec + sys_waitpid
-- TinyCC может запускать внешние программы (линкер, ассемблер)
-
-### 3. POSIX ABI Compliance
-- Создан `crt0.asm` (NASM) — C Runtime Startup
-- Точка входа `_start` забирает argc/argv/envp со стека
-- Вызывает `main(argc, argv, envp)` и завершает через `exit()`
-- Все тесты переведены с `void _start()` на `int main()`
-
-### 4. Stack Forging & Memory Protection
-- Исправлен `USER_STACK_VIRT_TOP`: `0xBFFFF000` (было `0xC0000000`)
-- Реализован Stack Forging в `sys_exec_handler` с двойной защитой
-- Добавлен Ring 0 → User Space Demand Paging в `page_fault_handler`
-- Ядро может прозрачно писать в пользовательский стек при формировании аргументов
-
-### 5. Optional libc Functions
-- `getenv()` — возвращает NULL (TinyCC не использует переменные окружения)
-- `signal()` — no-op реализация (TinyCC не обрабатывает сигналы)
-- `dlopen/dlsym/dlclose` — заглушки (динамическая линковка не поддерживается)
-- Полнота API для успешной компиляции TinyCC
-
-### 6. Build System Integration
-- Обновлен Makefile для автоматической компиляции `crt0.asm` через NASM
-- `crt0.o` линкуется ПЕРВЫМ со всеми ELF-бинарниками
-- Защита от создания `crt0.elf` как отдельного теста
-
-## 🏛 АРХИТЕКТУРНЫЕ ДОСТИЖЕНИЯ
-
-1. **Production-Ready POSIX ABI**: `_start` → `main(argc, argv)` → `exit(status)`
-2. **Transparent Demand Paging**: Ring 0 может писать в User Space VMA
-3. **Zero Trust Preserved**: Все syscalls валидируют указатели и VMA
-4. **Stack Safety**: ESP никогда не указывает в Kernel Space (двойная защита)
-5. **Copy-on-Write Proven**: Математическое доказательство изоляции памяти
-6. **Zero Leaks**: PMM balance = 0, Heap balance = 0 для всех тестов
-
-## 📦 ГОТОВНОСТЬ К TINYCC
-
-Фундамент полностью готов для портирования TinyCC (День 18-20):
-- ✅ libc с FILE* buffering (парсинг исходников)
-- ✅ system() для запуска внешних утилит
-- ✅ sys_mmap с PROT_EXEC (JIT code generation)
-- ✅ sys_fork + sys_waitpid (fork/exec pattern)
-- ✅ sys_lseek + sys_fstat (random-access файлы)
-- ✅ POSIX ABI (argc/argv/envp на стеке)
-- ✅ W^X Enforcement (security)
-- ✅ Zero Trust Sandbox (изоляция)
-
-## 📊 МЕТРИКИ
-
-- **Строк кода добавлено**: ~800 (user_libc.c + crt0.asm + paging.c + syscall.c)
-- **Тестов пройдено**: 10/10 (100%)
-- **Утечек памяти**: 0
-- **Zombie processes**: 0
-- **Kernel panics**: 0
-- **Production-ready SLA**: ✅ Достигнут
-
-**Вердикт**: День 17 завершен на 100%. Bare Metal OS теперь имеет production-ready POSIX-совместимую user-space
- инфраструктуру, готовую для запуска настоящего C99 компилятора (TinyCC).
-
- Вердикт ментора
-
- "Любая новая фича, позволяющая Ring 0 взаимодействовать с Ring 3 памятью,
-  обязана иметь:
-    Bounds checking (верхняя и нижняя границы)
-    Permission checking (VMA_WRITE для writes)
-    Resource limiting (максимум аргументов/размеров)
-    Kernel stack safety (никаких больших static arrays)
-    Atomicity (cli/sti для критических секций)"
-
-🏁 Статус: VFS Security Hardening Завершен!
-Мы успешно закрыли все критические уязвимости VFS:
-✅ Use-After-Free (UAF) — устранен через ref_count и Orphan Nodes
-✅ Kernel Stack Overflow — устранен через MAX_MOUNT_HOPS = 16
-✅ Race Conditions — устранены через cli/sti в критических секциях
-✅ OOM Write Bombs — устранены через квоту 40 МБ на файл
-✅ POSIX Compliance — unlink работает с открытыми файлами (orphan semantics)  
-
-✅ Выдерживает POSIX unlink (Orphan Nodes).
-✅ Защищена от Race Conditions (cli/sti + ref_count).
-✅ Защищена от Kernel Stack Overflow (MAX_MOUNT_HOPS).
-✅ Имеет атомарное создание файлов (нет Use-After-Free при OOM).
-✅ Gracefully обрабатывает нехватку памяти (тесты адаптируются и убирают за собой мусор).
-✅ Обладает нулевой фрагментацией после жесточайшего стресса.
-
-Официальное закрытие этапа
-Security Hardening Pack (Kernel Stack Guard Pages + PF Strictness + sys_exec Heap)
-официально влит в ядро и валидирован. Архитектура «Бессмертной Крепости» 
-теперь защищена от Kernel Stack Overflow, Infinite PF Loop и argv-бомб. 
-
----
-### День 18: TinyCC Adaptation Layer
-**Цель:** Создать слой адаптации для работы TinyCC в Bare Metal OS.
-**Задачи:**
-- ✅ Создать `tcc_baremetal.c` с переопределениями libc функций
-- FILE* структура через file descriptors
-- fopen → sys_open
-- fread → sys_read
-- fwrite → sys_write
-- fclose → sys_close
-- ✅ Реализовать stdin/stdout/stderr как FILE*
-- stdin → fd 0
-- stdout → fd 1
-- stderr → fd 2
-- ✅ Добавить `errno` глобальную переменную
-- ✅ Убрать зависимости от dynamic linking (флаг -static)
-
-**Архитектурное решение:**
-FILE* — это простая структура с `int fd` и `int eof`. Это достаточно для TinyCC, который не использует сложные buffering стратегии.
-**Тесты:**
-- fopen + fread + fclose
-- fprintf(stdout, "Test %d
-", 42)
-- errno после неудачного fopen
-
-Подтверди, пожалуйста, что ты согласен с планом:
-
-    ✅ Создаем user_src/setjmp.asm (setjmp/longjmp в NASM, ~40 строк)
-    ✅ Создаем user_src/tcc_baremetal.c (10 недостающих функций, ~400 строк)
-    ✅ qsort реализуем как heapsort (без рекурсии, безопасный для стека)
-    ✅ strerror — минимальная таблица из 15 ошибок
-    ✅ getcwd → return "/", chdir → return -1 (заглушки)
-    ✅ Обновляем Makefile для линковки setjmp.o + tcc_baremetal.o
-    ✅ Добавляем прототипы в user_libc.h
-
-Или предложи свои корректировки (например, патчить исходники TinyCC вместо
- адаптационного слоя, или другой подход к include paths).
-
-Сборка прошла успешно! День 18 ЗАКРЫТ
-Все 11 user-space программ скомпилированы и слинкованы с новыми объектами
- tcc_lib_os.o и setjmp.o . Ядро собрано, initrd упакован, ISO готов.
----
-### День 19: TinyCC Compilation
-**Цель:** Скомпилировать TinyCC кросс-компилятором и интегрировать в ISO.
-**Задачи:**
-- ✅ Скомпилировать TinyCC с кросс-компилятором
-- i686-linux-gnu-gcc с флагами -m32 -nostdlib -static -ffreestanding
-- Линковка с user_libc.o и crt0.o
-- Использование user_linker.ld
-- ✅ Создать `crt0.S` для startup code
-- Вызов main()
-- Вызов exit() с кодом возврата
-- ✅ Интегрировать в ISO (добавить в initrd)
-- Копирование tcc.elf в /bin/tcc
-- Обновление Makefile для автоматической сборки
-**Архитектурное решение:**
-TinyCC компилируется как **обычный ELF-бинарник** для Ring 3. Он не имеет привилегий ядра и работает через syscalls, как любая другая user-space программа.
-**Тесты:**
-- Запуск `tcc --version` в Shell
-- Проверка, что tcc.elf загружается через sys_exec
----
-### День 20: TinyCC Testing
-**Цель:** Протестировать компиляцию и запуск программ через TinyCC.
-**Задачи:**
-- ✅ Запустить `tcc --version` в Shell
-- ✅ Скомпилировать простую программу через tcc
-- `echo 'int main() { return 42; }' > /tmp/test.c`
-- `tcc /tmp/test.c -o /tmp/test.elf`
-- ✅ Запустить скомпилированную программу
-- `run /tmp/test.elf`
-- Проверка exit code == 42
-- ✅ Протестировать разные фичи C
-- Рекурсия (factorial)
-- Структуры данных
-- Указатели
-- String literals
-**Архитектурное решение:**
-TinyCC генерирует **ELF-бинарники**, которые загружаются через существующий sys_exec + elf_load. Никаких модификаций ядра не требуется.
-**Тесты:**
-- Компиляция hello.c + запуск = "Hello, World!"
-- Компиляция factorial.c + запуск = 120 (5!)
-- Компиляция программы с структурами + указателями
----
-
-# 📘 ENCLAVE OPERATING SYSTEM — Обновление документации (Day 20 - Day 24)
-## Статус: Alpha 0.3 (PID 1 Architecture & Self-Hosting Ready)
-## Нейминг: Официальное название проекта изменено на "Enclave Operating System" (Enclave OS).
+| Принцип | Реализация |
+|---|---|
+| **"Let it crash"** (Erlang/OTP) | PID 1 перезапускает упавшие сервисы < 100мс |
+| **Crash-Only Software** | Сервисы не хранят состояние в RAM |
+| **Immutable Kernel** | Код ядра Read-Only после инициализации |
+| **Zero Trust I/O** | Устройства через VFS (`/dev/console`) |
 
 ---
 
-## 🏛 АРХИТЕКТУРНЫЕ ДОСТИЖЕНИЯ ДНЯ 20-24
+## 4. КАРТА ПАМЯТИ
 
-### 1. Смена парадигмы: От Kernel Shell к PID 1 Architecture (День 24)
-Мы полностью убрали Shell из Ring 0. Ядро больше не знает о пользовательских командах.
-* **PID 0 (Kernel Idle):** Бессмертный Ring 0 поток. Единственная задача: `sti; hlt`. Никогда не падает из-за багов в user-space.
-* **PID 1 (`/sbin/init.elf`):** Ring 3 Launcher. Запускает Shell через `fork + exec`. Если Shell падает, Init автоматически делает **respawn** (принцип Erlang/OTP "Let it crash").
-* **PID 2+ (`/bin/shell.elf`):** Ring 3 Shell. Работает в Zero Trust Sandbox, использует только syscalls. Команда `run` реализована через стандартный Unix-паттерн `sys_fork + sys_exec + sys_waitpid`.
-* **Reaper Respawn:** В `task.c` (Reaper Queue) добавлена логика: если умирает задача с `pid == 1`, ядро принудительно перезагружает `/sbin/init.elf` из VFS, обеспечивая 99.999% uptime критичного сервиса.
+### 4.1 Виртуальное адресное пространство
 
-### 2. Интеграция TinyCC и Self-Hosting (День 20)
-* **TinyCC в Ring 3:** Компилятор C99 (`tcc.elf`) успешно портирован и работает как обычное user-space приложение.
-* **Toolchain Injection:** Makefile автоматически собирает `libtcc1.a` (64-bit math/FPU хелперы), генерирует CRT-заглушки (`crt1.o`, `crti.o`, `crtn.o`) и создает "фейковые" POSIX-заголовки в `/usr/include/`, перенаправляя их на нашу `user_libc.h`.
-* **Адаптационный слой:** Создан `tcc_lib_os.c`, закрывающий зависимости GCC 14+ и glibc (`__isoc23_strtol`, `__errno_location`, `sysconf`, `mprotect`, `strpbrk` и т.д.).
+```
+0x00000000 ┌─────────────────────────────────────┐
+           │  USER SPACE (3 GB)                  │
+           │  ┌─────────────────────────────┐    │
+0x00000000 │  │ NULL Guard (4 KB)           │    │
+0x00100000 │  │ ELF Segments (.text/.data)  │    │
+           │  │ ...                         │    │
+0x10000000 │  │ User Heap (64 MB max)       │    │ ← USER_HEAP_START
+0x14000000 │  │ ...                         │    │
+           │  │ Air Gap (704 MB)            │    │
+0x40000000 │  │ mmap Region (1 GB)          │    │ ← USER_MMAP_START
+0x80000000 │  │ ...                         │    │
+           │  │ Air Gap                     │    │
+0xBFFEF000 │  │ User Stack (64 KB)          │    │ ← USER_STACK_VIRT_TOP - SIZE
+0xBFFFF000 │  │ Stack Guard (4 KB)          │    │
+0xBFFFFFFF │  └─────────────────────────────┘    │
+           ├─────────────────────────────────────┤ ← KERNEL_SPACE_START
+0xC0000000 │  KERNEL SPACE (1 GB)                │
+           │  ┌─────────────────────────────┐    │
+0xC0000000 │  │ Direct Map (512 MB)         │    │ ← KERNEL_DIRECT_MAP
+0xC8000000 │  │ Kernel Stack Pool (16 MB)   │    │ ← KERNEL_STACK_POOL_START
+0xC9000000 │  │ ...                         │    │
+0xD0000000 │  │ Kernel Heap (128 MB Lazy)   │    │ ← KERNEL_HEAP_VIRT
+0xD8000000 │  │ ...                         │    │
+0xE0000000 │  │ PCI MMIO Hole (Reserved)    │    │ ← PCI_MMIO_HOLE_START
+0xFD000000 │  │ Framebuffer (16 MB, PCD)    │    │ ← FB_VIRT_BASE
+0xFE000000 │  │ ...                         │    │
+0xFFFFFFFF │  └─────────────────────────────┘    │
+           └─────────────────────────────────────┘
+```
 
-### 3. Критический фикс памяти: CoW + Exec Trap (День 24)
-* **Проблема:** При паттерне `fork() -> exec()` ребенок наследует CoW-страницы (refcount = 2). Когда ребенок вызывает `sys_exec`, его старое адресное пространство уничтожается. Старый код слепо освобождал физические страницы, убивая память родителя (Init) и вызывая Kernel Panic (Double Free / Heap Corruption).
-* **Решение (paging.c):** В `vmm_destroy_address_space()` внедрен **Strict CoW Teardown**. Вызывается `pmm_dec_ref()`, и физическая страница освобождается через `pmm_free_page()` **ТОЛЬКО** если `pmm_get_refcount() == 0`. Это математически гарантирует безопасность паттерна `fork/exec`.
+### 4.2 SSOT константы (`config.h`)
 
-### 4. Zero Trust I/O и концепция `/dev/console` (День 24)
-* **Отклоненный антипаттерн:** "Магический" перехват `fd == 0` в `sys_read` для чтения из клавиатуры. Это нарушает POSIX и Zero Trust (любой процесс мог бы читать клавиатуру).
-* **Принятое решение (DevFS):** Клавиатура и экран должны предоставляться через VFS-ноды `/dev/console`. Ring 3 процесс обязан явно сделать `open("/dev/console", O_RDWR)`. Это закладывает фундамент для Capability-Based Security (Day 26+) и изоляции устройств.
+| Константа | Значение | Назначение |
+|---|---|---|
+| `USER_SPACE_START` | `0x00000000` | Начало User Space |
+| `USER_SPACE_END` | `0xBFFFFFFF` | Конец User Space |
+| `KERNEL_SPACE_START` | `0xC0000000` | Начало Kernel Space |
+| `LOWER_MEM_START/END` | `0x00000000 / 0x00100000` | Нижняя 1 MB (reserved) |
+| `PCI_MMIO_HOLE_START/END` | `0xE0000000 / 0xFFFFFFFF` | PCI MMIO |
+| `USER_STACK_VIRT_TOP` | `0xBFFFF000` | Вершина User Stack |
+| `USER_STACK_SIZE` | `64 KB` | Размер User Stack |
+| `USER_STACK_GUARD_SIZE` | `4 KB` | Guard Page |
+| `USER_HEAP_START` | `0x10000000` | Начало User Heap |
+| `USER_HEAP_MAX_SIZE` | `64 MB` | Лимит User Heap |
+| `KERNEL_HEAP_VIRT` | `0xD0000000` | Начало Kernel Heap |
+| `KERNEL_HEAP_SIZE` | `128 MB` | Виртуальный пул (Lazy) |
+| `KERNEL_STACK_POOL_START` | `0xC8000000` | Пул Kernel Stacks |
+| `KERNEL_STACK_POOL_SIZE` | `16 MB` | ~819 задач |
+| `KERNEL_STACK_SLOT_PAGES` | `5` | 1 Guard + 4 Data |
+| `FB_VIRT_BASE` | `0xFD000000` | Framebuffer |
+| `FB_SIZE_MB` | `16` | Размер FB |
+| `USER_MMAP_START` | `0x40000000` | mmap зона |
+| `USER_MMAP_MAX_SIZE` | `1 GB` | Лимит mmap |
 
----
+### 4.3 Макросы трансляции адресов
 
-## 📅 ОБНОВЛЕННЫЙ ПЛАН РАЗВИТИЯ (Дорожная карта)
+```c
+// config.h — SSOT
+#define VIRT_TO_PHYS(addr) \
+    (((uint32_t)(addr) >= KERNEL_SPACE_START) ? \
+     ((uint32_t)(addr) - KERNEL_SPACE_START) : (uint32_t)(addr))
 
-### ✅ ЧТО РАБОТАЕТ (Завершено на День 24)
-* **День 1-16:** Загрузчик, PMM, VMM, VFS, FAT32, Zero Trust Sandbox, POSIX Syscalls, Supervisor Trees, Copy-on-Write.
-* **День 17-19:** Анализ TinyCC, адаптационный слой `tcc_lib_os.c`, `setjmp/longjmp`, инъекция toolchain в Initrd.
-* **День 20:** Успешная кросс-компиляция `tcc.elf` и `libtcc1.a`.
-* **День 24:** Архитектурный рефакторинг. Удален `test_runner.c` из ядра. Внедрен PID 1 (`init.elf`) и Ring 3 Shell (`shell.elf`). Исправлен CoW + Exec Memory Corruption. Ядро стало полностью иммутабельным (Immutable Kernel).
+#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_SPACE_START)
+```
 
-### 🎯 СЛЕДУЮЩИЕ ШАГИ (День 25+)
-1. **DevFS & `/dev/console`:** Реализовать полиморфные VFS-ноды для устройств. Обновить `init.c`, чтобы он открывал `/dev/console` и пробрасывал fd 0/1/2 в Shell через `fork`.
-2. **Capability-Based Security:** Добавить `resource_container_t` и битмапы `CAP_KEYBOARD`, `CAP_FRAMEBUFFER` в `task_t`.
-3. **Self-Hosting Execution (День 22-23):** Запустить `tcc.elf` внутри Enclave OS, скомпилировать им `hello.c`, и запустить полученный бинарник.
-4. **Core Dumps:** При фатальном Page Fault в Ring 3 сохранять регистры в `/var/crash/app.core` перед убийством задачи.
-
----
-
-## 🔒 ГАРАНТИИ СИСТЕМЫ (Target SLA - Enclave OS)
-1. **Бессмертное Ядро:** PID 0 (Kernel) физически не может упасть из-за кода в Ring 3.
-2. **Бессмертный Init:** Если PID 1 падает, Reaper мгновенно перезапускает его из `/sbin/init.elf`.
-3. **Crash-Only Shell:** Если Shell падает (например, из-за бага в парсинге), Init перезапускает его < 100мс.
-4. **Изоляция CoW:** Паттерн `fork + exec` математически защищен от повреждения памяти родителя.
-5. **Zero Trust I/O:** Устройства недоступны без явного `open()` через VFS.
----
-### 🛠 Критические исправления и запуск TinyCC (Hardening Pack)
-
-**1. Интерактивный I/O и команда `ls`**
-* **Keyboard Hack (Временное решение):** Внедрен магический перехват `fd == 0` в `sys_read` (чтение из кольцевого буфера клавиатуры с `task_yield`) и `fd == 1/2` в `sys_write`.
-* **Отключение Hardware Echo:** Убран `k_putchar` из ядра. Эхо символов теперь полностью на стороне Ring 3 Shell (концепция TTY Line Discipline).
-* **`sys_readdir` (syscall 141):** Реализован обработчик чтения директорий. Синхронизирована структура `dirent_t` (SSOT) между `vfs.h` и `user_syscalls.h` (устранен сдвиг данных из-за разного размера структур). Команда `ls` выводит список файлов.
-
-**2. Memory & Process Hardening**
-* **Task Creation Preemption Race:** Обертывание `task_create()` + `vma_add()` 
-в критическую секцию `cli/sti` в `kernel.c` и `syscall.c`. Защищает от Page Fault, 
-если PIT прерывает ядро до создания VMA для стека.
-* **Strict CoW Teardown (`paging.c`):** В `vmm_destroy_address_space()` физическая 
-страница освобождается через `pmm_free_page()` **ТОЛЬКО** если `pmm_get_refcount() == 0`. Устранен фатальный Double Free / Kernel Panic при паттерне `fork() -> exec()`.
-* **POSIX FD Inheritance (`task.c`):** В `task_fork()` добавлено строгое увеличение
- `ref_count` для `open_file_t` и `vfs_node_t`. Устранен Kernel Heap Corruption (`Invalid magic in kfree` / Use-After-Free), возникавший при завершении child-процесса, унаследовавшего FD таблицы.
-
-**3. User-Space Library Fixes**
-* **Buffered I/O Flush (`user_libc.c`):** Добавлен принудительный `fflush(stdout)`
-внутри `exit()` перед вызовом `sys_exit`. Устранена проблема "молчаливого" завершения программ, использующих буферизованный `FILE*` API (в частности, `tcc --version`).
-
-**🎯 Результат этапа:**
-* Успешный запуск `test_hello.elf` и интерактивная работа Shell.
-* **TinyCC v0.9.27** (`/bin/tcc.elf`) успешно загружается, работает в Ring 3 и
- завершается с кодом 0.
-* Достигнут статус **Self-Hosting Ready** (инфраструктура готова к компиляции 
-TinyCC самим TinyCC).
---- 
-## 📅 ФАЗА 3: SELF-HOSTING & INTEGRATION (День 21-25)
-### День 21: Advanced C Features Testing
-**Цель:** Протестировать продвинутые фичи C в TinyCC.
-**Задачи:**
-- ✅ Протестировать структуры данных (struct Point { int x, y; })
-- ✅ Протестировать указатели (int* ptr = &value)
-- ✅ Протестировать string literals (char* str = "Hello")
-- ✅ Протестировать массивы (int arr[5] = {1, 2, 3, 4, 5})
-- ✅ Протестировать циклы (for, while, do-while)
-- ✅ Протестировать условные операторы (if/else, switch/case)
-**Тесты:**
-- Программа с структурами + указателями + циклами
-- Проверка корректности вычислений
-- Проверка отсутствия memory corruption
----
-### 📘 ENCLAVE OPERATING SYSTEM — Обновление документации (Day 21)
-## Статус: Alpha 0.3 (Self-Hosting Ready)
+> ⚠️ **VIRT_TO_PHYS Underflow:** Секции `.boot` имеют адреса < 0xC0000000. Макрос **обязан** содержать проверку `addr >= 0xC0000000`, иначе unsigned underflow → мусор в CR3.
 
 ---
 
-### 📋 СТАТУС ДНЯ 21: Advanced C Features Testing & ELF Loader Hardening (ЗАВЕРШЕНО)
+## 5. ПОДСИСТЕМЫ ЯДРА
 
+### 5.1 Загрузчик и инициализация
 
+#### `boot.asm` — Multiboot + Higher Half Trampoline
 
-2. **Фикс Use-After-Free в `sys_exec_handler` (syscall.c):**
-   - *Проблема:* После уничтожения старого адресного пространства ядро использовало user-space указатель `filename` для логирования, что приводило к чтению мусора (в логах отображалось `/sbin/init.elf` вместо реального имени файла).
-   - *Решение:* Логирование переведено на использование kernel-space буфера `filename_buf`. Имя процесса (`current_task->name`) теперь принудительно обновляется на новое имя файла, что соответствует семантике POSIX `exec`.
+- Multiboot Header: magic `0x1BADB002`, flags `0x3` (PAGE_ALIGN | MEM_INFO)
+- Bochs VBE инициализация (1024×768×32bpp) через порты `0x01CE/0x01CF`
+- **Раздельные Page Tables:** `boot_page_tables` (Identity Map) + `boot_page_tables_hh` (Higher Half Map)
+- Framebuffer `0xFD000000` с флагом `PAGE_PCD` (Cache Disable)
+- Сохранение `eax`/`ebx` в `.boot.data` (защита от уязвимостей стека)
+- **Defensive Handover:** `call kernel_main` (не `jmp`) → `.halt_loop` при случайном return
+- **Virtual Stack Switch:** `mov esp, stack_top` после включения CR0.PG
 
-3. **Headless Debugging Bridge (syscall.c):**
-   - *Проблема:* Вывод `printf` из User Space уходил только в VGA/Framebuffer, но не дублировался в Serial COM1 (QEMU `-serial stdio` оставался немым).
-   - *Решение:* В `sys_write_handler` для fallback-обработки `fd == 1` и `fd == 2` добавлен вызов `serial_putc()`. Это гарантирует, что любой вывод в stdout/stderr дублируется в COM1, сохраняя при этом Zero Trust (Ring 3 не получает прямого доступа к портам).
+#### `linker.ld` — LMA/VMA Split
 
-#### 🏛 Архитектурные решения
-1. **ELF Loader математически точен:** Доказано, что `.bss` зануляется, `.data` загружается по правильному VADDR, `.rodata` читается, а рекурсия не пробивает стек.
-2. **POSIX exec семантика:** `sys_exec` полностью заменяет образ процесса, включая его имя. Это критично для корректной работы Reaper Queue и логов.
-3. **Serial-мост для headless-отладки:** Временный fallback в `sys_write` позволяет отлаживать User Space программы без подключения монитора, используя только терминал хост-машины.
+- Физическая загрузка: `0x00100000` (1 MB)
+- `_boot_start`, `_kernel_start`, `_kernel_end` экспортированы для PMM
+- `AT(ADDR(...) - 0xC0000000)` для корректной LMA
+- `. += 0xC0000000` для перехода в Higher Half
 
-#### 🐛 Исправленные критические баги
-1. **Use-After-Free в логах `sys_exec`:** Устранен через использование kernel-space буфера и обновление `current_task->name`.
-2. **Немой Serial-вывод:** Устранен через добавление `serial_putc()` в `sys_write_handler` для stdout/stderr.
+#### `kernel.c` — Bootstrap Sequence
 
+**Строгая последовательность (нарушение → Triple Fault):**
 
-#### 🎯 Готовность к следующему этапу
-Инфраструктура Дня 21 **полностью готова**. ELF Loader, VMM и User Space ABI доказали свою надежность. Headless-дебаггинг через Serial работает безупречно.
+| Шаг | Функция | Назначение |
+|---|---|---|
+| 1 | `serial_init()` | Headless debug |
+| 2 | Multiboot magic check | `0x2BADB002` |
+| 3 | `fb_init()` | Временный (физический LFB) |
+| 4 | `gdt_install()` | Flat Model + TSS |
+| 5 | `idt_install()` | 256 векторов |
+| 6 | `tss_install()` | Load TR |
+| 7 | `syscall_init()` | INT 0x80 |
+| 8 | `pmm_init()` | Two-Pass E820 + Reserve Modules |
+| 9 | `paging_init()` | Direct Map, Page Fault Handler |
+| 10 | `fb_init()` | Resurrect (виртуальный 0xFD000000) |
+| 11 | `heap_init()` | Buddy System (Lazy) |
+| 12 | `ata_init()` + `fat32_init()` | Storage |
+| 13 | `vfs_init()` + `devfs_init()` + `initrd_init()` | VFS + DevFS + Initrd |
+| 14 | `tmpfs_init()` | Writable RAM Disk |
+| 15 | `tasking_init()` | Main Task (PID 0), FPU setup |
+| 16 | `keyboard_install()` + `timer_init(1000)` | IRQ |
+| 17 | **Launch PID 1** (`/sbin/init.elf`) | Ring 3 Init |
+| 18 | **Kernel Idle Loop** | `sti; hlt; cli` |
 
-### День 25: UI/UX Polish, ANSI Terminal & The Great Stack Switch Fix
-**Цель:** Превратить "серую консоль" в современный цветной терминал, обеспечить headless-отладку и устранить критическую архитектурную аномалию передачи аргументов в `sys_exec`.
-**Статус:** ЗАВЕРШЕНО (UI Polish & Stack Fix), Self-Hosting (в процессе финальной настройки typedef)
+### 5.2 Управление памятью
 
-#### ✅ Реализовано
-1. **ANSI State Machine в ядре (syscall.c):**
-   * Внедрен конечный автомат (State Machine) в `sys_write_handler` для `fd == 1` и `fd == 2`.
-   * Ядро (Ring 0) прозрачно перехватывает и парсит ANSI escape-последовательности (`\033[...m`), генерируемые Ring 3.
-   * Реализован маппинг ANSI SGR-кодов (30-37, 90-97) на 16-цветную палитру `klib.h` с вызовом `k_set_color()`.
-   * Поддержка команд очистки экрана (`\033[2J`) через `k_clear()`.
-2. **Интерактивный Ring 3 Shell (shell_user.c):**
-   * Умная раскраска `ls`: директории (синие), ELF-бинарники (зеленые), исходники (желтые).
-   * Современный POSIX-промпт: `enclave@os:/# ` с использованием ANSI-цветов.
-   * Автоочистка экрана при старте (`handle_clear()`).
-3. **Стресс-тест ELF Loader (test_advanced_c.c):**
-   * Написан исчерпывающий тест, проверяющий `.bss` (Zero-Fill), `.data`, `.rodata` (Read-Only), выравнивание структур и глубину стека (рекурсия). Все 6 тестов пройдены на 100%.
-4. **Headless Debug Bridge:**
-   * Настроен fallback-дубль вывода `stdout/stderr` в Serial (COM1) для headless-отладки без нарушения Zero Trust Sandbox.
+#### `pmm.c` — Physical Memory Manager
 
-#### 🏛 Архитектурные решения
-1. **Kernel-Side ANSI Parsing (Zero Trust UI):** 
-   Ring 3 приложения не имеют прямого доступа к видеодрайверу или ioctl для смены цвета. Они просто пишут байты в `stdout`. Ядро выступает в роли "умного терминала", безопасно парсит ANSI-коды и применяет цвета. Это сохраняет иммутабельность API и изоляцию.
-2. **POSIX Type Injection для Self-Hosting:**
-   В `user_libc.h` внедрены критические POSIX `typedef` (`ssize_t`, `off_t`, `pid_t`, `size_t`), необходимые для того, чтобы парсер TinyCC мог корректно разбирать заголовочные файлы в Freestanding-среде без glibc.
+| Фича | Описание |
+|---|---|
+| **Safe by Default** | Вся память изначально занята (bitmap = 0xFF) |
+| **Two-Pass E820** | Pass 1: `max_addr` → `pmm_max_page`. Pass 2: освобождение |
+| **Dynamic Sizing** | `pmm_max_page` ограничивает сканирование реальной RAM |
+| **Punching Holes** | Lower 1MB, Kernel Image, Multiboot Info, Modules, PCI MMIO |
+| **O(1) Allocation** | `__builtin_ctz` (BSF/TZCNT) |
+| **IRQ Safety** | `cli/sti` вокруг всех операций с bitmap |
+| **Reference Counting** | `pmm_refcounts[]` для Copy-on-Write |
+| **Accounting** | `pmm_total_allocs/frees`, `pmm_check_balance()` |
 
-#### 🐛 Исправленные критические баги (The "Holy Grail" of OS Dev)
-1. **The `IRET` Stack Switch Trap (Аргументы `main` терялись при `sys_exec`):**
-   * *Симптом:* `sys_exec` корректно формировал стек с `argc/argv` в памяти, но при запуске ELF-бинарника `main()` получал `argc = 0` или мусор.
-   * *Диагноз:* Классическая ловушка x86. При прерывании `int 0x80` процессор аппаратно пушит `User ESP` в Kernel Stack. Инструкция `pusha` сохраняет *текущий* `ESP` в структуру `regs`. При возврате инструкция `popa` **игнорирует** поле `ESP` (оно не восстанавливается), а `iret` читает `User ESP` из аппаратного стека. Обновление `r->esp` в `sys_exec` не имело эффекта.
-   * *Решение:* В `sys_exec_handler` добавлено обновление поля `r->useresp` (аппаратный User ESP, лежащий ниже `regs` на Kernel Stack). Теперь `iret` корректно переключает процессор на новый пользовательский стек, сформированный ядром.
-2. **Use-After-Free в логах `sys_exec`:**
-   * Устранено чтение user-space указателя `filename` после уничтожения старого Address Space. Имя процесса теперь корректно обновляется на kernel-space буфер.
-3. **Init Launch Crash (Stack Dump SIGSEGV):**
-   * Устранено падение Init Task при старте из-за того, что диагностический `crt0.asm` пытался делать `pop` со стека, который ядро не инициализировало (Init запускается через `task_create`, а не `sys_exec`). Возвращен production-ready `crt0.asm`, читающий стек через `mov` без сдвига `ESP`.
+#### `paging.c` — Virtual Memory Manager
 
-#### 🎯 Готовность к следующему этапу
-Инфраструктура UI/UX и передачи аргументов достигла production-ready SLA. TinyCC успешно загружается, выделяет память и читает файлы. 
-**Остался один финальный штрих для Self-Hosting:** добавление оставшихся `typedef` и структур в `user_libc.h` (например, разрешение конфликтов встроенных типов GCC/TCC вроде `wchar_t` и `time_t`), чтобы парсер TinyCC смог до конца разобрать `user_libc.h` и скомпилировать первый `hello.c` внутри Enclave OS.
+| Фича | Описание |
+|---|---|
+| **Direct Map** | 512 MB → 0xC0000000+ |
+| **On-Demand Paging** | Page Fault (INT 14) выделяет страницы по запросу |
+| **CoW Page Fault** | `PAGE_COW` → личная копия при записи |
+| **Kernel Heap Isolation** | 0xD0000000 без `PAGE_USER` |
+| **Kernel Stack Pool** | Guard Pages (Day 16) |
+| **Deep Destroy** | `vmm_destroy_address_space()` освобождает PTE + PT + PD |
+| **Strict CoW Teardown** | `pmm_dec_ref()` → free только при refcount == 0 (Day 24) |
+| **PAGE_PS Check** | Защита от 4MB регионов |
 
-**Следующие логические шаги:**
-1. Финализация `typedef` в `user_libc.h` для полного прохождения парсера TCC.
-2. Запуск `compile /examples/hello.c` и получение `SELF-HOSTING SUCCESS`.
-3. Переход к Дню 26: DevFS и `/dev/console` (убираем "магические" fd 0/1/2).
+**Paranoid Page Fault Handler (Zero Trust):**
+1. NULL Pointer Guard (< 0x1000 → SIGSEGV)
+2. Kernel Space Protection (Ring 3 → Kernel → SIGSEGV)
+3. Kernel Stack Overflow Guard (Guard Page → SIGSEGV)
+4. Kernel Heap Demand Paging (0xD0000000, no PAGE_USER)
+5. Ring 0 → User Space Demand Paging (Stack Forging)
+6. CoW Interception (PAGE_COW → copy page)
+7. User Space Demand Paging (VMA check)
+8. W^X Enforcement (write to Read-Only → SIGSEGV)
+9. OOM Trap (pmm_alloc_page == 0 → task_kill_current)
 
-### День 22: Self-Hosting Preparation
-**Цель:** Подготовить среду для компиляции TinyCC самим TinyCC.
-**Задачи:**
-- ✅ Скопировать исходники TinyCC в VFS (/src/tcc/)
-- tcc.c, tccpp.c, tccgen.c, tccelf.c, libtcc.c, i386-gen.c, i386-asm.c
-- ✅ Создать build скрипт на Shell (/scripts/build_tcc.sh)
-- Компиляция каждого .c файла через tcc -c
-- Линковка всех .o файлов через tcc
-- Создание /tmp/tcc_selfhosted.elf
-- ✅ Протестировать build скрипт
-- Запуск через run /scripts/build_tcc.sh
-- Проверка создания tcc_selfhosted.elf
-**Архитектурное решение:**
-Build скрипт использует **существующий** tcc для компиляции **нового** tcc. 
-Это доказывает, что TinyCC может компилировать сам себя (self-hosting).
-**Тесты:**
-- Запуск build скрипта
-- Проверка, что все .o файлы созданы
-- Проверка, что tcc_selfhosted.elf создан
+#### `heap.c` — Kernel Heap (Buddy System)
+
+| Фича | Описание |
+|---|---|
+| **Buddy System** | Неявное бинарное дерево, O(1) Merge через XOR |
+| **Zero-Cost Lazy Heap** | Виртуальный пул 128 MB, физические страницы по Page Fault |
+| **BlockHeader** | magic `0xDEADBEEF` для детекта double-free |
+| **Bounds Checking** | `kfree()` проверяет диапазон |
+| **IRQ Safety** | `cli/sti` вокруг операций с деревом |
+| **Accounting** | `heap_total_allocs/frees`, `heap_check_balance()` |
+
+#### `vma.c` — Virtual Memory Areas
+
+- Сортированный связный список VMA для каждого процесса
+- `vma_add()` — добавление с автоматической сортировкой
+- `vma_find()` — линейный поиск по адресу
+- `vma_clone()` — глубокое клонирование (sys_fork)
+- `vma_intersects()` — Collision Detection
+- `vma_find_free_area()` — поиск "дырок" для mmap
+- `vma_unmap_range()` — Split VMA при munmap
+- `vma_destroy_all()` — очистка (Reaper)
+
+### 5.3 Файловая система
+
+#### `vfs.c` — Virtual File System
+
+| Фича | Описание |
+|---|---|
+| **Полиморфизм** | `vfs_node_t` с function pointers (read, write, readdir, create, unlink, open) |
+| **LCRS Tree** | Left-Child Right-Sibling для каталогов |
+| **3-звенная модель FD** | `vfs_node_t` (Inode) → `open_file_t` (offset, ref_count) → `fd_table` |
+| **RBAC** | Флаг `FS_SYSTEM` — Ring 3 получает EACCES |
+| **True Mountpoints** | `FS_MOUNTPOINT` → "телепортация" к `mountpoint_node` |
+| **MAX_MOUNT_HOPS** | 16 (защита от Kernel Stack Overflow) |
+| **Orphan Nodes** | POSIX unlink semantics (is_unlinked + ref_count) |
+
+#### `initrd.c` — RAM Disk (TAR UStar)
+
+- Парсинг TAR UStar из GRUB Module
+- **Robust Magic Search:** сканирование первых 8 KB
+- **Binary Magic Comparison:** `k_memcmp` (не `strncmp`)
+- **TAR Padding Tolerance:** защита от padding GRUB
+- **Prefix + Name:** UStar 256-байтные пути
+- **FS_SYSTEM для /boot:** RBAC наследование
+
+#### `tmpfs.c` — Writable RAM Disk
+
+| Фича | Описание |
+|---|---|
+| **Dynamic Growth** | capacity *= 2 (< 1 MB) или +25% (> 1 MB) |
+| **OOM Protection** | `TMPFS_MAX_FILE_SIZE = 25 MB` |
+| **O_TRUNC** | Обнуление size, сохранение capacity |
+| **Sparse Files** | Заполнение "дырок" нулями |
+| **Size Synchronization** | `node->size = new_size` после write |
+| **Atomic Commit** | kmalloc private_data до link в дерево |
+| **True Mountpoint** | `vfs_mount("/tmp", tmpfs_root)` |
+
+#### `devfs.c` — Device File System (Day 28)
+
+| Фича | Описание |
+|---|---|
+| **`/dev/console`** | Полиморфная VFS-нода для клавиатуры + экрана |
+| **Exclusive Access** | `console_open_count` (только PID 1) |
+| **ANSI State Machine** | CSI parsing (SGR, CUP, ED) |
+| **RAW MODE** | Line Discipline в Ring 3 (Shell) |
+| **Private Mode** | `\033[?25h/l` безопасно игнорируются |
+| **Double Dump** | `serial_putc` + `k_putchar` |
+
+#### `ata.c` + `fat32.c` — Storage (Day 8.2)
+
+- **ATA PIO Driver:** порты 0x1F0-0x1F7, LBA28, Polling Mode
+- **IDENTIFY Command:** модель, сериал, firmware, LBA capacity
+- **ATAPI Detection:** LBA_MID/LBA_HI
+- **MBR Parser:** 4 записи, сигнатура 0xAA55
+- **FAT32 Read-Only:** BPB, Cluster Chain, FAT Caching
+- **VFAT (LFN):** UCS-2 → UTF-8, кириллица, checksum verification
+
+### 5.4 Графика и вывод
+
+#### `framebuffer.c`
+
+| Фича | Описание |
+|---|---|
+| **Double Buffering** | back_buffer в Kernel Heap (3 MB) |
+| **Dirty Rectangles** | `fb_flush()` копирует только изменённый бокс |
+| **PSF1 Unicode** | UCS-2 tables, UTF-8 State Machine |
+| **Fallback Font** | 8×16 ASCII (32-126) |
+| **rep movsl / rep stosl** | Аппаратное копирование/заполнение |
+
+#### `klib.c` — Strategy Pattern
+
+```c
+static void output_char(char c) {
+    if (fb_is_available()) fb_putc(c);
+    else vga_putc(c);
+}
+```
+
+- `k_set_color()` — VGA → RGB mapping (16 цветов)
+- `k_printf()` — C99 compliant formatter
+- `k_set_cursor()` — Strategy Pattern (FB/VGA)
+
+### 5.5 Прерывания и железо
+
+| Файл | Назначение |
+|---|---|
+| `gdt.c` | Flat Model (4 GB), Ring 0/3, TSS Descriptor |
+| `idt.c` | 256 векторов, **EOI Lock Bypass** |
+| `isr.c` + `isr_asm.asm` | ISR/IRQ stubs, pusha, segment swap |
+| `pic.c` | PIC Remap (ICW1-ICW4), irq_set_mask |
+| `tss.c` | ESP0 для Ring 3 → Ring 0 переходов |
+| `timer.c` | PIT 1000 Hz, квант = 10 тиков (50 Hz) |
+| `keyboard.c` | PS/2 IRQ1, Ring Buffer 256, ANSI escape для стрелок |
+| `serial.c` | COM1 (headless debug) |
+
+> ⚠️ **EOI Lock Bypass:** `outb(0x20, 0x20)` отправляется в PIC **ДО** вызова C-обработчика. Иначе `schedule()` переключит задачу, и линия IRQ заблокируется навсегда.
+
 ---
-### День 23: Self-Hosting Execution
-**Цель:** Запустить self-hosted TinyCC и скомпилировать тестовую программу.
-**Задачи:**
-- ✅ Запустить self-hosted TinyCC
-- `/tmp/tcc_selfhosted.elf --version`
-- Проверка, что версия совпадает
-- ✅ Скомпилировать тестовую программу self-hosted компилятором
-- `echo 'int main() { print("Self-hosting works!"); return 0; }' > /tmp/selftest.c`
-- `/tmp/tcc_selfhosted.elf /tmp/selftest.c -o /tmp/selftest.elf`
-- ✅ Запустить скомпилированную программу
-- `run /tmp/selftest.elf`
-- Проверка вывода "Self-hosting works!"
-**Архитектурное решение:**
-Self-hosting — это **кульминация** проекта. ОС компилирует компилятор, который компилирует программы. Это доказывает, что Bare Metal OS — **настоящая платформа**, а не игрушка.
-**Тесты:**
-- Self-hosted tcc --version
-- Компиляция программы self-hosted tcc
-- Запуск скомпилированной программы
+
+## 6. МНОГОЗАДАЧНОСТЬ И ПРОЦЕССНАЯ МОДЕЛЬ
+
+### 6.1 PID Architecture (Day 24)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  PID 0: Kernel Idle (Ring 0)                                │
+│  • Бессмертный Ring 0 поток                                 │
+│  • Единственная задача: sti; hlt; cli                       │
+│  • Никогда не падает из-за багов в Ring 3                   │
+├─────────────────────────────────────────────────────────────┤
+│  PID 1: /sbin/init.elf (Ring 3)                             │
+│  • Launcher + Supervisor                                    │
+│  • Запускает Shell через fork + exec                        │
+│  • Respawn при падении Shell (< 100мс)                      │
+│  • Orphan Adoption (усыновление сирот)                      │
+│  • Если PID 1 падает → Reaper перезапускает из VFS          │
+├─────────────────────────────────────────────────────────────┤
+│  PID 2+: /bin/shell.elf, /bin/tcc.elf, ... (Ring 3)        │
+│  • Zero Trust Sandbox                                       │
+│  • Только через syscalls                                    │
+│  • Crash-Only (Init перезапустит)                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 6.2 `task.c` — Scheduler + Supervisor Trees
+
+| Фича | Описание |
+|---|---|
+| **PCB (task_t)** | PID, State, ESP, CR3, FD Table, VMA List, FPU State (512 B), Process Tree |
+| **Round-Robin** | Кольцевой двусвязный список, квант 10 мс |
+| **Lazy FPU** | CR0.TS → #NM (INT 7) → fxsave/fxrstor |
+| **Reaper Queue** | `dead_tasks_head` + `reaper_next` |
+| **Zombie State Machine** | TASK_ZOMBIE → waitpid → TASK_DEAD → Reaper |
+| **Orphan Adoption** | Unix-style (orphan_on_exit=1) + Erlang-style (monitor_children=1) |
+| **Kernel Stack Pool** | 16 KB + Guard Page (Day 16) |
+| **Init Respawn** | Reaper перезапускает PID 1 из VFS (Day 24) |
+
+### 6.3 Состояния задач
+
+```
+TASK_READY ──→ TASK_RUNNING ──→ TASK_SLEEPING
+    ↑               │               │
+    │               ▼               │
+    └────────── TASK_ZOMBIE ←───────┘
+                    │
+                    ▼ (waitpid)
+               TASK_DEAD ──→ Reaper Queue ──→ Freed
+```
+
+### 6.4 Context Switch (`context_switch.asm`)
+
+1. Сохранение callee-saved (EBX, ESI, EDI, EBP)
+2. `*old_esp = ESP`
+3. `mov ESP, new_esp` (телепортация)
+4. `mov CR3, new_cr3` (TLB Flush)
+5. `pop EBP/EDI/ESI/EBX`
+6. `or CR0, TS` (Lazy FPU trigger)
+7. `ret` (прыжок в EIP новой задачи)
+
+### 6.5 Copy-on-Write (Day 14)
+
+```
+fork():
+  1. vmm_clone_address_space() → новый PD
+  2. Kernel Space (768-1023): клонируется из boot_page_directory
+  3. User Space (0-767): PTE помечаются READ-ONLY + PAGE_COW
+  4. pmm_inc_ref() для каждой физической страницы
+  5. vma_clone() → deep copy VMA list
+  6. FD inheritance: ref_count++ для open_file_t + vfs_node_t
+  7. Kernel Stack copy (16 KB)
+  8. child_r->eax = 0 (ребёнок видит fork() == 0)
+  9. Stack Forging: [child_r][ret_from_fork][EBX][ESI][EDI][EBP]
+
+Write to CoW page:
+  1. Page Fault (INT 14, rw=1, present=1)
+  2. if refcount == 1: снять PAGE_COW, восстановить WRITE
+  3. if refcount > 1: pmm_alloc_page(), k_memcpy(), pmm_dec_ref()
+  4. Обновить PTE, invlpg
+  5. return (процессор повторяет инструкцию)
+```
+
 ---
-### День 24: Shell Integration
-**Цель:** Интегрировать TinyCC в Shell для удобства разработки.
-**Задачи:**
-- ✅ Добавить команду `compile <file.c> [output.elf]` в Shell
-- Парсинг аргументов
-- Вызов sys_fork + sys_exec("/bin/tcc", ...)
-- sys_waitpid для ожидания завершения
-- Вывод статуса компиляции
-- ✅ Добавить команду `run <file.elf> [args...]` с аргументами
-- Парсинг аргументов
-- Передача argv в sys_exec
-- Вывод exit code
-- ✅ Обновить help с новыми командами
-**Архитектурное решение:**
-Shell использует **sys_fork + sys_exec + sys_waitpid** для запуска tcc. Это стандартный Unix pattern (как system() в libc).
 
-### 🏛 Архитектурные достижения
+## 7. СИСТЕМНЫЕ ВЫЗОВЫ
 
-#### 1. Monolithic Bypass для user_libc.h (SSOT)
-* **Проблема:** Header Shadowing в VFS. Наш "фейковый" `/usr/include/stdint.h` подсовывался TinyCC раньше встроенного, ломая парсер с ошибками `invalid type` и `';' expected`.
-* **Решение:** Полный отказ от `#include <stdint.h>`, `<stddef.h>`, `<stdarg.h>`. Все типы (`int8_t`...`uint64_t`, `size_t`, `pid_t`, `va_list`) определяются через **примитивы C** (`int`, `long`) и **builtins** (`__builtin_va_list`). Это индустриальный стандарт кастомных libc (musl, newlib).
-* **Результат:** `user_libc.h` стал абсолютно самодостаточным (SSOT) и иммунитетом к любым изменениям в VFS.
+### 7.1 Syscall Table (INT 0x80, DPL=3)
 
-#### 2. Native Enclave Toolchain Pack (libc.a Injection)
-* **Проблема:** Встроенный линкер TinyCC внутри Ring 3 искал `/usr/lib/libc.a` и не мог найти реализации `printf`, `exit`, `malloc`, `mmap`.
-* **Решение:** Makefile автоматически собирает `libc.a` из `user_libc.o` + `tcc_lib_os.o` + `setjmp.o` через `ar rcs` и инжектит его в Initrd вместе с `crt1.o`, `crti.o`, `crtn.o`, `libtcc1.a`.
-* **Результат:** TinyCC внутри ОС работает как полноценный Unix toolchain (`tcc hello.c -o hello.elf`).
+| # | Syscall | Описание |
+|---|---|---|
+| 1 | `sys_exit` | Завершение процесса → task_exit() |
+| 2 | `sys_fork` | CoW клонирование процесса |
+| 3 | `sys_read` | Чтение из FD (Zero Trust) |
+| 4 | `sys_write` | Запись в FD (ANSI State Machine для fd 1/2) |
+| 5 | `sys_open` | Открытие файла (O_CREAT, O_TRUNC, variadic mode) |
+| 6 | `sys_close` | Закрытие FD |
+| 10 | `sys_unlink` | Удаление файла (Orphan Semantics) |
+| 11 | `sys_exec` | Замена образа процесса (ELF load) |
+| 19 | `sys_lseek` | Позиционирование (SEEK_SET/CUR/END) |
+| 28 | `sys_fstat` | Метаданные файла (struct stat) |
+| 41 | `sys_dup` | Дублирование FD (Day 28) |
+| 54 | `sys_ioctl` | TIOCGWINSZ (размер терминала) |
+| 63 | `sys_dup2` | Атомарное дублирование FD (Day 28) |
+| 78 | `sys_gettimeofday` | Время с момента загрузки |
+| 90 | `sys_mmap` | On-Demand Paging (MAP_ANONYMOUS) |
+| 91 | `sys_munmap` | Освобождение памяти |
+| 102 | `sys_getpid` | PID текущего процесса |
+| 125 | `sys_mprotect` | Изменение прав (W^X enforcement) |
+| 141 | `sys_readdir` | Чтение директории |
+| 158 | `sys_yield` | Добровольная передача CPU |
+| 162 | `sys_nanosleep` / `sys_sleep` | Сон (миллисекунды) |
+| 164 | `sys_uname` | Информация об ОС |
+| 179 | `sys_sysinfo` | Статистика системы |
+| 180 | `sys_waitpid` | Ожидание ребёнка (WNOHANG) |
+| 182 | `sys_brk` | Управление кучей (VMA Collision Detection) |
 
-#### 3. Scheduler Deadlock Fix (The "Ghost in the Run Queue" Trap)
-* **Проблема:** При `task_exit()` задача удаляла **саму себя** из Run Queue (двусвязного списка). Если в этот момент все остальные задачи спали, `schedule()` уходил в бесконечный цикл `while (new_task != old_task)`, так как `old_task` физически не находился в очереди.
-* **Решение:** Зомби-процессы **никогда не удаляются из Run Queue** в момент смерти. Они остаются в очереди с состоянием `TASK_ZOMBIE`, пока `waitpid` родителя не заберет статус. Только тогда задача удаляется из очереди и отправляется в Reaper Queue.
-* **Результат:** Тесты `proc_fork_bomb` (25 fork'ов) и `proc_zombie_cascade` (15 зомби) проходят без зависаний.
+### 7.2 Zero Trust Validation
 
-#### 4. tmpfs Size Synchronization (POSIX Sparse Files)
-* **Проблема:** `tmpfs_write` и `tmpfs_open(O_TRUNC)` обновляли только приватное поле `fdata->size`, не синхронизируя его с `vfs_node->size`. В результате `sys_lseek(fd, 0, SEEK_END)` возвращал фантомный размер файла.
-* **Решение:** 
-  - В `tmpfs_write`: `node->size = new_size` после каждого успешного write
-  - В `tmpfs_open(O_TRUNC)`: `node->size = 0` при обнулении
-  - Добавлено заполнение "дырок" нулями при `offset > size` (True POSIX Sparse Files)
-* **Результат:** Тесты `vfs_large_file`, `vfs_sparse_seek`, `vfs_o_trunc` проходят.
+```c
+// Каждый syscall ОБЯЗАН:
+static inline bool is_user_pointer(const void* ptr, size_t size) {
+    if (!ptr) return false;
+    uint32_t addr = (uint32_t)ptr;
+    if (addr >= KERNEL_SPACE_START) return false;
+    if (size == 0) return true;
+    if (addr > USER_SPACE_END - size + 1) return false;
+    return true;
+}
 
-#### 5. FPU State Machine Hardening (x87 via C double)
-* **Проблема:** TinyCC не поддерживает XMM-регистры в inline asm clobbers (`%xmm7` вызывает ошибку парсера).
-* **Решение:** Тесты FPU переписаны на **чистый C с `double` арифметикой** через `volatile` переменные. TinyCC генерирует x87 инструкции (`fld`, `fstp`, `fmul`), которые триггерят тот же `#NM Handler` (INT 7) и `fxsave`/`fxrstor` на 512-байтный буфер `fpu_state` в `task_t`.
-* **Результат:** Доказано, что FPU state корректно сохраняется при fork, context switch и Ring 0 переходах.
+static int copy_string_from_user(char* dest, const char* user_src, size_t max_len) {
+    // Побайтовое копирование с проверкой Kernel Space boundary
+}
+```
 
-#### 6. Zombie Leak Fix (Supervisor Tree Cascade)
-* **Проблема:** В блоке `monitor_children` (Erlang-style supervisor) при каскадном убийстве детей они удалялись из Run Queue, но **не добавлялись** в Reaper Queue, а связь с родителем обрывалась (`children = NULL`). Это приводило к утечке памяти.
-* **Решение:** Дети теперь переводятся в `TASK_DEAD` и **напрямую** добавляются в `dead_tasks_head` через `reaper_next`, минуя `waitpid`.
-* **Результат:** Supervisor Trees работают без утечек памяти.
+### 7.3 sys_exec — Stack Forging + IRET Stack Switch
 
-### 🐛 Исправленные критические баги
+```
+1. copy_string_from_user(filename)
+2. vfs_findnode(filename) → ELF node
+3. vmm_create_address_space() → новый PD
+4. elf_load(node, &temp_task) → entry_point + VMA
+5. Сохранить FD table (POSIX exec сохраняет FD)
+6. vmm_destroy_address_space(old PD)
+7. vmm_switch_pdir(new CR3)
+8. Stack Forging: argc, argv[], NULL на User Stack
+9. r->useresp = stack_ptr  ← КРИТИЧНО (IRET Stack Switch Trap)
+10. r->eip = entry_point
+11. return 0 (IRET восстановит новый контекст)
+```
 
-| Баг | Симптом | Решение |
-|-----|---------|---------|
-| `invalid type` в user_libc.h:213 | TinyCC падает на `va_list` | Monolithic Bypass (`__builtin_va_list`) |
-| `';' expected (got 'uint32_t')` | Парсер TCC ломается на `timeval_t` | Явное определение integer-типов |
-| `unresolved reference to 'mmap'` | Линкер TCC не находит `mmap` | Добавлены обертки `mmap()`/`munmap()` в `user_libc.c` |
-| `unresolved reference to 'exit'` | Линкер TCC не находит libc | Native Enclave Toolchain Pack (libc.a) |
-| Scheduler Deadlock | Зависание на Тесте 9 (fork bomb) | Зомби остаются в Run Queue до waitpid |
-| tmpfs Size Desync | `lseek(SEEK_END)` возвращает мусор | Синхронизация `node->size` с `fdata->size` |
-| `invalid clobber register '%xmm7'` | TinyCC не знает XMM | Тесты FPU на чистом C с x87 |
+> ⚠️ **IRET Stack Switch Trap (Day 25):** `popa` **игнорирует** поле ESP. `iret` читает User ESP из аппаратного стека. Обновление `r->esp` не имеет эффекта — необходимо обновлять `r->useresp`.
 
-### 🔒 Математически доказанные гарантии (Post Day 27)
-
-| Тест | Что доказано | Архитектурная ценность |
-|------|--------------|------------------------|
-| **[06] vmm_mprotect_sigsegv** | W^X Enforcement работает | Защита от code injection |
-| **[09] proc_fork_bomb** | 25 вложенных fork'ов без deadlock | Scheduler production-ready |
-| **[10] proc_zombie_cascade** | 15 зомби корректно собраны | Supervisor Trees работают |
-| **[11] vfs_1000_files** | 1000 файлов без утечек памяти | tmpfs stable под нагрузкой |
-| **[25-27] fpu_context_switch/precision/syscall_safety** | x87 state не протекает | Lazy FPU Switching корректен |
-| **[28] heap_exhaustion** | `sys_brk` защитил от OOM на 64MB | Heap governance работает |
-| **[29] stack_overflow_guard** | Guard Page убил процесс через SIGSEGV | Stack protection активна |
-| **[30] fd_exhaustion** | 256 FD открыто, 257-й вернул EMFILE | fd_table лимит работает |
-| **[32] unlink_open_file** | Файл читается после unlink | POSIX Orphan Semantics |
-
-
-
-### 🎯 Готовность к следующему этапу
-
-Инфраструктура Дня 25-27 **полностью завершена и валидирована**. Enclave OS достигла уровня зрелых промышленных систем (seL4, Minix 3, QNX) по базовым guarantees.
-
-**Следующие логические шаги по роадмапу (Day 28+):**
-
-1. **День 28: DevFS & `/dev/console`** — Убрать последний "костыль"
- в ядре (магический перехват `fd == 0/1/2`). Создать полиморфные VFS-ноды 
- для устройств. PID 1 при старте открывает `/dev/console` три раза и пробрасывает
-  FD 0/1/2 в Shell через `fork`.
-
-Готовность к следующему этапу
-После завершения Дня 28, Enclave OS получила:
-
-    ✅ DevFS — полиморфные VFS-ноды для устройств
-    ✅ /dev/console — унифицированный ввод/вывод
-    ✅ sys_dup / sys_dup2 — дублирование файловых дескрипторов (Linux ABI #41, #63)
-    ✅ Zero Trust сохранен — устройства доступны только через open()
-    ✅ Убран последний "костыль" — магический перехват fd==0/1/2 удален из syscall.c
-    Console исклюзивна только для init (PID1), детям только передаються указатели.
-
-Задачи Дня 29
-1. Скачать исходники Kilo
-
-bash
-1
-2
-
-2. Создать адаптационный слой
-
-    user_src/kilo/kilo_compat.h (~100 строк заглушек)
-    Интеграция с user_libc.h
-
-3. Модифицировать Kilo (минимальные правки)
-
-    Добавить #include "kilo_compat.h" в начало kilo.c
-    Заменить #include <termios.h> на заглушку
-    Заменить #include <sys/ioctl.h> на заглушку
-    Заменить #include <signal.h> на заглушку
-    Удалить зависимость от isatty() (или использовать заглушку)
-
-   
-29 день :
-
-**Цель:** Обновить документацию и создать примеры программ.
-**Задачи:**
-- ✅ Обновить README с инструкциями по использованию TinyCC
-- Секция "Использование TinyCC"
-- Примеры команд (compile, run)
-- Self-hosting demonstration
-- ✅ Создать примеры программ в /examples/
-- hello.c — Hello World
-- factorial.c — Рекурсия
-- fileio.c — Работа с файлами
-- mmap.c — Memory mapping
-- ✅ Написать мануал по разработке программ для OS
-- Как писать программы
-- Как компилировать
-- Как отлаживать
-- ✅ Оптимизировать производительность компиляции
-- Профилирование tcc
-- Оптимизация узких мест
-**Результат:**
-Полная документация + примеры + оптимизированный TinyCC.
 ---
-## 🎯 ИТОГОВАЯ АРХИТЕКТУРА (День 25)
-### Что работает:
 
-Bare Metal OS
-├── 25 POSIX-like syscalls (полный API для user-space)
-├── TinyCC компилятор в Ring 3 (100KB, быстрый)
-├── Self-hosting capability (компилирует сам себя)
-├── Shell команды: compile, run (удобство разработки)
-├── /examples/ с демонстрационными программами
-└── Полная документация (README + мануал)
+## 8. USER SPACE И SELF-HOSTING
 
+### 8.1 `user_libc.h` — Monolithic SSOT Header
 
-Достижения:
-✅ Self-hosting toolchain — компилируешь программы внутри своей ОС
-✅ 25 POSIX syscalls — стандартный API для программ
-✅ Production-ready C compiler — настоящий C99
-✅ Zero Trust Sandbox — все через syscalls с валидацией
-✅ Уникальная фича — 99% hobby OS не имеют self-hosting
+**Monolithic Bypass:** Полный отказ от `#include <stdint.h>`, `<stddef.h>`, `<stdarg.h>`. Все типы определяются через примитивы C и `__builtin_va_list`.
 
-⚠️ КРИТИЧЕСКИЕ ЗАМЕЧАНИЯ
-Memory Safety
+```c
+typedef __builtin_va_list va_list;
+typedef signed char        int8_t;
+typedef unsigned int       uint32_t;
+typedef unsigned int       size_t;
+typedef int                ssize_t;
+typedef int                pid_t;
+// ... 50+ типов и 200+ прототипов
+```
 
-    Все syscalls проверяют указатели через is_user_pointer()
-    sys_mmap проверяет Resource Container лимиты
-    W^X enforcement предотвращает code injection
-    sys_mprotect обновляет PTE через VMM (не напрямую)
+### 8.2 `user_libc.c` — Ring 3 Standard Library
 
-Performance
+| Компонент | Описание |
+|---|---|
+| **Bump Allocator** | malloc через sys_brk, free = no-op (by design для TinyCC) |
+| **malloc_header_t** | magic `0xA110CA7E`, size |
+| **FILE* API** | 4 KB read + 4 KB write buffers |
+| **printf family** | vsnprintf (C99 compliant) |
+| **POSIX variadic open** | `open(path, flags, ...)` с mode через va_arg |
+| **Process Control** | fork, exec, waitpid, exit (с fflush) |
+| **system()** | fork + exec(/bin/cmd) + waitpid |
+| **mmap/munmap** | Обёртки над sys_mmap/sys_munmap |
+| **Day 29** | getline, strdup, strerror, perror, time, ioctl |
 
-    TinyCC компилирует в 10 раз быстрее GCC (монолитная архитектура)
-    sys_mmap использует on-demand paging (физические страницы выделяются по Page Fault)
-    Copy-on-Write в sys_fork() минимизирует копирование памяти
-    Bump allocator в malloc() быстрее buddy system (для тестов)
+### 8.3 `crt0.asm` — C Runtime Startup
 
-Security
+```asm
+_start:
+    mov eax, [esp]              ; argc
+    lea ebx, [esp + 4]          ; argv
+    lea ecx, [esp + eax*4 + 8]  ; envp
+    push ecx; push ebx; push eax
+    call main
+    add esp, 12
+    push eax                    ; exit_code
+    call exit                   ; sys_exit (never returns)
+.halt_loop:
+    cli; hlt; jmp .halt_loop
+```
 
-    Ring 3 не имеет доступа к kernel heap (0xD0000000 мапится без PAGE_USER)
-    Все syscalls валидируют аргументы (Zero Trust Sandbox)
-    OOM внутри контейнера не влияет на ядро (Resource Containers)
-    W^X enforcement на уровне VMM (не только linker script)
+### 8.4 Self-Hosting Pipeline
 
-Next Steps (День 26+)
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. Shell: compile /examples/hello.c /tmp/hello.elf         │
+│  2. fork() → child                                          │
+│  3. exec("/bin/tcc.elf", ["tcc", "hello.c", "-o", ...])    │
+│  4. TinyCC (Ring 3) → sys_open, sys_read, sys_mmap         │
+│  5. TinyCC generates ELF → sys_write("/tmp/hello.elf")     │
+│  6. waitpid() → status = 0                                  │
+│  7. Shell: run /tmp/hello.elf                               │
+│  8. fork() → child                                          │
+│  9. exec("/tmp/hello.elf", ["hello"])                       │
+│  10. hello.elf (Ring 3) → printf("Hello, World!\n")        │
+│  11. exit(0) → waitpid() → status = 0                      │
+│  12. SELF-HOSTING SUCCESS ✅                                │
+└─────────────────────────────────────────────────────────────┘
+```
 
-    Добавить поддержку #include директив в TinyCC (preprocessor)
-    Реализовать полноценную libc (stdio.h, stdlib.h, math.h)
-    Портовать другие программы (grep, cat, ls, simple shell)
-    Добавить поддержку Makefile'ов (make -f Makefile.baremetal)
-    Реализовать dynamic linking (dlopen, dlsym)
+### 8.5 Shell (Ring 3, Day 28)
 
-🔒 ГАРАНТИИ СИСТЕМЫ (Target SLA)
+| Команда | Описание |
+|---|---|
+| `help` | Справка |
+| `clear` | Очистка экрана (`\033[2J\033[H`) |
+| `ls [path]` | Список файлов (ANSI colors: dir=blue, ELF=green, .c=yellow) |
+| `cat <file>` | Вывод содержимого файла |
+| `mkdir <path>` | Создание директории |
+| `rm <path>` | Удаление файла |
+| `run <elf> [args]` | Запуск ELF (fork + exec + waitpid) |
+| `compile <c> [out]` | Компиляция через TinyCC |
+| `uptime` | Время работы системы |
+| `sysinfo` | Статистика (RAM, процессы) |
+| `exit` | Выход (Init respawn) |
 
-    Ядро НИКОГДА не падает в Kernel Panic из-за бага в Ring 3 коде
-    Любой syscall валидирует аргументы и возвращает errno
-    OOM внутри контейнера убивает только процесс внутри контейнера
-    Self-hosted TinyCC компилирует программы точно так же, как кросс-компилятор
-    W^X enforcement работает на уровне VMM (аппаратная защита)
+**Readline (Day 28):**
+- Arrow Keys (CSI A/B/C/D) — навигация по истории и строке
+- Home/End (CSI H/F) — начало/конец строки
+- Delete (CSI 3~) — удаление символа
+- Ctrl+A/E — Home/End
+- Ctrl+K/U — kill line (вправо/влево)
+- Ctrl+L — clear screen
+- Ctrl+C — cancel
+- Ctrl+D — EOF
+- History (32 записи)
 
-💡 ИСТОЧНИКИ ВДОХНОВЕНИЯ
+---
 
-    TinyCC (Fabrice Bellard): Минимализм + скорость + self-hosting
-    Linux: POSIX syscalls + VFS + ELF loader
-    Minix 3: User-mode drivers + message passing IPC
-    FreeBSD: Syscall table pattern + errno codes
-    Plan 9: Everything is a file + namespaces
+## 9. ГАРАНТИИ СИСТЕМЫ (SLA)
 
-     ВЕРДИКТ
-Этот план превращает Bare Metal OS из "учебного проекта" в настоящую self-hosting платформу за 15 дней. Ты получишь уникальную ОС, которая может компилировать программы сама для себя — это то, чего нет у 99% hobby OS.
-Ключевое отличие: Self-hosting capability доказывает, что твоя ОС — настоящая платформа, а не игрушка. Ты можешь разрабатывать программы внутри своей ОС, без кросс-компиляции.
-Это то чувство, ради которого вообще стоит писать Bare Metal ОС. 🚀
+| # | Гарантия | Механизм |
+|---|---|---|
+| 1 | **Бессмертное Ядро** | PID 0 физически не может упасть из-за Ring 3 |
+| 2 | **Бессмертный Init** | Reaper перезапускает PID 1 из `/sbin/init.elf` |
+| 3 | **Crash-Only Shell** | Init перезапускает Shell < 100мс |
+| 4 | **Изоляция CoW** | Strict CoW Teardown (pmm_dec_ref) |
+| 5 | **Zero Trust I/O** | Устройства через `open("/dev/console")` |
+| 6 | **W^X Enforcement** | VMM + sys_mmap/sys_mprotect reject WRITE+EXEC |
+| 7 | **OOM Governance** | OOM Trap убивает процесс, не ядро |
+| 8 | **Kernel Stack Protection** | Guard Pages (Day 16) |
+| 9 | **POSIX Compliance** | Orphan Nodes, FD inheritance, variadic open |
+| 10 | **Self-Hosting** | TinyCC компилирует программы внутри ОС |
 
-7. ВИЗИЯ: "БЕССМЕРТНАЯ КРЕПОСТЬ" (North Star)
-Философия проекта: Bare Metal OS развивается не как "еще один Linux", а как
-промышленная, отказоустойчивая микроядерная система для запуска недоверенных
-приложений в изолированных песочницах с гарантией бессмертия критичных сервисов.
-🎯 Ключевые принципы
+### Математически доказанные гарантии (Post Day 27)
 
-    "Let it crash" (Erlang/OTP): Приложения БУДУТ падать. Ядро не пытается их лечить.
-    Ядро изолирует падение и позволяет Супервизору (PID 1) мгновенно перезапустить сервис.
-    Zero Trust Sandbox: Любой код в Ring 3 считается недоверенным по умолчанию.
-    Изоляция обеспечивается на уровнях: Ring 3, Capability, Container, IPC.
-    Crash-Only Software: Сервисы проектируются так, чтобы их можно было убить
-    (SIGKILL) в любой момент и поднять заново < 100мс без потери состояния.
-    Immutable Kernel: После инициализации код ядра становится Read-Only.
-    Любая попытка модификации = Kernel Panic + OOM Killer.
+| Тест | Что доказано |
+|---|---|
+| `vmm_mprotect_sigsegv` | W^X Enforcement работает |
+| `proc_fork_bomb` (25 fork'ов) | Scheduler production-ready |
+| `proc_zombie_cascade` (15 зомби) | Supervisor Trees работают |
+| `vfs_1000_files` | tmpfs stable под нагрузкой |
+| `fpu_context_switch` | Lazy FPU Switching корректен |
+| `heap_exhaustion` | sys_brk защитил от OOM |
+| `stack_overflow_guard` | Guard Page убил процесс |
+| `fd_exhaustion` (256 FD) | fd_table лимит работает |
+| `unlink_open_file` | POSIX Orphan Semantics |
 
-    🏛 Архитектурные столпы
-    A. ФЕНИКС (Auto-Restart Infrastructure)
+---
 
-    sys_fork + sys_exec + sys_waitpid: База для Супервизора (PID 1).
-    The Supervisor Loop: /sbin/init читает конфиг, запускает сервисы через fork(),
-    ловит их падение через waitpid() и мгновенно перезапускает через exec().
-    Micro-Reboot: Сервисы не хранят состояние в RAM. Они пишут его в VFS
-    (/var/state/service.state) после каждой транзакции. При перезапуске читают
-    состояние и продолжают работу с того же места.
-    Core Dumps: При фатальном Page Fault ядро сохраняет регистры (EIP, ESP, EAX)
-    и стек упавшего процесса в /var/crash/app.core ПЕРЕД тем, как убить задачу.
-    B. КРЕПОСТЬ (Security Hardening)
-    NX Bit (No-Execute): В Page Tables добавляется бит NX. Память может быть ЛИБО
-    Writable (данные/стек), ЛИБО eXecutable (код). Никогда одновременно (W^X).
-    Capability-Based Security: В task_t добавляется массив capabilities[32].
-    Права привязаны к процессам через токены, а не к файлам через chmod.
-    Пример: curl получает только CAP_NET_SOCKET и CAP_FILE_WRITE(/tmp/out).
-    Seccomp (Syscall Filter): У каждой задачи битмап разрешенных системных вызовов.
-    Песочнице для парсинга текста разрешены только sys_read/sys_write/sys_exit.
-    Вызов sys_open/sys_fork = мгновенное убийство с кодом EPERM.
-    VFS Namespaces (chroot): Недоверенное приложение видит только свою папку.
-    VFS подменяет vfs_root для конкретной задачи при sys_exec.
-    C. БЕССМЕРТНОЕ ЯДРО (Resource Governance)
-    OOM Killer: При pmm_alloc_page() == 0 ядро НЕ падает в Kernel Panic.
-    Оно находит процесс с самым низким приоритетом (или помеченный как sandbox),
-    вызывает vmm_destroy_address_space и освобождает память для критичных сервисов.
-    Resource Containers (Zones): Каждая песочница имеет жесткие лимиты:
-    typedef struct {
-    uint32_t max_physical_pages;  // OOM внутри контейнера
-    uint32_t cpu_weight;          // Fair Share Scheduling
-    uint32_t max_open_fds;        // Защита от исчерпания FD
-    uint32_t max_processes;       // Защита от fork-bomb
-    } resource_container_t;
-    CPU Quotas (Cgroups): Планировщик учитывает "веса" задач. Критичный сервис БД
-    получает 80% квантов, песочница жестко ограничена 5%.
-    User-Mode Drivers (Minix 3): Драйверы ФС (FAT32) и сети работают в Ring 3
-    как обычные процессы. Падение драйвера = перезапуск сервиса, а не Kernel Panic.
-    D. СВЯЗЬ (Inter-Process Communication)
-    Mailboxes / Message Passing: Синхронные сообщения (как в Minix) или
-    асинхронные очереди (как в seL4). VFS общается с fat32_server через IPC,
-    а не через C-функции в Ring 0.
-    Capability Delegation: Токены можно делегировать ребенку при fork() или отзывать.
-    E. ОПТИМИЗАЦИЯ (Performance)
-    Copy-on-Write (CoW): fork() не копирует память. Он создает новые Page Tables,
-    ссылающиеся на те же физические страницы с флагом READ-ONLY + PAGE_COW. При записи
-    срабатывает Page Fault, VMM выделяет личную копию страницы.
-    Результат: Перезапуск сервиса весом 10 МБ занимает микросекунды.
-    Immutable Sections: В linker.ld добавляется секция .immutable, которую VMM
-    мапит с PAGE_PCD | PAGE_READ (без WRITE и EXECUTE для данных).
-    F. ЖИЗНЕННЫЙ ЦИКЛ (Hybrid Process Model)
-    Архитектура использует комбинированный подход к управлению жизненным циклом процессов,
-    сочетая лучшие практики Unix и Erlang/OTP для разных типов задач:
+## 10. ИЗВЕСТНЫЕ ПРОБЛЕМЫ И ROADMAP
 
-    Unix-style (Orphan Adoption) — для пользовательских приложений:
+### 10.1 Критические баги (из код-ревью, июль 2026)
 
-    Когда родитель умирает, все его живые дети автоматически усыновляются Init Task (PID 1)
-    Дети продолжают работать без перебоев, сохраняя свое состояние
-    Подходит для: пользовательских приложений, фоновых задач, демонов, тестовых процессов
-    Флаг в task_t: orphan_on_exit = 1 (по умолчанию)
-    Пример: Shell запускает web server в фоне -> Shell падает -> web server усыновляется init и продолжает работать
+| # | ID | Файл | Проблема | Приоритет |
+|---|---|---|---|---|
+| 1 | V1 | paging.c | Ring 0 не может писать в CoW страницы (sys_exec после fork) | 🔴 FATAL |
+| 2 | UL2 | user_libc.c | 20+ функций не реализованы (fwrite, fseek, qsort, ...) | 🔴 FATAL |
+| 3 | T2 | task.c | `sys_close()` из Ring 0 (нарушение Zero Trust) | 🔴 FATAL |
+| 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | 🔴 FATAL |
+| 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | 🔴 FATAL |
+| 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | 🔴 FATAL |
+| 7 | T1 | task.c | `respawn_init_task` — `temp_task` не инициализирована | 🔴 FATAL |
+| 8 | SH1 | shell_user.c | `handle_mkdir` создаёт файл, а не директорию | 🔴 FATAL |
+| 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 HIGH |
+| 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH |
 
-    Erlang-style (Linked Processes) — для критичных сервисов:
+### 10.2 Системные замечания (из код-ревью)
 
-    Падение родителя = каскадное падение всех связанных детей (linked processes)
-    Супервизор (PID 1) мгновенно перезапускает ВСЕ дерево процессов < 100мс
-    Подходит для: Shell + Helper, VFS Servers (fat32, tmpfs), IPC Daemon, Network Stack
-    Флаги в task_t: orphan_on_exit = 0, monitor_children = 1
-    Гарантирует: Процессы всегда в синхронизированном состоянии (нет stale state)
-    Критичные сервисы (Erlang-style)
+| Категория | Количество | Примеры |
+|---|---|---|
+| 🔴 FATAL | 9 | CoW Ring 0 write, missing libc functions |
+| 🟠 HIGH | 22 | cli/sti без EFLAGS, debug логи в hot path |
+| 🟡 MEDIUM | 49 | O(n) алгоритмы, magic numbers, SSOT конфликты |
+| ⚪ LOW | 49 | Комментарии, именование, defensive coding |
 
-    Философия выбора:
-Если процессы делят состояние или требуют координации → Erlang-style (linked)
-Если процессы независимы → Unix-style (orphan)
-Это дает 99.999% uptime для критичных сервисов и гибкость для пользовательских приложений.
+### 10.3 Roadmap (Day 30+)
 
-💡 Источники вдохновения
-Minix 3 (Andrew Tanenbaum): Микроядро + User-Mode Drivers
-seL4 (NICTA): Capability-Based Security + Formal Verification
-Erlang/OTP (Ericsson): "Let it crash" + Supervisor Trees (99.9999999% uptime)
-QNX: Microkernel + Message Passing IPC
-FreeBSD Jails / Linux cgroups: Resource Containers
-Google Borg / Kubernetes: Crash-Only Software + Immutable Infrastructure
+| День | Задача | Статус |
+|---|---|---|
+| **30** | Исправление топ-10 критических багов | 📋 Planned |
+| **31** | `sys_mkdir` + полноценный mkdir в Shell | 📋 Planned |
+| **32** | Capability-Based Security (CAP_KEYBOARD, CAP_FRAMEBUFFER) | 📋 Planned |
+| **33** | Resource Containers (Zones) + OOM Killer | 📋 Planned |
+| **34** | Core Dumps (`/var/crash/app.core`) | 📋 Planned |
+| **35** | HAL (Hardware Abstraction Layer) | 📋 Planned |
+| **36-40** | 🍓 Raspberry Pi Port (BCM2835, ARM1176JZF-S) | 📋 Planned |
+| **41+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
+| **45+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
+| **50+** | RISC-V порт, ARM Cortex-A (64-bit) | 📋 Planned |
 
-🔒 Гарантии системы (Target SLA)
-Ядро НИКОГДА не падает в Kernel Panic из-за бага в Ring 3 коде.
-Критичный сервис перезапускается < 100мс после любого падения.
-Недоверенное приложение физически не может получить доступ к ресурсам,
-на которые у него нет Capability-токена.
-OOM внутри контейнера не влияет на соседние контейнеры или ядро.
+### 10.4 Источники вдохновения
 
-🍓 RASPBERRY PI PORT (BCM2835)
+| Проект | Что заимствовано |
+|---|---|
+| **TinyCC** (Fabrice Bellard) | Минимализм + скорость + self-hosting |
+| **Linux** | POSIX syscalls + VFS + ELF loader |
+| **Minix 3** (Tanenbaum) | User-mode drivers + message passing IPC |
+| **seL4** (NICTA) | Capability-Based Security + Formal Verification |
+| **Erlang/OTP** (Ericsson) | "Let it crash" + Supervisor Trees |
+| **QNX** | Microkernel + Message Passing IPC |
+| **FreeBSD Jails / Linux cgroups** | Resource Containers |
 
-НАМЕРЕНИЕ
-После стабилизации x86 версии проекта (Day 20+), выполнить адаптацию ядра для запуска на Raspberry Pi Model B+ (SoC BCM2835, ARM1176JZF-S, 512 MB RAM). Это демонстрация промышленной гибкости архитектуры и доказательство платформенной независимости Bare Metal OS.
-ПОЧЕМУ RPI B+ ПОДХОДИТ
-Ключевая совместимость:
-ARMv6 MMU поддерживает виртуальную память (аналог x86 paging)
-512 MB RAM достаточно для всех функций проекта
-Protected Mode (SVC/User) аналогичен Ring 0/3
-~80% кода ядра (VFS, Scheduler, Heap, Shell) переиспользуется без изменений
-КОГДА
-Day 30-35, после завершения x86 версии и внедрения Hardware Abstraction Layer (HAL).
-ПЛАН ПОРТИРОВАНИЯ
-Day 25: Внедрение HAL в x86 код (абстрактный интерфейс для железа)
-Day 30: ARM boot code + UART (serial output на реальном железе)
-Day 31: PMM + VMM (ARM Translation Tables вместо x86 Page Tables)
-Day 32: Interrupts + Timer (ARM Exception Vectors, BCM2835 VIC)
-Day 33-34: Framebuffer (через Mailbox) + SD Card driver
-Day 35: Интеграция, запуск всех тестов Day 10 на ARM
-РЕЗУЛЬТАТ
-Одна кодовая база работает на двух архитектурах (x86 + ARM). Это позиционирует проект как промышленную, платформенно-независимую систему, а не учебное упражнение. Открывает путь к embedded applications (IoT, robotics).
-СЛЕДУЮЩИЕ ШАГИ (Day 40+)
-ARM Cortex-A порт (Raspberry Pi 3/4, 64-bit)
-RISC-V порт (SiFive, ESP32-C3 с MMU)
-Unified bootloader (multi-architecture support)
-Вердикт: Стоит ли связываться?
-Однозначно ДА.
-BCM2835 — это идеальный полигон для изучения embedded-разработки и ARM-архитектуры.
-Он достаточно мощный, чтобы тянуть VFS, VMM и ELF-лоадер без лагов.
-Он достаточно простой (одно ядро, ARMv6), чтобы ты не утонул в дебрях SMP-синхронизации и когерентности кэшей, как это было бы на Cortex-A72 (Raspberry Pi 4).
-У него лучшая документация в мире: BCM2835 ARM Peripherals Manual (200 страниц) описывает каждый бит каждого регистра.
-Что ты получишь в итоге:
-Ты возьмешь маленькую плату размером с кредитку, воткнешь в нее HDMI и USB-клавиатуру, включишь в розетку, и через 0.8 секунды на экране телевизора появится твой собственный графический Shell, работающий на твоем собственном ядре, без единой строчки кода от Linux.
-Это то чувство, ради которого вообще стоит писать Bare Metal ОС. 🚀
+---
+
+## 📎 ПРИЛОЖЕНИЕ A: КРИТИЧЕСКИЕ АРХИТЕКТУРНЫЕ НЮАНСЫ
+
+| Нюанс | Описание |
+|---|---|
+| **Framebuffer PCD** | LFB мапится с `PAGE_PCD` (0x10), иначе кэш-артефакты |
+| **Virtual Stack Switch** | `mov esp, stack_top` после CR0.PG |
+| **Reaper Queue Pattern** | Мертвые задачи очищаются следующей задачей |
+| **Scheduler IRQ Safety** | `cli/sti` с сохранением EFLAGS |
+| **Heap-VMM Synergy** | kmalloc → Page Fault → физическая страница |
+| **VMM Deep Free Trap** | Освобождать PTE + PT + PD |
+| **Kernel Heap Isolation** | 0xD0000000 без PAGE_USER |
+| **VIRT_TO_PHYS Underflow** | Проверка `addr >= 0xC0000000` |
+| **TSS ESP0 Virtual Address** | PHYS_TO_VIRT для стека ядра |
+| **EOI Lock Bypass** | EOI ДО вызова C-обработчика |
+| **FXSAVE Trap** | `clts` ДО `fxsave` |
+| **All-Zero FXRSTOR** | `fninit` + `fxsave` сразу |
+| **16-Byte Alignment** | `fpu_state[512]` первым в task_t |
+| **Stack Forging (ABI)** | callee-saved + trampoline на стеке |
+| **Signed Char Trap** | `uint8_t` для UTF-8 байтов |
+| **PSF1 UCS-2** | `uint16_t*` для Unicode tables |
+| **IRET Stack Switch Trap** | Обновлять `r->useresp`, не `r->esp` |
+| **Tail Call Optimization** | `-fno-optimize-sibling-calls` для User Space |
+| **W^X Enforcement** | user_linker.ld + VMM |
+| **Mountpoint Teleportation** | FS_MOUNTPOINT → mountpoint_node |
+| **SSOT Syscall Constants** | Linux i386 ABI (O_CREAT=0x0040) |
+
+---
+
+## 📎 ПРИЛОЖЕНИЕ B: ВЕРДИКТ МЕНТОРА
+
+> *"Любая новая фича, позволяющая Ring 0 взаимодействовать с Ring 3 памятью, обязана иметь:*
+> - *Bounds checking (верхняя и нижняя границы)*
+> - *Permission checking (VMA_WRITE для writes)*
+> - *Resource limiting (максимум аргументов/размеров)*
+> - *Kernel stack safety (никаких больших static arrays)*
+> - *Atomicity (cli/sti для критических секций)"*
+
+---
+
+**Конец документа.**
+**Версия:** Alpha 0.3 | **День:** 29 | **Статус:** Self-Hosting Ready
+**Следующая актуализация:** Day 30 (после исправления топ-10 критических багов)
+
+ Roadmap для Raspberry Pi Port — HAL design, ARM boot code, Translation Tables
+---
