@@ -584,7 +584,7 @@ void fb_putc(char c) {
     if (!fb_ready) return;
 
     if (fb_dbg_count < 20) {
-        serial_printf("[FB] c=0x%02x x=%d y=%d\n", (unsigned char)c, cursor_x, cursor_y);
+        //serial_printf("[FB] c=0x%02x x=%d y=%d\n", (unsigned char)c, cursor_x, cursor_y);
         fb_dbg_count++;
     }
 
@@ -673,7 +673,7 @@ void fb_putc(char c) {
 check_scroll:
     while (cursor_y >= max_rows) {
         // 🛡️ DEBUG: Логируем каждый скролл в Serial
-        serial_printf("[FB_SCROLL] cursor_y=%d max_rows=%d\n", cursor_y, max_rows);
+        //serial_printf("[FB_SCROLL] cursor_y=%d max_rows=%d\n", cursor_y, max_rows);
         fb_scroll_up();
         cursor_y--;
     }

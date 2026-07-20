@@ -4,20 +4,31 @@
 **Дата актуализации:** 20 июля 2026
 **Статус:** Production-Ready SLA достигнут по базовым гарантиям
 
----
+Enclave Doctrine: Zero Trust, Immortal Kernel, Crash-Only Userspace.
+
+Enclave OS — это минималистичная x86 higher-half operating system, построенная вокруг
+идеи изолированных пользовательских анклавов. Ядро является бессмертным доверенным
+контуром, который не доверяет ни одному приложению.
+Все программы исполняются в Ring 3 и получают доступ к ресурсам только через
+проверяемые системные вызовы. Память рассматривается как набор явных разрешений,
+W^X является законом, CoW — контролируемой оптимизацией,
+а crash приложения — нормальным событием, которое не должно влиять на живучесть
+системы. Enclave использует POSIX-подобные интерфейсы не ради клонирования Linux,
+а ради практичного self-hosting и запуска привычных программных паттернов внутри
+строгой zero-trust архитектуры.
 
 ## 📑 СОДЕРЖАНИЕ
 
-1. [Среда разработки](#1-среда-разработки)
-2. [Структура проекта](#2-структура-проекта)
-3. [Архитектурные принципы](#3-архитектурные-принципы)
-4. [Карта памяти](#4-карта-памяти)
-5. [Подсистемы ядра](#5-подсистемы-ядра)
-6. [Многозадачность и процессная модель](#6-многозадачность-и-процессная-модель)
-7. [Системные вызовы](#7-системные-вызовы)
-8. [User Space и Self-Hosting](#8-user-space-и-self-hosting)
-9. [Гарантии системы (SLA)](#9-гарантии-системы-sla)
-10. [Известные проблемы и Roadmap](#10-известные-проблемы-и-roadmap)
+1. [Среда разработки]
+2. [Структура проекта]
+3. [Архитектурные принципы]
+4. [Карта памяти]
+5. [Подсистемы ядра]
+6. [Многозадачность и процессная модель]
+7. [Системные вызовы]
+8. [User Space и Self-Hosting]
+9. [Гарантии системы (SLA)]
+10. [Известные проблемы и Roadmap]
 
 ---
 
@@ -744,13 +755,32 @@ _start:
 
 | # | ID | Файл | Проблема | Приоритет |
 |---|---|---|---|---|
-| 1 | V1 | paging.c | Ring 0 не может писать в CoW страницы (sys_exec после fork) | 🔴 FATAL |
+| 1 | V1 | paging.c | Ring 0 не может писать в CoW страницы (sys_exec после fork) | ✅ FIXED Day 30 |
+Добавлен `vmm_handle_user_write_fault()`. Ring 0 и Ring 3 write faults теперь 
+проходят через единый VMA-checked CoW resolver. Demand paging выполняется только
+для `!present` faults. W^X и refcount проверяются. | Omni Stress Test: 31/32 passed.
+`vmm_cow_isolation`, `proc_fork_bomb`, `vmm_mprotect_sigsegv`, `vmm_demand_paging`
+ — PASS. |
+
 | 2 | UL2 | user_libc.c | 20+ функций не реализованы (fwrite, fseek, qsort, ...) | 🔴 FATAL |
 | 3 | T2 | task.c | `sys_close()` из Ring 0 (нарушение Zero Trust) | 🔴 FATAL |
 | 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | 🔴 FATAL |
 | 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | 🔴 FATAL |
 | 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | 🔴 FATAL |
-| 7 | T1 | task.c | `respawn_init_task` — `temp_task` не инициализирована | 🔴 FATAL |
+| 7 | T1 | task.c | `respawn_init_task` — `temp_task` не инициализирована | ✅ FIXED Day 30 |
+`respawn_init_task()` полностью переписан. `temp_task` обнуляется через `k_memset()`.
+ Stack VMA создаётся как `[USER_STACK_VIRT_TOP - USER_STACK_SIZE,
+  USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_task`
+   обновляется после respawn. Новый Init получает `pid = 1`, отцепляется 
+   от `current_task`, использует `monitor_children = 1`. 
+   Добавлен `task_cleanup_children_on_exit()` для безопасной зачистки детей PID 1. 
+   | Omni Stress Test: 31/32 passed. Единственный fail — `directory_ops`,
+    не связан с T1.
+При принудительной зачистке детей PID 1 FD-таблица убитых процессов
+пока не закрывается безопасно, потому что `sys_close()` работает
+только для `current_task`. Это связано с багом T2 и будет исправлено
+отдельно.
+
 | 8 | SH1 | shell_user.c | `handle_mkdir` создаёт файл, а не директорию | 🔴 FATAL |
 | 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 HIGH |
 | 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH |
@@ -818,6 +848,19 @@ _start:
 | **W^X Enforcement** | user_linker.ld + VMM |
 | **Mountpoint Teleportation** | FS_MOUNTPOINT → mountpoint_node |
 | **SSOT Syscall Constants** | Linux i386 ABI (O_CREAT=0x0040) |
+| Ring 0 CoW Write | Ring 0 может писать в user CoW только через
+ `vmm_handle_user_write_fault()`: VMA exists, VMA_WRITE, no W^X,
+  refcount-safe, invlpg. Blanket Ring 0 write access запрещён. |
+
+### Init Respawn Model
+Init — это Ring 3 watchdog для Shell.
+Kernel отвечает только за respawn PID 1:
+  PID 1 dies → Reaper → load /sbin/init.elf → new PID 1.
+Init отвечает за respawn Shell:
+  Shell dies → init waitpid → fork/exec /bin/shell.elf.
+Если Init умирает, его прямой ребёнок Shell убивается через
+`monitor_children = 1`, чтобы новый Init мог чисто перезапустить
+Shell и заново открыть `/dev/console`.
 
 ---
 

@@ -247,27 +247,45 @@ task_t* task_create(const char* name, void (*entry_point)(void),
     return new_task;
 }
 // ============================================================================
-// [ДЕНЬ 24] RESPAWN INIT TASK (PID 1)
+// [ДЕНЬ 24 + T1 FIX] RESPAWN INIT TASK (PID 1)
+// ============================================================================
 // Если Init упал, ядро автоматически перезапускает его из Reaper Phase.
 // Это реализует принцип "Let it crash" для корневого процесса.
+//
+// T1 FIX:
+//   - temp_task теперь полностью обнуляется.
+//   - Stack VMA создаётся корректно как [bottom, top).
+//   - user_esp находится внутри VMA.
+//   - init_task обновляется на новый Init.
+//   - Новый Init отцепляется от current_task.
+//   - PID 1 сохраняется как инвариант системы.
+//   - Init использует monitor_children = 1:
+//       если Init умирает, его прямой ребёнок shell тоже убивается.
 // ============================================================================
 static void respawn_init_task(void) {
     serial_print("[REAPER] ⚠️ PID 1 (Init) died! Respawning...\n");
-    
+
     vfs_node_t* init_node = vfs_findnode("/sbin/init.elf");
     if (!init_node) {
-        serial_print("[REAPER] FATAL: /sbin/init.elf not found! Cannot respawn.\n");
-        return;
+        serial_print("[REAPER] FATAL: /sbin/init.elf not found! Cannot respawn Init.\n");
+        while (1) { __asm__ volatile("cli; hlt"); }
     }
 
     uint32_t* new_pdir = vmm_create_address_space();
     if (!new_pdir) {
         serial_print("[REAPER] FATAL: OOM creating address space for Init!\n");
-        return;
+        while (1) { __asm__ volatile("cli; hlt"); }
     }
 
+    //
+    // T1 CRITICAL FIX:
+    // temp_task должен быть полностью обнулён перед elf_load().
+    //
     task_t temp_task;
+    k_memset(&temp_task, 0, sizeof(task_t));
+
     temp_task.pdir_virt = new_pdir;
+    temp_task.cr3 = VIRT_TO_PHYS((uint32_t)new_pdir);
     temp_task.vma_head = NULL;
 
     uint32_t entry = elf_load(init_node, &temp_task);
@@ -275,34 +293,120 @@ static void respawn_init_task(void) {
         serial_print("[REAPER] FATAL: Failed to load /sbin/init.elf!\n");
         vma_destroy_all(&temp_task);
         vmm_destroy_address_space(new_pdir);
-        return;
+        while (1) { __asm__ volatile("cli; hlt"); }
     }
 
-    uint32_t stack_top = USER_STACK_VIRT_TOP - 16;
-    
-    // 🛡️ CRITICAL: Защищаем создание задачи от прерываний PIT
+    //
+    // FIX: Корректный User Stack.
+    //
+    // VMA должна быть:
+    //   [USER_STACK_VIRT_TOP - USER_STACK_SIZE, USER_STACK_VIRT_TOP)
+    //
+    // user_esp должен быть внутри VMA:
+    //   USER_STACK_VIRT_TOP - 16
+    //
+    uint32_t stack_vma_top    = USER_STACK_VIRT_TOP;
+    uint32_t stack_vma_bottom = stack_vma_top - USER_STACK_SIZE;
+    uint32_t user_esp         = stack_vma_top - 16;
+
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
-    
-    task_t* new_init = task_create("/sbin/init.elf", (void (*)(void))entry, true, stack_top, new_pdir);
-    if (!new_init) {
-        serial_print("[REAPER] FATAL: Failed to create Init task!\n");
+
+    //
+    // Добавляем VMA во временный task ДО task_create().
+    // Если task_create() упадёт, мы корректно уничтожим temp_task.vma_head.
+    //
+    if (vma_add(&temp_task, stack_vma_bottom, stack_vma_top, VMA_READ | VMA_WRITE) < 0 ||
+        vma_add(&temp_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE) < 0) {
+
+        serial_print("[REAPER] FATAL: OOM creating Init VMAs!\n");
+
         vma_destroy_all(&temp_task);
         vmm_destroy_address_space(new_pdir);
+
         __asm__ volatile("push %0; popf" : : "r"(eflags));
-        return;
+        while (1) { __asm__ volatile("cli; hlt"); }
     }
 
-    new_init->vma_head = temp_task.vma_head;
-    new_init->orphan_on_exit = 1; // Новый init усыновляет сирот
+    task_t* new_init = task_create("/sbin/init.elf",
+                                   (void (*)(void))entry,
+                                   true,
+                                   user_esp,
+                                   new_pdir);
 
-    vma_add(new_init, stack_top - USER_STACK_SIZE, stack_top, VMA_READ | VMA_WRITE);
-    vma_add(new_init, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE);
+    if (!new_init) {
+        serial_print("[REAPER] FATAL: Failed to create Init task!\n");
+
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(new_pdir);
+
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        while (1) { __asm__ volatile("cli; hlt"); }
+    }
+
+    //
+    // Передаём VMA из temp_task новой задаче.
+    //
+    new_init->vma_head = temp_task.vma_head;
+    temp_task.vma_head = NULL;
+
+    //
+    // Сохраняем инвариант:
+    //   PID 1 == Init.
+    //
+    // Старый PID 1 уже мёртв и находится в Reaper cleanup,
+    // поэтому повторно используем PID 1.
+    //
+    new_init->pid = 1;
+
+    //
+    // Init policy:
+    //
+    // Init у нас — watchdog shell.
+    // Если Init умирает, старый shell нужно убить, чтобы новый Init
+    // мог чисто открыть /dev/console и запустить новый shell.
+    //
+    new_init->orphan_on_exit   = 0;
+    new_init->monitor_children = 1;
+
+    //
+    // Отцепляем новый Init от current_task.
+    //
+    // task_create() по умолчанию делает new_init ребёнком current_task.
+    // Для корневого Init это неправильно.
+    //
+    if (current_task && current_task->children) {
+        if (current_task->children == new_init) {
+            current_task->children = new_init->next_sibling;
+        } else {
+            task_t* sibling = current_task->children;
+
+            while (sibling && sibling->next_sibling != new_init) {
+                sibling = sibling->next_sibling;
+            }
+
+            if (sibling) {
+                sibling->next_sibling = new_init->next_sibling;
+            }
+        }
+    }
+
+    new_init->parent = NULL;
+    new_init->next_sibling = NULL;
+
+    //
+    // CRITICAL:
+    // Обновляем глобальный init_task.
+    //
+    // Иначе task_exit() будет усыновлять сирот в старый освобождённый Init.
+    //
+    init_task = new_init;
 
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
     serial_printf("[REAPER] ✓ Init respawned successfully as PID %d\n", new_init->pid);
 }
+
 // ============================================================================
 // ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IDLE HLT)
 // ============================================================================
@@ -375,68 +479,154 @@ void schedule(void) {
 
 void task_yield(void) { schedule(); }
 
+
 // ============================================================================
-// ЗАВЕРШЕНИЕ ЗАДАЧИ (Normal Exit)
+// [T1 / INIT RESPAWN HARDENING]
 // ============================================================================
-void task_exit(int exit_code) {
-    fpu_release_ownership(current_task);
-    
-    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
-        if (current_task->fd_table[i] != 0) {
-            sys_close(i); 
-            current_task->fd_table[i] = 0; 
-        }
-    }
-    
-    if (current_task->orphan_on_exit) {
-        while (current_task->children != NULL) {
-            task_t* child = current_task->children;
-            current_task->children = child->next_sibling;
-            
-            child->parent = init_task;
-            child->next_sibling = init_task->children;
-            init_task->children = child;
-            
-            serial_printf("[TASK] PID %d adopted by Init Task (PID 1)\n", child->pid);
-        }
-    } else if (current_task->monitor_children) {
-        task_t* child = current_task->children;
-        while (child != NULL) {
-            task_t* next = child->next_sibling;
-            if (child->state != TASK_ZOMBIE && child->state != TASK_DEAD) {
-                serial_printf("[TASK] Killing child PID %d (Supervisor Tree)\n", child->pid);
-                
-                // 🛡️ ФИКС: Освобождаем память ребенка сразу, так как родитель умирает
-                // и не сможет вызвать waitpid.
+// Принудительно зачищает детей задачи при смерти родителя.
+// Используется для PID 1 и для monitor_children.
+//
+// Важно:
+//   - Zombie дети уже сами освободили память, их только переводим в Reaper.
+//   - Живые дети убиваются и отправляются в Reaper.
+//   - FD cleanup для принудительно убитых детей пока не делается безопасно.
+//     Это связано с T2: sys_close() сейчас работает только для current_task.
+// ============================================================================
+static void task_cleanup_children_on_exit(task_t* task) {
+    if (!task) return;
+
+    task_t* child = task->children;
+
+    while (child != NULL) {
+        task_t* next = child->next_sibling;
+
+        if (child->state != TASK_DEAD) {
+
+            //
+            // Если ребёнок ещё не зомби, значит он живой.
+            // Убиваем его адресное пространство и его детей.
+            //
+            if (child->state != TASK_ZOMBIE) {
+
+                //
+                // Рекурсивно зачищаем потомков.
+                // Для init это позволяет убить всю сессию:
+                //   init -> shell -> пользовательские процессы
+                //
+                if (child->children != NULL) {
+                    task_cleanup_children_on_exit(child);
+                }
+
+                serial_printf("[TASK] Killing child PID %d (%s) because parent PID %d exits\n",
+                              child->pid, child->name, task->pid);
+
+                fpu_release_ownership(child);
+
                 vma_destroy_all(child);
+
                 if (child->pdir_virt && child->pdir_virt != boot_page_directory) {
                     vmm_destroy_address_space(child->pdir_virt);
                     child->pdir_virt = NULL;
                 }
-                
-                child->state = TASK_DEAD;
-                child->exit_code = -1;
-                
-                // Удаляем из Run Queue
-                if (child->next != child) {
-                    child->prev->next = child->next;
-                    child->next->prev = child->prev;
-                }
-                
-                // 🛡️ ФИКС: Отправляем напрямую в Reaper Queue, чтобы избежать Zombie Leak
-                uint32_t eflags_child;
-                __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags_child));
-                child->reaper_next = dead_tasks_head;
-                dead_tasks_head = child;
-                __asm__ volatile("push %0; popf" : : "r"(eflags_child));
             }
-            child = next;
+
+            child->state = TASK_DEAD;
+            child->exit_code = -1;
+
+            uint32_t eflags;
+            __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+            //
+            // Удаляем ребёнка из Run Queue, если он там ещё есть.
+            //
+            if (child->next && child->prev && child->next != child) {
+                child->prev->next = child->next;
+                child->next->prev = child->prev;
+
+                child->next = child;
+                child->prev = child;
+            }
+
+            //
+            // Отправляем в Reaper Queue.
+            //
+            child->reaper_next = dead_tasks_head;
+            dead_tasks_head = child;
+
+            __asm__ volatile("push %0; popf" : : "r"(eflags));
         }
-        current_task->children = NULL;
+
+        child = next;
     }
-    
-    // 🛡️ Освобождаем ресурсы памяти ДО того, как стать зомби
+
+    task->children = NULL;
+}
+
+// ============================================================================
+// ЗАВЕРШЕНИЕ ЗАДАЧИ (Normal Exit)
+// ============================================================================
+// [T1 / INIT RESPAWN HARDENING]
+//   - PID 1 больше не усыновляет детей самому себе.
+//   - PID 1 при смерти убивает свой shell через task_cleanup_children_on_exit().
+//   - monitor_children использует общий безопасный cleanup helper.
+// ============================================================================
+void task_exit(int exit_code) {
+    fpu_release_ownership(current_task);
+
+    for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+        if (current_task->fd_table[i] != 0) {
+            sys_close(i);
+            current_task->fd_table[i] = 0;
+        }
+    }
+
+    //
+    // Process tree policy.
+    //
+    if (current_task->pid == 1) {
+        //
+        // PID 1 не должен усыновлять детей в мёртвый init_task.
+        // Вместо этого убиваем прямой shell и потомков.
+        //
+        task_cleanup_children_on_exit(current_task);
+
+    } else if (current_task->orphan_on_exit) {
+        //
+        // Unix-style adoption: передаём детей в init_task.
+        //
+        while (current_task->children != NULL) {
+            task_t* child = current_task->children;
+            current_task->children = child->next_sibling;
+
+            if (init_task && init_task != current_task) {
+                child->parent = init_task;
+                child->next_sibling = init_task->children;
+                init_task->children = child;
+
+                serial_printf("[TASK] PID %d adopted by Init Task (PID %d)\n",
+                              child->pid, init_task->pid);
+            } else {
+                //
+                // Если init_task отсутствует или это сам current_task,
+                // не создаём use-after-free.
+                //
+                child->parent = NULL;
+                child->next_sibling = NULL;
+            }
+        }
+
+    } else if (current_task->monitor_children) {
+        //
+        // Erlang-style: убиваем детей при смерти родителя.
+        //
+        task_cleanup_children_on_exit(current_task);
+    }
+
+    //
+    // Освобождаем ресурсы памяти ДО того, как стать зомби.
+    //
     vma_destroy_all(current_task);
+
     if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
         vmm_destroy_address_space(current_task->pdir_virt);
         current_task->pdir_virt = NULL;
@@ -444,108 +634,172 @@ void task_exit(int exit_code) {
 
     current_task->state = TASK_ZOMBIE;
     current_task->exit_code = exit_code;
-    
+
     if (current_task->parent && current_task->parent->state == TASK_SLEEPING) {
         current_task->parent->state = TASK_READY;
         current_task->parent->sleep_until = 0;
         serial_printf("[TASK] Waking up parent PID %d\n", current_task->parent->pid);
     }
-    
+
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
-    
-    task_t* dead_task = current_task; 
 
-    // 🛡️ CRITICAL FIX: НЕ УДАЛЯЕМ обычные Зомби из Run Queue!
-    // Если задача удалит себя отсюда, old_task в schedule() окажется вне очереди,
-    // что приведет к бесконечному циклу обхода, если все остальные задачи спят.
-    // Задача останется в Run Queue как TASK_ZOMBIE, пока waitpid не уберет её.
-    
-    // 🛡️ [ДЕНЬ 24] INIT TASK SPECIAL CASE:
+    task_t* dead_task = current_task;
+
+    //
+    // INIT TASK SPECIAL CASE:
+    //
     // У Init Task (PID 1) нет родителя, который бы вызвал waitpid.
-    // Поэтому мы принудительно переводим его в TASK_DEAD, УДАЛЯЕМ из Run Queue
-    // и кидаем в Reaper Queue.
+    // Поэтому мы принудительно переводим его в TASK_DEAD,
+    // удаляем из Run Queue и кидаем в Reaper Queue.
+    //
     if (dead_task->pid == 1) {
-        if (dead_task->next != dead_task) {
+        if (dead_task->next && dead_task->prev && dead_task->next != dead_task) {
             dead_task->prev->next = dead_task->next;
             dead_task->next->prev = dead_task->prev;
+
+            dead_task->next = dead_task;
+            dead_task->prev = dead_task;
         }
+
         dead_task->state = TASK_DEAD;
         dead_task->reaper_next = dead_tasks_head;
         dead_tasks_head = dead_task;
+
         serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
     }
-    // Для остальных задач: НЕ удаляем из Run Queue и НЕ добавляем в dead_tasks_head! 
-    // Это сделает waitpid.
-    
+
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
-    schedule(); 
-    
-    while(1) __asm__ volatile("cli; hlt"); 
+    schedule();
+
+    while (1) {
+        __asm__ volatile("cli; hlt");
+    }
 }
 
 // ============================================================================
-// [ДЕНЬ 10] ПРИНУДИТЕЛЬНОЕ УБИЙСТВО (Page Fault / OOM Killer)
+// [ДЕНЬ 10 + T1 FIX] ПРИНУДИТЕЛЬНОЕ УБИЙСТВО (Page Fault / OOM Killer)
+// ============================================================================
+// [T1 / INIT RESPAWN HARDENING]
+//   - PID 1 больше не усыновляет детей самому себе.
+//   - PID 1 при kill убивает свой shell через task_cleanup_children_on_exit().
+//   - monitor_children использует общий безопасный cleanup helper.
 // ============================================================================
 void task_kill_current(const char* reason) {
     if (!current_task || current_task->pid == 0) {
         serial_printf("[KILL] FATAL: Attempt to kill invalid task: %s\n", reason);
-        while(1) __asm__ volatile("cli; hlt");
+        while (1) {
+            __asm__ volatile("cli; hlt");
+        }
     }
-    
-    serial_printf("[KILL] PID %d (%s) killed: %s\n", current_task->pid, current_task->name, reason);
-    
+
+    serial_printf("[KILL] PID %d (%s) killed: %s\n",
+                  current_task->pid, current_task->name, reason);
+
     fpu_release_ownership(current_task);
-    
+
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
             sys_close(i);
             current_task->fd_table[i] = 0;
         }
     }
-    
-    // 🛡️ КРИТИЧЕСКИЙ ФИКС: Освобождаем память и становимся ЗОМБИ (как task_exit)
+
+    //
+    // Process tree policy.
+    //
+    if (current_task->pid == 1) {
+        //
+        // PID 1 не должен усыновлять детей в мёртвый init_task.
+        // Вместо этого убиваем прямой shell и потомков.
+        //
+        task_cleanup_children_on_exit(current_task);
+
+    } else if (current_task->orphan_on_exit) {
+        //
+        // Unix-style adoption: передаём детей в init_task.
+        //
+        while (current_task->children != NULL) {
+            task_t* child = current_task->children;
+            current_task->children = child->next_sibling;
+
+            if (init_task && init_task != current_task) {
+                child->parent = init_task;
+                child->next_sibling = init_task->children;
+                init_task->children = child;
+
+                serial_printf("[TASK] PID %d adopted by Init Task (PID %d)\n",
+                              child->pid, init_task->pid);
+            } else {
+                //
+                // Если init_task отсутствует или это сам current_task,
+                // не создаём use-after-free.
+                //
+                child->parent = NULL;
+                child->next_sibling = NULL;
+            }
+        }
+
+    } else if (current_task->monitor_children) {
+        //
+        // Erlang-style: убиваем детей при смерти родителя.
+        //
+        task_cleanup_children_on_exit(current_task);
+    }
+
+    //
+    // Освобождаем память и становимся зомби.
     // Это позволяет waitpid корректно забрать статус и отправить задачу в Reaper.
+    //
     vma_destroy_all(current_task);
+
     if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
         vmm_destroy_address_space(current_task->pdir_virt);
         current_task->pdir_virt = NULL;
     }
 
-    current_task->state = TASK_ZOMBIE; // 🛡️ СТАНОВИМСЯ ЗОМБИ, А НЕ DEAD!
-    current_task->exit_code = -1; // Убито ядром (SIGSEGV/SIGKILL)
-    
+    current_task->state = TASK_ZOMBIE;
+    current_task->exit_code = -1;
+
     if (current_task->parent && current_task->parent->state == TASK_SLEEPING) {
         current_task->parent->state = TASK_READY;
         current_task->parent->sleep_until = 0;
-        serial_printf("[TASK] Waking up parent PID %d (Child killed)\n", current_task->parent->pid);
+        serial_printf("[TASK] Waking up parent PID %d (Child killed)\n",
+                      current_task->parent->pid);
     }
-    
+
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
-    
-    task_t* dead_task = current_task; 
 
-    // 🛡️ CRITICAL FIX: НЕ УДАЛЯЕМ обычные Зомби из Run Queue!
-    // Задача останется в Run Queue как TASK_ZOMBIE, пока waitpid не уберет её.
-    
-    // 🛡️ [ДЕНЬ 24] INIT TASK SPECIAL CASE:
+    task_t* dead_task = current_task;
+
+    //
+    // INIT TASK SPECIAL CASE:
+    //
     if (dead_task->pid == 1) {
-        if (dead_task->next != dead_task) {
+        if (dead_task->next && dead_task->prev && dead_task->next != dead_task) {
             dead_task->prev->next = dead_task->next;
             dead_task->next->prev = dead_task->prev;
+
+            dead_task->next = dead_task;
+            dead_task->prev = dead_task;
         }
+
         dead_task->state = TASK_DEAD;
         dead_task->reaper_next = dead_tasks_head;
         dead_tasks_head = dead_task;
+
         serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
     }
-    
+
     __asm__ volatile("push %0; popf" : : "r"(eflags));
-    
+
     schedule();
-    while(1) __asm__ volatile("cli; hlt"); 
+
+    while (1) {
+        __asm__ volatile("cli; hlt");
+    }
 }
 
 // ============================================================================
