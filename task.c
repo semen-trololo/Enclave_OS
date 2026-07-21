@@ -7,9 +7,9 @@
 #include "tss.h"
 #include "paging.h"
 #include "isr.h"
-#include "vfs.h"
+#include "vfs.h"        // ← vfs_close_fd() теперь здесь
 #include "vma.h"
-#include "syscall.h"
+// #include "syscall.h"  ← УДАЛЕНО (CYCLE-3, DIP-1)
 #include "heap.h"
 #include <stdbool.h>
 #include "config.h"
@@ -513,13 +513,6 @@ void task_yield(void) { schedule(); }
 // ============================================================================
 // Принудительно зачищает детей задачи при смерти родителя.
 // Используется для PID 1 и для monitor_children.
-//
-// Важно:
-//   - Zombie дети уже сами освободили память, их только переводим в Reaper.
-//   - Живые дети убиваются и отправляются в Reaper.
-//   - FD cleanup для принудительно убитых детей пока не делается безопасно.
-//     Это связано с T2: sys_close() сейчас работает только для current_task.
-//
 // [T3/T4 HARDENING]
 //   - Run queue / reaper queue модификации переведены на irq_save/irq_restore.
 // ============================================================================
@@ -533,17 +526,8 @@ static void task_cleanup_children_on_exit(task_t* task) {
 
         if (child->state != TASK_DEAD) {
 
-            //
-            // Если ребёнок ещё не зомби, значит он живой.
-            // Убиваем его адресное пространство и его детей.
-            //
             if (child->state != TASK_ZOMBIE) {
 
-                //
-                // Рекурсивно зачищаем потомков.
-                // Для init это позволяет убить всю сессию:
-                //   init -> shell -> пользовательские процессы
-                //
                 if (child->children != NULL) {
                     task_cleanup_children_on_exit(child);
                 }
@@ -552,6 +536,17 @@ static void task_cleanup_children_on_exit(task_t* task) {
                               child->pid, child->name, task->pid);
 
                 fpu_release_ownership(child);
+
+                // ============================================================
+                // T2 FIX: Закрываем FD убитого ребёнка через vfs_close_fd().
+                // Раньше здесь был комментарий "пока не делается безопасно".
+                // Теперь vfs_close_fd() работает для ЛЮБОЙ задачи.
+                // ============================================================
+                for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
+                    if (child->fd_table[i] != NULL) {
+                        vfs_close_fd(child, i);
+                    }
+                }
 
                 vma_destroy_all(child);
 
@@ -564,25 +559,15 @@ static void task_cleanup_children_on_exit(task_t* task) {
             child->state = TASK_DEAD;
             child->exit_code = -1;
 
-            // ====================================================================
-            // RUN QUEUE / REAPER QUEUE UPDATE (IRQ-SAFE)
-            // ====================================================================
             irq_flags_t flags = irq_save();
 
-            //
-            // Удаляем ребёнка из Run Queue, если он там ещё есть.
-            //
             if (child->next && child->prev && child->next != child) {
                 child->prev->next = child->next;
                 child->next->prev = child->prev;
-
                 child->next = child;
                 child->prev = child;
             }
 
-            //
-            // Отправляем в Reaper Queue.
-            //
             child->reaper_next = dead_tasks_head;
             dead_tasks_head = child;
 
@@ -613,15 +598,14 @@ static void task_cleanup_children_on_exit(task_t* task) {
 void task_exit(int exit_code) {
     fpu_release_ownership(current_task);
 
-    //
-    // T2-related:
-    // Пока закрываем FD через sys_close() для current_task.
-    // Этот путь будет переработан отдельно.
-    //
+    // ========================================================================
+    // T2 FIX: FD cleanup через internal kernel API, НЕ через syscall.
+    // vfs_close_fd() работает для ЛЮБОЙ задачи, IRQ-safe, orphan semantics.
+    // ========================================================================
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
-            sys_close(i);
-            current_task->fd_table[i] = 0;
+            vfs_close_fd(current_task, i);
+            // vfs_close_fd уже обнуляет fd_table[i]
         }
     }
 
@@ -753,15 +737,12 @@ void task_kill_current(const char* reason) {
 
     fpu_release_ownership(current_task);
 
-    //
-    // T2-related:
-    // Пока закрываем FD через sys_close() для current_task.
-    // Этот путь будет переработан отдельно.
-    //
+    // ========================================================================
+    // T2 FIX: FD cleanup через internal kernel API.
+    // ========================================================================
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
-            sys_close(i);
-            current_task->fd_table[i] = 0;
+            vfs_close_fd(current_task, i);
         }
     }
 
