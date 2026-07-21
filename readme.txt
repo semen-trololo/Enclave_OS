@@ -408,7 +408,7 @@ project_root/
 | **Atomic Commit** | kmalloc private_data до link в дерево |
 | **True Mountpoint** | `vfs_mount("/tmp", tmpfs_root)` |
 
-#### `devfs.c` — Device File System (Day 28)
+#### `devfs.c` — Device File System
 
 | Фича | Описание |
 |---|---|
@@ -419,7 +419,7 @@ project_root/
 | **Private Mode** | `\033[?25h/l` безопасно игнорируются |
 | **Double Dump** | `serial_putc` + `k_putchar` |
 
-#### `ata.c` + `fat32.c` — Storage (Day 8.2)
+#### `ata.c` + `fat32.c` — Storage
 
 - **ATA PIO Driver:** порты 0x1F0-0x1F7, LBA28, Polling Mode
 - **IDENTIFY Command:** модель, сериал, firmware, LBA capacity
@@ -459,7 +459,7 @@ static void output_char(char c) {
 |---|---|
 | `gdt.c` | Flat Model (4 GB), Ring 0/3, TSS Descriptor |
 | `idt.c` | 256 векторов, **EOI Lock Bypass** |
-| `isr.c` + `isr_asm.asm` | ISR/IRQ stubs, pusha, segment swap |
+| `isr.c` + `isr_asm.asm` | ISR/IRQ stubs, pusha, segment swap | | **IRQ Save/Restore Primitive** | `irq_save()` сохраняет EFLAGS и выполняет `cli`; `irq_restore()` восстанавливает EFLAGS. 
 | `pic.c` | PIC Remap (ICW1-ICW4), irq_set_mask |
 | `tss.c` | ESP0 для Ring 3 → Ring 0 переходов |
 | `timer.c` | PIT 1000 Hz, квант = 10 тиков (50 Hz) |
@@ -787,7 +787,8 @@ USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_tas
 только для `current_task`. Это связано с багом T2 и будет исправлено отдельно.
 | 8 | SH1 | shell_user.c | `handle_mkdir` создаёт файл, а не директорию | 🔴 FATAL |
 | 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 HIGH |
-| 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH |
+| 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH / 🛠 CODE PATCHED — NOT TESTED |
+ T3/T4: добавлены `irq_save()/irq_restore()` в `include/isr.h`; FD inheritance в `task_fork()` переведён на IRQ-safe критическую секцию; open-coded `pushf/popf` паттерны в `task.c` заменены на `irq_save()/irq_restore()`.
 
 ### 10.3 Roadmap (Day 30+)
 
@@ -826,6 +827,8 @@ USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_tas
 | **Virtual Stack Switch** | `mov esp, stack_top` после CR0.PG |
 | **Reaper Queue Pattern** | Мертвые задачи очищаются следующей задачей |
 | **Scheduler IRQ Safety** | `cli/sti` с сохранением EFLAGS |
+| **IRQ Save/Restore Primitive** | `irq_save()` сохраняет EFLAGS и выполняет `cli`; `irq_restore()` восстанавливает EFLAGS. Все критические секции должны использовать `irq_save()/irq_restore()` вместо безусловных `cli/sti`.
+  Безусловные `cli/sti` допустимы только для явного управления прерываниями: idle wait, fatal loops, task trampoline. |
 | **Heap-VMM Synergy** | kmalloc → Page Fault → физическая страница |
 | **VMM Deep Free Trap** | Освобождать PTE + PT + PD |
 | **Kernel Heap Isolation** | 0xD0000000 без PAGE_USER |
