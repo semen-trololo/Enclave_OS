@@ -1,11 +1,9 @@
-
-
 #include "timer.h"
 #include "port_io.h"
 #include "isr.h"
 #include "klib.h"
 #include "pic.h"
-#include "task.h"
+// #include "task.h"  ← УДАЛЕНО (DIP-3: L2 не зависит от L6)
 
 #define PIT_BASE_FREQ 1193182
 #define PIT_CHANNEL0  0x40
@@ -14,32 +12,25 @@
 static volatile uint32_t tick_count = 0;
 static uint32_t pit_frequency = 0;
 
-// ✅ [ДЕНЬ 15] Пробуждение задач, спящих по таймеру
-static void wake_sleepers(void) {
-    if (!current_task) return;
-    task_t* t = current_task;
-    do {
-        // Будим только тех, у кого sleep_until > 0 (игнорируем waitpid)
-        if (t->state == TASK_SLEEPING && t->sleep_until > 0) {
-            if (tick_count >= t->sleep_until) {
-                t->state = TASK_READY;
-                t->sleep_until = 0;
-            }
-        }
-        t = t->next;
-    } while (t != current_task);
+// ============================================================================
+// DIP-3 FIX: Callback вместо прямого вызова schedule()/wake_sleepers().
+// Timer не знает о задачах. Kernel инжектит handler.
+// ============================================================================
+static timer_tick_callback_t tick_callback = NULL;
+
+void timer_set_tick_callback(timer_tick_callback_t cb) {
+    tick_callback = cb;
 }
 
 // Обработчик IRQ0 (INT 32 после remap)
 static void pit_handler(struct regs* r) {
-    (void)r; 
+    (void)r;
     tick_count++;
-    
-    wake_sleepers(); // ✅ Пробуждаем спящих перед планированием
 
-    // Квантование времени: переключаем задачи каждые 20 миллисекунд (50 Гц)
-    if (tick_count % 10 == 0) {
-        schedule();
+    // DIP-3: Вся логика задач (wake_sleepers + schedule) — в callback.
+    // Timer только считает тики и дёргает callback.
+    if (tick_callback) {
+        tick_callback(tick_count);
     }
 }
 
@@ -67,8 +58,8 @@ uint32_t timer_get_frequency(void) {
 
 void k_sleep(uint32_t ms) {
     uint32_t start = tick_count;
-    uint32_t target = start + ms;  
-    
+    uint32_t target = start + ms;
+
     while (tick_count < target) {
         __asm__ volatile("hlt");
     }
