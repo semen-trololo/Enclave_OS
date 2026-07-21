@@ -774,8 +774,8 @@ _start:
 | 2 | UL2 | user_libc.c | 20+ функций не реализованы (fwrite, fseek, qsort, ...) | 🔴 FATAL |
 Не критичен на данном этапе.
 | 3 | T2 | task.c | `sys_close()` из Ring 0 (нарушение Zero Trust) | 🔴 FATAL |
-| 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | 🔴 FATAL |
-| 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | 🔴 FATAL |
+| 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | ✅ FIXED |
+| 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | ✅ FIXED |
 | 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | 🔴 FATAL |
 | 7 | T1 | task.c | `respawn_init_task` — `temp_task` не инициализирована | ✅ FIXED Day 30 |
 respawn_init_task() полностью переписан. `temp_task` обнуляется через `k_memset()`.
