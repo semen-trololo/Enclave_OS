@@ -989,7 +989,7 @@ waitpid(pid, &status, 0);
 `vmm_cow_isolation`, `proc_fork_bomb`, `vmm_mprotect_sigsegv`, `vmm_demand_paging` — PASS.
 | 2 | UL2 | user_libc.c | 20+ функций не реализованы (fwrite, fseek, qsort, ...) | 🔴 FATAL |
 Не критичен на данном этапе.
-| 3 | T2 | task.c | `sys_close()` из Ring 0 (нарушение Zero Trust) | 🔴 FATAL |
+| 3 | T2 | task.c | sys_close() из Ring 0 |  CODE Day 31 | NO TES
 | 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | ✅ FIXED |
 | 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | ✅ FIXED |
 | 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | 🔴 FATAL |
@@ -1005,6 +1005,25 @@ USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_tas
 | 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 HIGH |
 | 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH / 🛠 CODE PATCHED — NOT TESTED |
  T3/T4: добавлены `irq_save()/irq_restore()` в `include/isr.h`; FD inheritance в `task_fork()` переведён на IRQ-safe критическую секцию; open-coded `pushf/popf` паттерны в `task.c` заменены на `irq_save()/irq_restore()`.
+
+timer.h:   + typedef timer_tick_callback_t
+           + timer_set_tick_callback()
+
+timer.c:   - #include "task.h"           ← DIP-3 CLOSED
+           - wake_sleepers()             ← перенесено в task.c
+           - schedule()                  ← заменено на callback
+           + tick_callback()
+
+task.h:    + void task_timer_tick(uint32_t tick);
+
+task.c:    + wake_sleepers()             ← перенесено из timer.c
+           + task_timer_tick()           ← callback для timer
+
+kernel.c:  + timer_set_tick_callback(task_timer_tick)  ← инжекция
+
+isr.c:     - #include "vga.h"            ← DIP-5 CLOSED
+           ~ vga_set_color → k_set_color
+
 
 ### 10.3 Roadmap (Day 30+)
 
@@ -1064,6 +1083,7 @@ USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_tas
 | **SSOT Syscall Constants** | Linux i386 ABI (O_CREAT=0x0040) |
 | Ring 0 CoW Write | Ring 0 может писать в user CoW только через
 | `vmm_handle_user_write_fault()`: VMA exists, VMA_WRITE, no W^X, refcount-safe, invlpg. Blanket Ring 0 write access запрещён. |
+| vfs_close_fd() | Internal kernel API для закрытия FD любой задачи. Ring 0 НЕ вызывает sys_close(). sys_close() — тонкая обёртка над vfs_close_fd(current_task, fd). |
 
 ---
 
