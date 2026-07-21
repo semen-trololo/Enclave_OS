@@ -43,5 +43,6 @@
 #define ERANGE      34   /* Math result not representable */
 #define ENOSYS      38   /* Function not implemented */
 #define ENAMETOOLONG 36  /* File name too long */
+#define ELOOP       40   /* Too many symbolic links encountered */
 
 #endif // KERRNO_H

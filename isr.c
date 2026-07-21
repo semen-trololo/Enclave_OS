@@ -58,7 +58,7 @@ static void exception_handler(struct regs* r) {
     serial_printf(" EFLAGS: 0x%x\n", r->eflags);
     
     // 2. Дамп на экран
-    k_set_color(COLOR_WHITE, COLOR_RED);
+    k_set_color(K_COLOR_LIGHT_GREY, K_COLOR_BLACK);
     k_printf("\n KERNEL PANIC: %s \n", exception_messages[r->int_no]);
     k_printf(" EIP: 0x%x | ERR: 0x%x \n", r->eip, r->err_code);
     

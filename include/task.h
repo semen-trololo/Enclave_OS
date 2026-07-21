@@ -22,9 +22,24 @@ typedef struct vma_node vma_node_t;
 #define TASK_DEAD       4
 
 // ============================================================================
-// PROCESS TREE FLAGS (Day 14)
+// PROCESS TREE FLAGS
 // ============================================================================
 #define TASK_MAX_OPEN_FILES 256
+
+// ============================================================================
+// POSIX-COMPATIBLE ERROR CODES & OPTIONS (Kernel-wide)
+// ============================================================================
+#ifndef EBADF
+#define EBADF   9
+#endif
+
+#ifndef ENOMEM
+#define ENOMEM  12
+#endif
+
+#ifndef WNOHANG
+#define WNOHANG 1
+#endif
 
 // ============================================================================
 // TASK STRUCTURE (PCB - Process Control Block)

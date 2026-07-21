@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "kerrno.h"
 
 #define MAX_MOUNT_HOPS 16
 
@@ -34,10 +35,16 @@
 #define VFS_MAX_OPEN_FILES 16
 #define VFS_MAX_FILENAME 256  // ✅ Увеличили с 128 до 256 для длинных имен
 
-#define VFS_ENOENT 2
-#define VFS_EACCES 13
-#define VFS_ENOMEM 12
-#define VFS_ELOOP  40
+// ============================================================================
+// VFS ERROR CODES — алиасы к POSIX errno (SSOT: kerrno.h)
+// ============================================================================
+// Обратная совместимость: существующий код использует VFS_* префикс.
+// Новые файлы должны использовать POSIX-имена напрямую (ENOENT, EACCES, ...).
+// ============================================================================
+#define VFS_ENOENT  ENOENT
+#define VFS_EACCES  EACCES
+#define VFS_ENOMEM  ENOMEM
+#define VFS_ELOOP   ELOOP
 
 // ==========================================
 // СТРУКТУРЫ ДАННЫХ

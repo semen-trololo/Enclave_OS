@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include "config.h"
 #include "elf.h"
+#include "timer.h"      // ← DIP-3: timer_get_ticks() для wake_sleepers(
 
 extern void switch_context(uint32_t* old_esp, uint32_t new_esp, uint32_t new_cr3);
 extern void ret_from_fork(void);
