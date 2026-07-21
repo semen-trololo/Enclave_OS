@@ -95,6 +95,10 @@ static void init_subsystems(void) {
     initrd_init();
     serial_print("  [+] VFS & Initrd (tmpfs) mounted\n");
 
+    // DIP-3 FIX: Инжекция зависимости.
+    // Timer (L2) не включает task.h (L6).
+    // Kernel (L7) связывает их через callback.
+    timer_set_tick_callback(task_timer_tick);
     fat32_init();
     serial_print("  [+] FAT32 Driver (Read-Only) mounted\n");
     
