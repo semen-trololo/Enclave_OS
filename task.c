@@ -507,6 +507,37 @@ void schedule(void) {
 
 void task_yield(void) { schedule(); }
 
+// ============================================================================
+// DIP-3 FIX: Timer Tick Handler (перенесено из timer.c)
+// ============================================================================
+// Timer (L2) больше не знает о задачах. Kernel (L7) инжектит эту функцию
+// как callback через timer_set_tick_callback().
+//
+// Логика:
+//   1. Пробудить спящих по таймеру (sleep_until > 0).
+//   2. Каждые 10 тиков (10 мс) — preemptive schedule.
+// ============================================================================
+static void wake_sleepers(void) {
+    if (!current_task) return;
+    task_t* t = current_task;
+    do {
+        if (t->state == TASK_SLEEPING && t->sleep_until > 0) {
+            if (timer_get_ticks() >= t->sleep_until) {
+                t->state = TASK_READY;
+                t->sleep_until = 0;
+            }
+        }
+        t = t->next;
+    } while (t != current_task);
+}
+
+void task_timer_tick(uint32_t tick) {
+    wake_sleepers();
+
+    if (tick % 10 == 0) {
+        schedule();
+    }
+}
 
 // ============================================================================
 // [T1 / INIT RESPAWN HARDENING]
