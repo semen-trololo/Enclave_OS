@@ -587,15 +587,15 @@ Write to CoW page:
 | 78 | `sys_gettimeofday` | Время с момента загрузки |
 | 90 | `sys_mmap` | On-Demand Paging (MAP_ANONYMOUS) |
 | 91 | `sys_munmap` | Освобождение памяти |
-| 102 | `sys_getpid` | PID текущего процесса |
+| 122 | `sys_getpid` | PID текущего процесса |
 | 125 | `sys_mprotect` | Изменение прав (W^X enforcement) |
 | 141 | `sys_readdir` | Чтение директории |
 | 158 | `sys_yield` | Добровольная передача CPU |
-| 162 | `sys_nanosleep` / `sys_sleep` | Сон (миллисекунды) |
+| 230 | `sys_nanosleep` / `sys_sleep` | Сон (миллисекунды) |
 | 164 | `sys_uname` | Информация об ОС |
-| 179 | `sys_sysinfo` | Статистика системы |
-| 180 | `sys_waitpid` | Ожидание ребёнка (WNOHANG) |
-| 182 | `sys_brk` | Управление кучей (VMA Collision Detection) |
+| 116 | `sys_sysinfo` | Статистика системы |
+| 7 | `sys_waitpid` | Ожидание ребёнка (WNOHANG) |
+| 45 | `sys_brk` | Управление кучей (VMA Collision Detection) |
 
 ### 7.2 Zero Trust Validation
 
@@ -728,6 +728,222 @@ _start:
 - History (32 записи)
 
 ---
+
+### 8.6 Интеграция TinyCC — Self-Hosting Toolchain
+
+#### 8.6.1 Архитектурный обзор
+
+TinyCC (TCC) интегрирован как **полноценный Ring 3 ELF-бинарник** (`/bin/tcc.elf`),
+скомпилированный из исходников Fabrice Bellard (v0.9.27) кросс-компилятором
+`i686-linux-gnu-gcc` с флагами `-nostdlib -static -ffreestanding`.
+
+TCC работает внутри Zero Trust Sandbox на общих основаниях:
+- Не имеет прямого доступа к памяти ядра
+- Все операции через INT 0x80 (sys_open, sys_read, sys_write, sys_mmap, sys_brk)
+- Crash TCC не влияет на ядро (Init перезапустит Shell, Shell перезапустит компиляцию)
+- W^X enforcement применяется к генерируемому коду
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SELF-HOSTING PIPELINE                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  User Space (Ring 3)                                                │
+│  ┌──────────┐    fork+exec    ┌──────────┐    fork+exec             │
+│  │  Shell   │ ──────────────→ │ tcc.elf  │ ──────────────→ out.elf  │
+│  │ (PID N)  │                 │ (PID N+1)│                 (PID N+2)│
+│  └──────────┘                 └──────────┘                          │
+│       │                          │                                  │
+│       │ waitpid()                │ sys_open("/src/hello.c")         │
+│       │                          │ sys_read() → parse → codegen     │
+│       │                          │ sys_write("/tmp/hello.elf")      │
+│       │                          │ sys_exit(0)                      │
+│       ▼                          ▼                                  │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │              INT 0x80 (Zero Trust Boundary)              │       │
+│  └──────────────────────────────────────────────────────────┘       │
+│                                                                     │
+│  Kernel Space (Ring 0)                                              │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │  syscall.c: validation → VFS → PMM → VMM → ELF Loader    │       │
+│  └──────────────────────────────────────────────────────────┘       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 8.6.2 Компоненты интеграции
+
+| Компонент | Файл | Назначение |
+|---|---|---|
+| **TCC Source** | `external/tcc_src/tcc.c` | Монолитный исходник (ONE_SOURCE=1) |
+| **TCC Config** | `user_src/config.h` | Fake config.h (заменяет ./configure) |
+| **Adaptation Layer** | `user_src/tcc_lib_os.c` | POSIX-функции для TCC (fwrite, fseek, qsort, bsearch, atexit, strtod, ...) |
+| **setjmp/longjmp** | `user_src/setjmp.asm` | NASM i386 реализация (error recovery TCC) |
+| **Syscall Wrappers** | `user_src/user_syscalls.h` | Inline asm обёртки INT 0x80 |
+| **Monolithic libc** | `user_src/user_libc.h` | SSOT header (Monolithic Bypass) |
+| **libc Implementation** | `user_src/user_libc.c` | printf, malloc (bump), FILE* API |
+| **Shell Integration** | `user_src/shell_user.c` | Команда `compile <file.c> [out]` |
+| **Makefile** | `Makefile` | Сборка TCC + Toolchain Injection |
+
+#### 8.6.3 Конфигурация TCC (`user_src/config.h`)
+
+```c
+#define TCC_TARGET_I386           1       // 32-bit x86
+#define TCC_VERSION               "0.9.27"
+#define CONFIG_TCC_STATIC         1       // Нет dlopen/dlsym
+#define CONFIG_TCCDIR             "/lib"
+#define CONFIG_TCC_SYSINCLUDEPATHS "/include:/usr/include"
+#define CONFIG_TCC_LIBPATHS       "/lib:/usr/lib"
+#define CONFIG_TCC_CRTPREFIX      "/lib"
+#define CONFIG_TCC_ELFINTERP      ""      // Нет динамического линкера
+#define HOST_TRIPLET              "i386-pc-enclaveos"
+#define CONFIG_TCC_SEMLOCK        0       // Нет семафоров
+#define CONFIG_TCC_BACKTRACE      0       // Нет backtrace
+#define CONFIG_TCC_BCHECK         0       // Нет bounds checking
+#define CONFIG_TCC_USE_LIBGCC     0       // libtcc1.a вместо libgcc
+#define CONFIG_TCC_MMAP           0       // malloc вместо mmap
+```
+
+#### 8.6.4 Adaptation Layer (`tcc_lib_os.c`)
+
+Реализует функции, которые TCC ожидает от POSIX/glibc, но которых нет
+в минимальной `user_libc.c`:
+
+| Категория | Функции | Примечание |
+|---|---|---|
+| **FILE I/O** | `fwrite`, `fputs`, `fseek`, `ftell`, `fdopen`, `freopen` | Буферизация через FILE* |
+| **Process** | `atexit`, `abort`, `execvp`, `__assert_fail` | atexit: 32 слота |
+| **Memory** | `mprotect`, `sysconf(_SC_PAGESIZE)` | Обёртки над syscalls |
+| **String** | `strpbrk`, `strndup` | Стандартные реализации |
+| **Math/Float** | `strtod`, `strtof`, `strtold`, `ldexp`, `ldexpl` | Базовый парсинг float |
+| **Sort/Search** | `qsort` (Heapsort), `bsearch` | Heapsort: O(1) stack |
+| **Time** | `clock`, `localtime` | Заглушки |
+| **glibc compat** | `__errno_location`, `__isoc23_strtol/strtoul/strtoll/strtoull` | GCC 14+ C23 |
+| **Environment** | `environ`, `getcwd`, `chdir`, `realpath` | Минимальные заглушки |
+| **Terminal** | `isatty` | Всегда 1 для fd 0/1/2 |
+| **Misc** | `remove`, `_setjmp` | Алиасы |
+
+> ⚠️ **Heapsort вместо Quicksort:** Выбран для гарантии O(1) стековой памяти.
+> В Ring 3 User Stack = 64 KB, рекурсивный Quicksort может вызвать
+> Stack Overflow Guard (SIGSEGV) на больших массивах.
+
+#### 8.6.5 setjmp/longjmp (NASM, i386)
+
+Критично для **error recovery** TinyCC: при синтаксической ошибке
+TCC вызывает `longjmp()` для возврата к точке `setjmp()` без
+раскрутки стека.
+
+```
+jmp_buf layout (24 bytes):
+  [0]  EBX    (callee-saved)
+  [4]  ESI    (callee-saved)
+  [8]  EDI    (callee-saved)
+  [12] EBP    (frame pointer)
+  [16] ESP    (stack pointer, скорректирован на return address)
+  [20] EIP    (return address из стека)
+```
+
+POSIX compliance: `longjmp(env, 0)` возвращает 1.
+
+#### 8.6.6 Toolchain Injection (Makefile → initrd.tar)
+
+При сборке ISO Makefile автоматически формирует **полный toolchain**
+внутри initrd для работы TCC в Ring 3:
+
+```
+initrd_root/
+├── bin/
+│   ├── tcc.elf          ← Компилятор (Ring 3)
+│   ├── shell.elf        ← Shell (Ring 3)
+│   └── *.elf            ← Тестовые программы
+├── sbin/
+│   └── init.elf         ← PID 1 Launcher
+├── lib/
+│   ├── crt0.o           ← C Runtime (из user_src/crt0.asm)
+│   ├── crt1.o           ← Алиас crt0.o
+│   ├── crti.o           ← Empty stub (section .text)
+│   ├── crtn.o           ← Empty stub (section .text)
+│   ├── libc.a           ← Архив: user_libc.o + tcc_lib_os.o + setjmp.o
+│   └── libtcc1.a        ← 64-bit math helpers (из tcc_src/libtcc1.c)
+├── usr/lib/
+│   └── (зеркало /lib/)
+├── include/
+│   ├── user_libc.h      ← Monolithic SSOT header
+│   ├── user_syscalls.h  ← Syscall wrappers
+│   ├── stdio.h          ← #include "user_libc.h"
+│   ├── stdlib.h         ← #include "user_libc.h"
+│   ├── string.h         ← #include "user_libc.h"
+│   ├── ... (16 fake POSIX headers)
+│   └── sys/
+│       ├── mman.h       ← #include "../user_libc.h"
+│       ├── types.h      ← #include "../user_libc.h"
+│       └── ...
+└── usr/include/
+    └── (зеркало /include/)
+```
+
+**Ключевые решения:**
+- `libc.a` собирается через `i686-linux-gnu-ar rcs` из трёх объектов:
+  `user_libc.o` + `tcc_lib_os.o` + `setjmp.o`
+- Fake POSIX headers — однострочные `#include "user_libc.h"` (Monolithic Bypass)
+- CRT файлы копируются из объектных файлов сборки (не из исходников)
+- `libtcc1.a` содержит хелперы для 64-битной арифметики (`__divdi3`, `__moddi3`, etc.)
+
+#### 8.6.7 Флаги компиляции TCC
+
+```makefile
+TCC_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra \
+             -fno-optimize-sibling-calls \
+             -DCONFIG_TCC_STATIC \
+             -DONE_SOURCE=1 \
+             -Iuser_src \
+             -I$(INITRD_ROOT)/include
+```
+
+| Флаг | Назначение |
+|---|---|
+| `-DONE_SOURCE=1` | Монолитная компиляция (все .c в одном tcc.c) |
+| `-DCONFIG_TCC_STATIC` | Отключает dlopen/dlsym |
+| `-fno-optimize-sibling-calls` | Запрет tail-call optimization (setjmp safety) |
+| `-I$(INITRD_ROOT)/include` | Доступ к fake POSIX headers при компиляции |
+
+#### 8.6.8 Команда Shell: `compile`
+
+```c
+// shell_user.c — handle_compile()
+// Usage: compile <file.c> [output.elf]
+// Default output: /tmp/a.out
+
+pid_t pid = fork();
+if (pid == 0) {
+    const char* tcc_argv[] = { "tcc", input_file, "-o", output_file, NULL };
+    exec("/bin/tcc.elf", tcc_argv);
+    exit(127);  // exec failed
+}
+waitpid(pid, &status, 0);
+```
+
+#### 8.6.9 Ограничения и известные проблемы
+
+| # | Ограничение | Причина | Обходной путь |
+|---|---|---|---|
+| 1 | Нет динамической линковки | `CONFIG_TCC_STATIC`, нет ld.so | Только static ELF |
+| 2 | Нет FPU в ядре | `-mno-sse` в CFLAGS ядра | Lazy FPU в Ring 3 (#NM) |
+| 3 | Bump Allocator (free = no-op) | Оптимизация для TCC | Перезапуск процесса |
+| 4 | Нет `#include <...>` из хостовой системы | Fake headers в initrd | Только `user_libc.h` API |
+| 5 | Нет многопоточности | Одно ядро, cooperative scheduling | Не требуется для TCC |
+| 6 | `CONFIG_TCC_MMAP 0` | TCC использует malloc | Утечка при больших файлах |
+| 7 | Нет precompiled headers | Нет кэша | Полная перекомпиляция |
+
+## 🔧 Рекомендации перед коммитом в SSOT
+
+1. **Исправить `__isoc23_strtoll`** — должен вызывать `strtoll`, а не `strtoul`.
+
+2. **Добавить `sys_mkdir`** (номер 39 в Linux i386) и переписать `handle_mkdir()` в Shell — текущая реализация создаёт файл.
+
+3. **Рассмотреть `CONFIG_TCC_MMAP 1`** — при наличии `sys_mmap` это снизит давление на bump allocator и позволит освобождать память через `munmap`.
+
+4. **Защитить `libtcc1.o` от race** — добавить `.NOTPARALLEL` или уникальное имя для объекта в INITRD таргете.
 
 ## 9. ГАРАНТИИ СИСТЕМЫ (SLA)
 
