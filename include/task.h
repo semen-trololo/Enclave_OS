@@ -82,16 +82,17 @@ task_t* task_create(const char* name, void (*entry_point)(void),
                     bool is_user_mode, uint32_t user_esp, uint32_t* custom_pdir);
 void task_exit(int exit_code);
 void task_yield(void);
+void task_timer_tick(uint32_t tick);  // ← DIP-3: callback для timer
 void schedule(void);
 void task_kill_current(const char* reason);
 void task_print_list(void);
 uint32_t task_get_count(void);
 
-// [ДЕНЬ 14] Process Management
+//  Process Management
 int task_fork(struct regs* r);
 int task_waitpid(int pid, int* status, int options);
 
-// [ДЕНЬ 14] FPU Management
+//  FPU Management
 void fpu_release_ownership(task_t* task);
 
 #endif // TASK_H
