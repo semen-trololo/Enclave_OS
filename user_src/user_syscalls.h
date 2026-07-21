@@ -33,7 +33,7 @@
 #define SYS_FSTAT      28   // ✅ [ДЕНЬ 13] SSOT
 #define SYS_BRK        45
 #define SYS_IOCTL      54   // ✅ [ДЕНЬ 13] SSOT
-#define SYS_UNAME      63   // ✅ [ДЕНЬ 15] SSOT
+#define SYS_UNAME      164
 #define SYS_GETTIMEOFDAY 78 // ✅ [ДЕНЬ 15] SSOT
 #define SYS_MMAP       90
 #define SYS_MUNMAP     91
