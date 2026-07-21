@@ -6,7 +6,6 @@
 #include "gdt.h"
 #include "idt.h"
 #include "keyboard.h"
-// #include "shell.h"  <-- ❌ УБРАНО: Ядро больше не запускает Shell напрямую
 #include "timer.h"
 #include "pmm.h"
 #include "paging.h"
@@ -22,9 +21,9 @@
 #include "ata.h"
 #include "fat32.h"
 #include "tmpfs.h"
-#include "elf.h"     // ✅ НОВОЕ: Для загрузки /sbin/init.elf
-#include "vma.h"     // ✅ НОВОЕ: Для создания VMA стека/кучи
-#include "config.h"  // ✅ НОВОЕ: Для USER_STACK_VIRT_TOP и USER_HEAP_START
+#include "elf.h"      
+#include "vma.h"      
+#include "config.h"   
 #include "devfs.h"
 
 // ==========================================
@@ -195,58 +194,233 @@ void kernel_main(void) {
     }
     
     // ========================================================================
-    // DAY 24: LAUNCH PID 1 (Ring 3 Init Process)
-    // Ядро больше не запускает shell_run(). Оно создает Ring 3 процесс
+    // LAUNCH PID 1 (Ring 3 Init Process)
+    // ========================================================================
+    // Ядро больше не запускает shell_run(). Оно создаёт Ring 3 процесс
     // /sbin/init.elf и уходит в бесконечный Idle Loop (sti; hlt).
     // Планировщик (PIT) сам подхватит PID 1 и передаст ему CPU.
+    //
+    // [K1 FIX]
+    //   - Если /sbin/init.elf не найден, ядро останавливается.
+    //   - temp_task обнуляется.
+    //   - temp_task.cr3 устанавливается.
+    //   - Stack VMA создаётся как [bottom, top), user_esp внутри VMA.
+    //   - vma_add() проверяется на OOM.
+    //   - Убран shadowing глобального init_task.
     // ========================================================================
-        serial_print("[BOOT] Launching PID 1 (/sbin/init.elf)...\n");
+    serial_print("[BOOT] Launching PID 1 (/sbin/init.elf)...\n");
     
     vfs_node_t* init_node = vfs_findnode("/sbin/init.elf");
     if (!init_node) {
+        __asm__ volatile("cli");
+
         serial_print("[FATAL] /sbin/init.elf not found in VFS!\n");
-        // ... (error handling)
+
+        k_set_color(K_COLOR_LIGHT_RED, K_COLOR_BLACK);
+        k_print("[FATAL] /sbin/init.elf not found in VFS!\n");
+        k_print("[FATAL] Check initrd.tar: /sbin/init.elf must exist.\n");
+        k_set_color(K_COLOR_LIGHT_GREY, K_COLOR_BLACK);
+
+        if (fb_is_available()) {
+            fb_flush();
+        }
+
+        while (1) {
+            __asm__ volatile("hlt");
+        }
     }
 
     uint32_t* init_pdir = vmm_create_address_space();
     if (!init_pdir) {
+        __asm__ volatile("cli");
+
         serial_print("[FATAL] Failed to create address space for Init!\n");
-        while(1) { asm volatile("cli; hlt"); }
+
+        k_set_color(K_COLOR_LIGHT_RED, K_COLOR_BLACK);
+        k_print("[FATAL] Failed to create address space for Init!\n");
+        k_set_color(K_COLOR_LIGHT_GREY, K_COLOR_BLACK);
+
+        if (fb_is_available()) {
+            fb_flush();
+        }
+
+        while (1) {
+            __asm__ volatile("hlt");
+        }
     }
 
+    // ========================================================================
+    // [K1 HARDENING] Temp Task для ELF Loader
+    // ========================================================================
+    // temp_task должен быть полностью обнулён перед elf_load().
+    // Это же паттерн, что и в respawn_init_task().
+    // ========================================================================
     task_t temp_task;
+    k_memset(&temp_task, 0, sizeof(task_t));
+
     temp_task.pdir_virt = init_pdir;
+    temp_task.cr3 = VIRT_TO_PHYS((uint32_t)init_pdir);
     temp_task.vma_head = NULL;
 
     uint32_t init_entry = elf_load(init_node, &temp_task);
     if (init_entry == 0) {
         serial_print("[FATAL] Failed to load /sbin/init.elf!\n");
+
         vma_destroy_all(&temp_task);
         vmm_destroy_address_space(init_pdir);
-        while(1) { asm volatile("cli; hlt"); }
+
+        __asm__ volatile("cli");
+
+        k_set_color(K_COLOR_LIGHT_RED, K_COLOR_BLACK);
+        k_print("[FATAL] Failed to load /sbin/init.elf!\n");
+        k_set_color(K_COLOR_LIGHT_GREY, K_COLOR_BLACK);
+
+        if (fb_is_available()) {
+            fb_flush();
+        }
+
+        while (1) {
+            __asm__ volatile("hlt");
+        }
     }
 
-    uint32_t stack_top_init = USER_STACK_VIRT_TOP - 16;
-    
-    // 🛡️ CRITICAL: Защищаем создание задачи от прерываний PIT
+    // ========================================================================
+    // [K1 HARDENING] User Stack VMA
+    // ========================================================================
+    // Правильный layout:
+    //
+    //   VMA:      [USER_STACK_VIRT_TOP - USER_STACK_SIZE, USER_STACK_VIRT_TOP)
+    //   user_esp: USER_STACK_VIRT_TOP - 16
+    //
+    // user_esp находится внутри VMA.
+    // ========================================================================
+    uint32_t stack_vma_top    = USER_STACK_VIRT_TOP;
+    uint32_t stack_vma_bottom = stack_vma_top - USER_STACK_SIZE;
+    uint32_t user_esp         = stack_vma_top - 16;
+
+    if (vma_add(&temp_task, stack_vma_bottom, stack_vma_top, VMA_READ | VMA_WRITE) != 0) {
+        serial_print("[FATAL] OOM creating Init stack VMA!\n");
+
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(init_pdir);
+
+        __asm__ volatile("cli");
+
+        k_set_color(K_COLOR_LIGHT_RED, K_COLOR_BLACK);
+        k_print("[FATAL] OOM creating Init stack VMA!\n");
+        k_set_color(K_COLOR_LIGHT_GREY, K_COLOR_BLACK);
+
+        if (fb_is_available()) {
+            fb_flush();
+        }
+
+        while (1) {
+            __asm__ volatile("hlt");
+        }
+    }
+
+    if (vma_add(&temp_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE) != 0) {
+        serial_print("[FATAL] OOM creating Init heap VMA!\n");
+
+        vma_destroy_all(&temp_task);
+        vmm_destroy_address_space(init_pdir);
+
+        __asm__ volatile("cli");
+
+        k_set_color(K_COLOR_LIGHT_RED, K_COLOR_BLACK);
+        k_print("[FATAL] OOM creating Init heap VMA!\n");
+        k_set_color(K_COLOR_LIGHT_GREY, K_COLOR_BLACK);
+
+        if (fb_is_available()) {
+            fb_flush();
+        }
+
+        while (1) {
+            __asm__ volatile("hlt");
+        }
+    }
+
+    // ========================================================================
+    // CRITICAL SECTION: Создание Init Task
+    // ========================================================================
+    // Защищаем создание задачи и передачу VMA от прерываний PIT.
+    // Иначе планировщик может переключиться на только что созданный Init
+    // до того, как мы передадим ему VMA и выставим PID 1.
+    // ========================================================================
     uint32_t eflags;
     __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
     
-    task_t* init_task = task_create("/sbin/init.elf", (void (*)(void))init_entry, true, stack_top_init, init_pdir);
-    if (!init_task) {
+    // ========================================================================
+    // [K1 FIX] Убираем shadowing глобального init_task
+    // ========================================================================
+    // Раньше было:
+    //   task_t* init_task = task_create(...);
+    //
+    // Это создавало локальную переменную init_task, которая затеняла
+    // глобальный init_task из task.c.
+    //
+    // Теперь используем new_init и явно обновляем глобальный init_task.
+    // ========================================================================
+    task_t* new_init = task_create("/sbin/init.elf",
+                                   (void (*)(void))init_entry,
+                                   true,
+                                   user_esp,
+                                   init_pdir);
+
+    if (!new_init) {
+        __asm__ volatile("push %0; popf" : : "r"(eflags));
+
         serial_print("[FATAL] Failed to create Init task!\n");
+
         vma_destroy_all(&temp_task);
         vmm_destroy_address_space(init_pdir);
-        __asm__ volatile("push %0; popf" : : "r"(eflags));
-        while(1) { asm volatile("cli; hlt"); }
+
+        __asm__ volatile("cli");
+
+        k_set_color(K_COLOR_LIGHT_RED, K_COLOR_BLACK);
+        k_print("[FATAL] Failed to create Init task!\n");
+        k_set_color(K_COLOR_LIGHT_GREY, K_COLOR_BLACK);
+
+        if (fb_is_available()) {
+            fb_flush();
+        }
+
+        while (1) {
+            __asm__ volatile("hlt");
+        }
     }
 
-    init_task->vma_head = temp_task.vma_head;
-    init_task->pid = 1;
+    //
+    // Передаём VMA из temp_task новой задаче.
+    //
+    new_init->vma_head = temp_task.vma_head;
+    temp_task.vma_head = NULL;
 
-    vma_add(init_task, stack_top_init - USER_STACK_SIZE, stack_top_init, VMA_READ | VMA_WRITE);
-    vma_add(init_task, USER_HEAP_START, USER_HEAP_START, VMA_READ | VMA_WRITE);
-    
+    //
+    // Сохраняем инвариант:
+    //   PID 1 == Init.
+    //
+    new_init->pid = 1;
+
+    //
+    // Init policy:
+    //   - Init не должен усыновлять сирот самому себе.
+    //   - Если Init умирает, его прямой ребёнок Shell должен быть убит,
+    //     чтобы новый Init мог чисто перезапустить Shell.
+    //
+    new_init->orphan_on_exit   = 0;
+    new_init->monitor_children = 1;
+
+    //
+    // Обновляем глобальный init_task.
+    //
+    // Это критично для:
+    //   - orphan adoption;
+    //   - respawn logic;
+    //   - process tree policy.
+    //
+    init_task = new_init;
+
     __asm__ volatile("push %0; popf" : : "r"(eflags));
 
     serial_printf("[BOOT] ✓ PID 1 (/sbin/init.elf) ready. Entry: 0x%x\n", init_entry);
@@ -254,8 +428,9 @@ void kernel_main(void) {
 
     // ========================================================================
     // KERNEL IDLE LOOP (PID 0)
+    // ========================================================================
     // Ядро НИКОГДА не должно выходить из этого цикла.
-    // Если init.elf упадет, task.c (Reaper) заметит это и перезапустит его.
+    // Если init.elf упадёт, task.c (Reaper) заметит это и перезапустит его.
     // ========================================================================
     while (1) {
         asm volatile("sti; hlt; cli");
