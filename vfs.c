@@ -4,7 +4,8 @@
 #include "heap.h"
 #include "klib.h"
 #include "serial.h"
-#include "task.h" 
+#include "task.h"
+#include "isr.h"     // для irq_save/irq_restore
 
 vfs_node_t* vfs_root = 0;
 
@@ -364,37 +365,74 @@ int sys_unlink(const char* pathname) {
     return ret;
 }
 
-int sys_close(int fd) {
-    if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) return -1;
-    
-    __asm__ volatile("cli");
-    open_file_t* of = current_task->fd_table[fd];
-    if (!of) {
-        __asm__ volatile("sti");
-        return -1;
-    }
-    
-    current_task->fd_table[fd] = 0;
+// ============================================================================
+// vfs_close_fd: INTERNAL KERNEL API — закрытие FD для ЛЮБОЙ задачи
+// ============================================================================
+// T2 FIX:  Ring 0 больше не вызывает sys_close() (Ring 3 syscall handler).
+// DIP-1:   task.c (L6) → vfs.h (L5) — downward dependency.
+// CYCLE-2: task.c → vfs.h (OK), vfs.c → task.h (через current_task, OK).
+// CYCLE-3: task.c больше не включает syscall.h.
+//
+// Orphan semantics:
+//   open_file_t.ref_count-- → если 0 → kfree(open_file_t)
+//   vfs_node_t.ref_count--  → если 0 && is_unlinked → free node
+//
+// IRQ-safe: ref_count операции под irq_save/irq_restore.
+// ============================================================================
+int vfs_close_fd(struct task* task, int fd) {
+    if (!task) return -EBADF;
+    if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) return -EBADF;
+
+    open_file_t* of = task->fd_table[fd];
+    if (!of) return -EBADF;
+
+    // Отцепляем FD от таблицы задачи
+    task->fd_table[fd] = NULL;
+
+    // IRQ-safe decrement refcounts
+    irq_flags_t flags = irq_save();
+
     of->ref_count--;
-    
+
     if (of->ref_count == 0) {
+        // Последний владелец open_file_t
         vfs_node_t* node = of->node;
-        kfree(of);
-        
+
         if (node) {
             node->ref_count--;
-            if (node->ref_count == 0) {
-                if (node->close) node->close(node);
-                
-                // 🛡️ TRUE UNLINK: Free the inode if it was unlinked from the tree
-                if (node->is_unlinked) {
-                    kfree(node);
+
+            // POSIX Orphan Semantics:
+            // Файл удалён из дерева (unlink), но был открыт.
+            // Последний close → освобождаем ноду.
+            if (node->ref_count == 0 && node->is_unlinked) {
+                // Вызываем close callback драйвера (tmpfs, devfs, etc.)
+                if (node->close) {
+                    node->close(node);
                 }
+                // Освобождаем private_data (tmpfs buffer, etc.)
+                if (node->private_data) {
+                    kfree(node->private_data);
+                    node->private_data = NULL;
+                }
+                kfree(node);
             }
         }
+
+        kfree(of);
     }
-    __asm__ volatile("sti");
+
+    irq_restore(flags);
     return 0;
+}
+
+// ============================================================================
+// sys_close: POSIX syscall — тонкая обёртка над vfs_close_fd
+// ============================================================================
+// Теперь sys_close работает ТОЛЬКО для current_task.
+// Ring 0 код (task_exit, task_kill, cleanup) использует vfs_close_fd напрямую.
+// ============================================================================
+int sys_close(int fd) {
+    return vfs_close_fd(current_task, fd);
 }
 
 int32_t sys_read(int fd, void* buf, uint32_t count) {
