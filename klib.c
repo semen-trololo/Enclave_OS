@@ -254,13 +254,51 @@ int k_vsprintf(char* buf, const char* fmt, va_list args) {
         }
         
         int width = 0;
+
         if (*fmt == '*') {
-            width = va_arg(args, int);
-            if (width < 0) { left_align = 1; width = -width; }
+            int w = va_arg(args, int);
+
+            if (w < 0) {
+                left_align = 1;
+
+                // ============================================================
+                // UL1/KL1 HARDENING: INT_MIN SAFE WIDTH NEGATION
+                // ============================================================
+                // Нельзя делать:
+                //   width = -w;
+                //
+                // Если w == INT_MIN, то -w вызывает signed overflow UB.
+                //
+                // Используем unsigned negation и saturating cap до INT_MAX.
+                // ============================================================
+                unsigned int uw = 0u - (unsigned int)w;
+
+                if (uw > 0x7FFFFFFFu) {
+                    width = 0x7FFFFFFF;
+                } else {
+                    width = (int)uw;
+                }
+            } else {
+                width = w;
+            }
+
             fmt++;
         } else {
             while (*fmt >= '0' && *fmt <= '9') {
-                width = width * 10 + (*fmt - '0');
+                int digit = (*fmt - '0');
+
+                // ============================================================
+                // UL1/KL1 HARDENING: WIDTH OVERFLOW PROTECTION
+                // ============================================================
+                // Защищаем width от signed overflow при очень больших числах
+                // в format string, например "%999999999999d".
+                // ============================================================
+                if (width > (0x7FFFFFFF - digit) / 10) {
+                    width = 0x7FFFFFFF;
+                } else {
+                    width = width * 10 + digit;
+                }
+
                 fmt++;
             }
         }
@@ -401,15 +439,74 @@ void k_printf(const char* fmt, ...) {
 
 int k_atoi(const char* str) {
     if (!str) return 0;
-    int result = 0, sign = 1;
+
     while (*str == ' ') str++;
-    if (*str == '-') { sign = -1; str++; } 
-    else if (*str == '+') str++;
-    while (*str >= '0' && *str <= '9') {
-        result = result * 10 + (*str - '0');
+
+    int negative = 0;
+
+    if (*str == '-') {
+        negative = 1;
+        str++;
+    } else if (*str == '+') {
         str++;
     }
-    return result * sign;
+
+    // ========================================================================
+    // UL1/KL1 HARDENING: SAFE ATOI
+    // ========================================================================
+    // Старая версия делала:
+    //   result = result * 10 + digit;
+    //   return result * sign;
+    //
+    // Для "-2147483648" положительный промежуточный результат 2147483648
+    // не помещается в int, что вызывает signed overflow UB.
+    //
+    // Теперь накапливаем magnitude в unsigned int.
+    // Беззнаковая арифметика детерминирована по модулю 2^32.
+    //
+    // Поведение при overflow:
+    //   saturating clamp to INT_MIN / INT_MAX.
+    //
+    // Это не стандартный atoi (стандартный atoi имеет UB при overflow),
+    // но это безопасное и предсказуемое поведение для bare-metal OS.
+    // ========================================================================
+    unsigned int uresult = 0;
+
+    while (*str >= '0' && *str <= '9') {
+        unsigned int digit = (unsigned int)(*str - '0');
+
+        if (uresult > (0xFFFFFFFFu - digit) / 10) {
+            uresult = 0xFFFFFFFFu;
+        } else {
+            uresult = uresult * 10u + digit;
+        }
+
+        str++;
+    }
+
+    if (negative) {
+        //
+        // Допустимый диапазон для negative:
+        //   0 .. 2147483648
+        //
+        // 2147483648 соответствует INT_MIN.
+        //
+        if (uresult <= 0x80000000u) {
+            return (int)(0u - uresult);
+        }
+
+        return (int)0x80000000; // INT_MIN
+    } else {
+        //
+        // Допустимый диапазон для positive:
+        //   0 .. 2147483647
+        //
+        if (uresult <= 0x7FFFFFFFu) {
+            return (int)uresult;
+        }
+
+        return (int)0x7FFFFFFF; // INT_MAX
+    }
 }
 
 uint32_t k_atoh(const char* str) {
