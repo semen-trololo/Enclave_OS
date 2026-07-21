@@ -166,7 +166,6 @@ void tasking_init(void) {
 task_t* task_create(const char* name, void (*entry_point)(void), 
                     bool is_user_mode, uint32_t user_esp, uint32_t* custom_pdir) {
     
-    // 🛡️ [ДЕНЬ 16] FIX: Используем VMM аллокатор с Hardware Guard Page
     uint32_t stack_top = vmm_alloc_kernel_stack();
     if (stack_top == 0) return 0;
 
@@ -236,18 +235,25 @@ task_t* task_create(const char* name, void (*entry_point)(void),
         new_task->next_sibling = current_task->children;
         current_task->children = new_task;
     }
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+
+    // ========================================================================
+    // RUN QUEUE INSERTION (IRQ-SAFE)
+    // ========================================================================
+    // Используем irq_save()/irq_restore(), чтобы не ломать вложенные
+    // критические секции.
+    // ========================================================================
+    irq_flags_t flags = irq_save();
     task_queue_add(new_task);
     task_count++;
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    irq_restore(flags);
 
     serial_printf("[TASK] Created PID %d: %s (mode: %s)\n", 
                   new_task->pid, name, is_user_mode ? "USER" : "KERNEL");
     return new_task;
 }
+
 // ============================================================================
-// [ДЕНЬ 24 + T1 FIX] RESPAWN INIT TASK (PID 1)
+// RESPAWN INIT TASK (PID 1)
 // ============================================================================
 // Если Init упал, ядро автоматически перезапускает его из Reaper Phase.
 // Это реализует принцип "Let it crash" для корневого процесса.
@@ -261,6 +267,9 @@ task_t* task_create(const char* name, void (*entry_point)(void),
 //   - PID 1 сохраняется как инвариант системы.
 //   - Init использует monitor_children = 1:
 //       если Init умирает, его прямой ребёнок shell тоже убивается.
+//
+// [T3/T4 HARDENING]
+//   - Все критические секции переведены на irq_save()/irq_restore().
 // ============================================================================
 static void respawn_init_task(void) {
     serial_print("[REAPER] ⚠️ PID 1 (Init) died! Respawning...\n");
@@ -309,8 +318,13 @@ static void respawn_init_task(void) {
     uint32_t stack_vma_bottom = stack_vma_top - USER_STACK_SIZE;
     uint32_t user_esp         = stack_vma_top - 16;
 
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    // ========================================================================
+    // CRITICAL SECTION START
+    // ========================================================================
+    // Дальше мы модифицируем VMA, создаём задачу, обновляем process tree и
+    // глобальный init_task. Это должно быть атомарно относительно timer IRQ.
+    // ========================================================================
+    irq_flags_t flags = irq_save();
 
     //
     // Добавляем VMA во временный task ДО task_create().
@@ -324,7 +338,7 @@ static void respawn_init_task(void) {
         vma_destroy_all(&temp_task);
         vmm_destroy_address_space(new_pdir);
 
-        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        irq_restore(flags);
         while (1) { __asm__ volatile("cli; hlt"); }
     }
 
@@ -340,7 +354,7 @@ static void respawn_init_task(void) {
         vma_destroy_all(&temp_task);
         vmm_destroy_address_space(new_pdir);
 
-        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        irq_restore(flags);
         while (1) { __asm__ volatile("cli; hlt"); }
     }
 
@@ -402,7 +416,10 @@ static void respawn_init_task(void) {
     //
     init_task = new_init;
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    // ========================================================================
+    // CRITICAL SECTION END
+    // ========================================================================
+    irq_restore(flags);
 
     serial_printf("[REAPER] ✓ Init respawned successfully as PID %d\n", new_init->pid);
 }
@@ -410,10 +427,14 @@ static void respawn_init_task(void) {
 // ============================================================================
 // ПЛАНИРОВЩИК (ROUND-ROBIN + REAPER + IDLE HLT)
 // ============================================================================
-
 void schedule(void) {
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    // ========================================================================
+    // IRQ-SAFE ENTRY
+    // ========================================================================
+    // Сохраняем EFLAGS, чтобы корректно работать даже если schedule()
+    // вызван из уже запрещённой критической секции.
+    // ========================================================================
+    irq_flags_t flags = irq_save();
 
     // 🛡️ REAPER PHASE: Очищаем мертвые задачи ПЕРЕД планированием.
     if (dead_tasks_head != NULL) {
@@ -439,7 +460,7 @@ void schedule(void) {
     }
 
     if (!current_task || !current_task->next) {
-        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        irq_restore(flags);
         return;
     }
     
@@ -455,9 +476,16 @@ void schedule(void) {
     
     if (old_task == new_task) {
         if (old_task->state != TASK_RUNNING) {
+            //
+            // Специальный idle-wait:
+            //   sti; hlt; cli
+            //
+            // Это НЕ критическая секция, а осознанное разрешение прерываний
+            // на время HLT. Поэтому здесь оставляем как есть.
+            //
             __asm__ volatile("sti; hlt; cli");
         }
-        __asm__ volatile("push %0; popf" : : "r"(eflags));
+        irq_restore(flags);
         return; 
     }
 
@@ -472,9 +500,9 @@ void schedule(void) {
 
     switch_context(&old_task->esp, new_task->esp, new_task->cr3);
     
-    // --- ЗДЕСЬ ПРОДОЛЖАЕТ ВЫПОЛНЕНИЕ УЖЕ НОВАЯ ЗАДАЧА ---
+    // --- ЗДЕСЬ ПРОДОЛЖАЕТ ВЫПОЛНЕНИЕ УЖЕ СТАРАЯ ЗАДАЧА ПОСЛЕ CONTEXT SWITCH ---
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    irq_restore(flags);
 }
 
 void task_yield(void) { schedule(); }
@@ -491,6 +519,9 @@ void task_yield(void) { schedule(); }
 //   - Живые дети убиваются и отправляются в Reaper.
 //   - FD cleanup для принудительно убитых детей пока не делается безопасно.
 //     Это связано с T2: sys_close() сейчас работает только для current_task.
+//
+// [T3/T4 HARDENING]
+//   - Run queue / reaper queue модификации переведены на irq_save/irq_restore.
 // ============================================================================
 static void task_cleanup_children_on_exit(task_t* task) {
     if (!task) return;
@@ -533,8 +564,10 @@ static void task_cleanup_children_on_exit(task_t* task) {
             child->state = TASK_DEAD;
             child->exit_code = -1;
 
-            uint32_t eflags;
-            __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+            // ====================================================================
+            // RUN QUEUE / REAPER QUEUE UPDATE (IRQ-SAFE)
+            // ====================================================================
+            irq_flags_t flags = irq_save();
 
             //
             // Удаляем ребёнка из Run Queue, если он там ещё есть.
@@ -553,7 +586,7 @@ static void task_cleanup_children_on_exit(task_t* task) {
             child->reaper_next = dead_tasks_head;
             dead_tasks_head = child;
 
-            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            irq_restore(flags);
         }
 
         child = next;
@@ -569,10 +602,22 @@ static void task_cleanup_children_on_exit(task_t* task) {
 //   - PID 1 больше не усыновляет детей самому себе.
 //   - PID 1 при смерти убивает свой shell через task_cleanup_children_on_exit().
 //   - monitor_children использует общий безопасный cleanup helper.
+//
+// [T3/T4 HARDENING]
+//   - Критическая секция PID 1 / Reaper Queue переведена на irq_save/restore.
+//
+// ⚠️ NOTE:
+//   Цикл sys_close() здесь пока не меняем. Это связано с отдельным багом T2:
+//   sys_close() из Ring 0 / нарушение Zero Trust.
 // ============================================================================
 void task_exit(int exit_code) {
     fpu_release_ownership(current_task);
 
+    //
+    // T2-related:
+    // Пока закрываем FD через sys_close() для current_task.
+    // Этот путь будет переработан отдельно.
+    //
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
             sys_close(i);
@@ -641,8 +686,10 @@ void task_exit(int exit_code) {
         serial_printf("[TASK] Waking up parent PID %d\n", current_task->parent->pid);
     }
 
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    // ========================================================================
+    // PID 1 SPECIAL CASE / REAPER QUEUE (IRQ-SAFE)
+    // ========================================================================
+    irq_flags_t flags = irq_save();
 
     task_t* dead_task = current_task;
 
@@ -669,7 +716,7 @@ void task_exit(int exit_code) {
         serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
     }
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    irq_restore(flags);
 
     schedule();
 
@@ -679,12 +726,19 @@ void task_exit(int exit_code) {
 }
 
 // ============================================================================
-// [ДЕНЬ 10 + T1 FIX] ПРИНУДИТЕЛЬНОЕ УБИЙСТВО (Page Fault / OOM Killer)
+// [T1 FIX] ПРИНУДИТЕЛЬНОЕ УБИЙСТВО (Page Fault / OOM Killer)
 // ============================================================================
 // [T1 / INIT RESPAWN HARDENING]
 //   - PID 1 больше не усыновляет детей самому себе.
 //   - PID 1 при kill убивает свой shell через task_cleanup_children_on_exit().
 //   - monitor_children использует общий безопасный cleanup helper.
+//
+// [T3/T4 HARDENING]
+//   - Критическая секция PID 1 / Reaper Queue переведена на irq_save/restore.
+//
+// ⚠️ NOTE:
+//   Цикл sys_close() здесь пока не меняем. Это связано с отдельным багом T2:
+//   sys_close() из Ring 0 / нарушение Zero Trust.
 // ============================================================================
 void task_kill_current(const char* reason) {
     if (!current_task || current_task->pid == 0) {
@@ -699,6 +753,11 @@ void task_kill_current(const char* reason) {
 
     fpu_release_ownership(current_task);
 
+    //
+    // T2-related:
+    // Пока закрываем FD через sys_close() для current_task.
+    // Этот путь будет переработан отдельно.
+    //
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] != 0) {
             sys_close(i);
@@ -769,8 +828,10 @@ void task_kill_current(const char* reason) {
                       current_task->parent->pid);
     }
 
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    // ========================================================================
+    // PID 1 SPECIAL CASE / REAPER QUEUE (IRQ-SAFE)
+    // ========================================================================
+    irq_flags_t flags = irq_save();
 
     task_t* dead_task = current_task;
 
@@ -793,7 +854,7 @@ void task_kill_current(const char* reason) {
         serial_print("[TASK] PID 1 (Init) pushed directly to Reaper Queue.\n");
     }
 
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    irq_restore(flags);
 
     schedule();
 
@@ -803,14 +864,20 @@ void task_kill_current(const char* reason) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14 + ДЕНЬ 24] TASK FORK (Copy-on-Write + POSIX FD Inheritance)
+// TASK FORK (Copy-on-Write + POSIX FD Inheritance)
 // ============================================================================
 // Создаёт ребёнка с CoW Address Space, клонирует FD Table (с увеличением
 // ref_count для open_file_t и vfs_node_t), VMA List, FPU State.
 // Ребёнок видит 0 как результат fork(), родитель — PID ребёнка.
+//
+// [T3/T4 FIX]
+//   - FD inheritance теперь выполняется под irq_save()/irq_restore().
+//   - open_file_t->ref_count++ защищён от прерываний.
+//   - vfs_node_t->ref_count++ защищён тем же IRQ-safe участком.
+//   - Убраны безусловные cli/sti внутри FD inheritance.
 // ============================================================================
 int task_fork(struct regs* r) {
-    // 🛡️ [ДЕНЬ 16] FIX: VMM аллокатор вместо kmalloc
+    // 🛡️ FIX: VMM аллокатор вместо kmalloc
     // Возвращает TOP стека (не base!), ниже — Guard Page (unmapped).
     uint32_t stack_top = vmm_alloc_kernel_stack();
     if (stack_top == 0) return -ENOMEM;
@@ -832,7 +899,7 @@ int task_fork(struct regs* r) {
     child->reaper_next = NULL;
     child->sleep_until = 0;
     
-    // 🛡️ [ДЕНЬ 14] Copy-on-Write Address Space Cloning
+    // 🛡️ Copy-on-Write Address Space Cloning
     // Создаёт новый Page Directory, клонирует Kernel Space (768-1023) из
     // boot_page_directory и User Space (0-767) из родителя с флагом PAGE_COW.
     // Физические страницы НЕ копируются — только PTE помечаются READ-ONLY.
@@ -856,27 +923,43 @@ int task_fork(struct regs* r) {
     k_strncpy(child->name, current_task->name, sizeof(child->name));
     
     // ========================================================================
-    // 🛡️ [ДЕНЬ 24] POSIX FILE DESCRIPTOR INHERITANCE (CRITICAL FIX)
+    // 🛡️POSIX FILE DESCRIPTOR INHERITANCE (T3/T4 FIX)
     // ========================================================================
     // По POSIX при fork() ребёнок наследует открытые FD, разделяя с родителем
     // Open File Descriptions (open_file_t). Мы ОБЯЗАНЫ увеличить ref_count,
     // иначе sys_close в ребёнке освободит память, оставив родителя с UAF.
+    //
+    // CRITICAL:
+    //   Весь цикл наследования FD должен быть IRQ-safe.
+    //
+    //   Раньше здесь было:
+    //     open_file_t->ref_count++ без защиты;
+    //     vfs_node_t->ref_count++ под cli/sti без сохранения EFLAGS.
+    //
+    //   Это могло привести к:
+    //     - race condition на ref_count;
+    //     - преждевременному sti внутри внешней критической секции;
+    //     - use-after-free / double-free / refcount leak.
     // ========================================================================
+    irq_flags_t fd_flags = irq_save();
+
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
-        child->fd_table[i] = current_task->fd_table[i];
-        
-        if (child->fd_table[i]) {
+        open_file_t* of = current_task->fd_table[i];
+
+        child->fd_table[i] = of;
+
+        if (of) {
             // Увеличиваем счетчик ссылок на Open File Description
-            child->fd_table[i]->ref_count++;
-            
+            of->ref_count++;
+
             // Увеличиваем счетчик ссылок на Inode (vfs_node_t)
-            if (child->fd_table[i]->node) {
-                __asm__ volatile("cli");
-                child->fd_table[i]->node->ref_count++;
-                __asm__ volatile("sti");
+            if (of->node) {
+                of->node->ref_count++;
             }
         }
     }
+
+    irq_restore(fd_flags);
     
     // Копируем FPU state (512 байт, 16-byte aligned — первое поле в task_t)
     k_memcpy(child->fpu_state, current_task->fpu_state, 512);
@@ -892,7 +975,7 @@ int task_fork(struct regs* r) {
     child->monitor_children = current_task->monitor_children;
     
     // ========================================================================
-    // 🛡️ [ДЕНЬ 16] KERNEL STACK COPY (с учетом новой архитектуры TOP)
+    // 🛡️ KERNEL STACK COPY (с учетом новой архитектуры TOP)
     // ========================================================================
     // Копируем kernel stack родителя в stack ребёнка. Это нужно, потому что
     // regs* r указывает на структуру, сохранённую на kernel stack при syscall.
@@ -908,7 +991,7 @@ int task_fork(struct regs* r) {
     struct regs* original_child_r = (struct regs*)(child_stack_base + offset_from_base);
     
     // Сдвигаем regs вниз на 32 байта для нового стекового фрейма ret_from_fork
-    // Это нужно, чтобы ret_from_fork имел место для callee-saved регистров
+    // Это нужно, чтобы ret_from_fork имел места для callee-saved регистров
     uint32_t shift = 32;
     struct regs* child_r = (struct regs*)((uint32_t)original_child_r - shift);
     k_memcpy(child_r, original_child_r, sizeof(struct regs));
@@ -935,16 +1018,15 @@ int task_fork(struct regs* r) {
     child->esp = (uint32_t)child_stack_ptr;
     
     // ========================================================================
-    // RUN QUEUE INSERTION (IRQ Safety)
+    // RUN QUEUE INSERTION (IRQ-SAFE)
     // ========================================================================
     // Защищаем модификацию двусвязного списка run queue от прерываний PIT.
     // Если PIT прервёт нас посередине, schedule() может увидеть битый список.
     // ========================================================================
-    uint32_t eflags;
-    __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+    irq_flags_t rq_flags = irq_save();
     task_queue_add(child);
     task_count++;
-    __asm__ volatile("push %0; popf" : : "r"(eflags));
+    irq_restore(rq_flags);
     
     serial_printf("[TASK] Fork: PID %d -> PID %d (CoW)\n", current_task->pid, child->pid);
     
@@ -953,7 +1035,7 @@ int task_fork(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14] TASK WAITPID
+// TASK WAITPID
 // ============================================================================
 int task_waitpid(int pid, int* status, int options) {
     while (1) {
@@ -992,8 +1074,10 @@ int task_waitpid(int pid, int* status, int options) {
                 }
             }
             
-            uint32_t eflags;
-            __asm__ volatile("pushf; pop %0; cli" : "=r"(eflags));
+            // ====================================================================
+            // RUN QUEUE / REAPER QUEUE UPDATE (IRQ-SAFE)
+            // ====================================================================
+            irq_flags_t flags = irq_save();
             
             // 🛡️ CRITICAL FIX: Удаляем Зомби из Run Queue ПЕРЕД отправкой в Reaper.
             // Это безопасно, так как текущая задача (родитель) находится в Run Queue,
@@ -1007,7 +1091,7 @@ int task_waitpid(int pid, int* status, int options) {
             zombie->reaper_next = dead_tasks_head;
             dead_tasks_head = zombie;
             
-            __asm__ volatile("push %0; popf" : : "r"(eflags));
+            irq_restore(flags);
             
             serial_printf("[TASK] waitpid: Reaped PID %d (exit code: %d)\n", zombie_pid, exit_code);
             
