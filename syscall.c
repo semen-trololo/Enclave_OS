@@ -417,7 +417,7 @@ static int sys_open_handler(struct regs* r) {
 // ========================================================================
 static int sys_close_handler(struct regs* r) {
     int fd = (int)r->ebx;
-    return sys_close(fd);
+    return vfs_close_fd(current_task, fd);
 }
 
 // ========================================================================
@@ -738,7 +738,7 @@ static int sys_mprotect_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14] sys_fork: создание копии процесса (Copy-on-Write)
+//  sys_fork: создание копии процесса (Copy-on-Write)
 // ============================================================================
 static int sys_fork_handler(struct regs* r) {
     serial_printf("[SYSCALL] sys_fork: PID %d\n", current_task->pid);
@@ -746,7 +746,7 @@ static int sys_fork_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14] sys_waitpid: ожидание завершения ребенка
+// sys_waitpid: ожидание завершения ребенка
 // ============================================================================
 static int sys_waitpid_handler(struct regs* r) {
     int pid = (int)r->ebx;
@@ -762,7 +762,7 @@ static int sys_waitpid_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 14] sys_getpid: получить PID текущего процесса
+//  sys_getpid: получить PID текущего процесса
 // ============================================================================
 static int sys_getpid_handler(struct regs* r) {
     (void)r;
@@ -770,7 +770,7 @@ static int sys_getpid_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 15] sys_gettimeofday: получение времени с момента загрузки
+//  sys_gettimeofday: получение времени с момента загрузки
 // ============================================================================
 static int sys_gettimeofday_handler(struct regs* r) {
     timeval_t* tv = (timeval_t*)r->ebx;
@@ -789,7 +789,7 @@ static int sys_gettimeofday_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 15] sys_sleep: усыпление процесса (в миллисекундах)
+//  sys_sleep: усыпление процесса (в миллисекундах)
 // ============================================================================
 static int sys_sleep_handler(struct regs* r) {
     uint32_t ms = r->ebx; 
@@ -806,7 +806,7 @@ static int sys_sleep_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 15] sys_uname: информация об ОС
+//  sys_uname: информация об ОС
 // ============================================================================
 static int sys_uname_handler(struct regs* r) {
     utsname_t* user_buf = (utsname_t*)r->ebx;
@@ -826,7 +826,7 @@ static int sys_uname_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 15] sys_sysinfo: статистика системы
+//  sys_sysinfo: статистика системы
 // ============================================================================
 static int sys_sysinfo_handler(struct regs* r) {
     sysinfo_t* user_buf = (sysinfo_t*)r->ebx;
@@ -850,7 +850,7 @@ static int sys_sysinfo_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 28] sys_dup: дублирование файлового дескриптора
+//  sys_dup: дублирование файлового дескриптора
 // ============================================================================
 static int sys_dup_handler(struct regs* r) {
     int old_fd = (int)r->ebx;
@@ -875,7 +875,7 @@ static int sys_dup_handler(struct regs* r) {
 }
 
 // ============================================================================
-// [ДЕНЬ 28] sys_dup2: атомарное дублирование в конкретный FD
+//  sys_dup2: атомарное дублирование в конкретный FD
 // ============================================================================
 static int sys_dup2_handler(struct regs* r) {
     int old_fd = (int)r->ebx;
@@ -891,7 +891,7 @@ static int sys_dup2_handler(struct regs* r) {
     
     // Закрываем new_fd, если он уже открыт
     if (current_task->fd_table[new_fd] != 0) {
-        sys_close(new_fd);
+    vfs_close_fd(current_task, new_fd);
     }
     
     __asm__ volatile("cli");
