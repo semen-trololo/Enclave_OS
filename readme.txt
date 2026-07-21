@@ -493,6 +493,17 @@ static void output_char(char c) {
 │  • Только через syscalls                                    │
 │  • Crash-Only (Init перезапустит)                           │
 └─────────────────────────────────────────────────────────────┘
+
+### Init Respawn Model
+Init — это Ring 3 watchdog для Shell.
+Kernel отвечает только за respawn PID 1:
+  PID 1 dies → Reaper → load /sbin/init.elf → new PID 1.
+Init отвечает за respawn Shell:
+  Shell dies → init waitpid → fork/exec /bin/shell.elf.
+Если Init умирает, его прямой ребёнок Shell убивается через
+`monitor_children = 1`, чтобы новый Init мог чисто перезапустить
+Shell и заново открыть `/dev/console`.
+
 ```
 
 ### 6.2 `task.c` — Scheduler + Supervisor Trees
@@ -759,40 +770,24 @@ _start:
 Добавлен `vmm_handle_user_write_fault()`. Ring 0 и Ring 3 write faults теперь 
 проходят через единый VMA-checked CoW resolver. Demand paging выполняется только
 для `!present` faults. W^X и refcount проверяются. | Omni Stress Test: 31/32 passed.
-`vmm_cow_isolation`, `proc_fork_bomb`, `vmm_mprotect_sigsegv`, `vmm_demand_paging`
- — PASS. |
-
+`vmm_cow_isolation`, `proc_fork_bomb`, `vmm_mprotect_sigsegv`, `vmm_demand_paging` — PASS.
 | 2 | UL2 | user_libc.c | 20+ функций не реализованы (fwrite, fseek, qsort, ...) | 🔴 FATAL |
+Не критичен на данном этапе.
 | 3 | T2 | task.c | `sys_close()` из Ring 0 (нарушение Zero Trust) | 🔴 FATAL |
 | 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | 🔴 FATAL |
 | 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | 🔴 FATAL |
 | 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | 🔴 FATAL |
 | 7 | T1 | task.c | `respawn_init_task` — `temp_task` не инициализирована | ✅ FIXED Day 30 |
-`respawn_init_task()` полностью переписан. `temp_task` обнуляется через `k_memset()`.
- Stack VMA создаётся как `[USER_STACK_VIRT_TOP - USER_STACK_SIZE,
-  USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_task`
-   обновляется после respawn. Новый Init получает `pid = 1`, отцепляется 
-   от `current_task`, использует `monitor_children = 1`. 
-   Добавлен `task_cleanup_children_on_exit()` для безопасной зачистки детей PID 1. 
-   | Omni Stress Test: 31/32 passed. Единственный fail — `directory_ops`,
-    не связан с T1.
-При принудительной зачистке детей PID 1 FD-таблица убитых процессов
-пока не закрывается безопасно, потому что `sys_close()` работает
-только для `current_task`. Это связано с багом T2 и будет исправлено
-отдельно.
-
+respawn_init_task() полностью переписан. `temp_task` обнуляется через `k_memset()`.
+Stack VMA создаётся как `[USER_STACK_VIRT_TOP - USER_STACK_SIZE,
+USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_task`
+обновляется после respawn. Новый Init получает `pid = 1`, отцепляется от `current_task`, использует `monitor_children = 1`. 
+Добавлен `task_cleanup_children_on_exit()` для безопасной зачистки детей PID 1. | Omni Stress Test: 31/32 passed. Единственный fail — `directory_ops`, не связан с T1.
+При принудительной зачистке детей PID 1 FD-таблица убитых процессов пока не закрывается безопасно, потому что `sys_close()` работает
+только для `current_task`. Это связано с багом T2 и будет исправлено отдельно.
 | 8 | SH1 | shell_user.c | `handle_mkdir` создаёт файл, а не директорию | 🔴 FATAL |
 | 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 HIGH |
 | 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH |
-
-### 10.2 Системные замечания (из код-ревью)
-
-| Категория | Количество | Примеры |
-|---|---|---|
-| 🔴 FATAL | 9 | CoW Ring 0 write, missing libc functions |
-| 🟠 HIGH | 22 | cli/sti без EFLAGS, debug логи в hot path |
-| 🟡 MEDIUM | 49 | O(n) алгоритмы, magic numbers, SSOT конфликты |
-| ⚪ LOW | 49 | Комментарии, именование, defensive coding |
 
 ### 10.3 Roadmap (Day 30+)
 
@@ -849,18 +844,7 @@ _start:
 | **Mountpoint Teleportation** | FS_MOUNTPOINT → mountpoint_node |
 | **SSOT Syscall Constants** | Linux i386 ABI (O_CREAT=0x0040) |
 | Ring 0 CoW Write | Ring 0 может писать в user CoW только через
- `vmm_handle_user_write_fault()`: VMA exists, VMA_WRITE, no W^X,
-  refcount-safe, invlpg. Blanket Ring 0 write access запрещён. |
-
-### Init Respawn Model
-Init — это Ring 3 watchdog для Shell.
-Kernel отвечает только за respawn PID 1:
-  PID 1 dies → Reaper → load /sbin/init.elf → new PID 1.
-Init отвечает за respawn Shell:
-  Shell dies → init waitpid → fork/exec /bin/shell.elf.
-Если Init умирает, его прямой ребёнок Shell убивается через
-`monitor_children = 1`, чтобы новый Init мог чисто перезапустить
-Shell и заново открыть `/dev/console`.
+| `vmm_handle_user_write_fault()`: VMA exists, VMA_WRITE, no W^X, refcount-safe, invlpg. Blanket Ring 0 write access запрещён. |
 
 ---
 
