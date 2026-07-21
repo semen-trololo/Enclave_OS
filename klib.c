@@ -119,13 +119,30 @@ static void k_put_int(char** buf, char* end, int value, int base, int width, int
     char tmp[33];
     int len = 0;
     int negative = 0;
-    
+    unsigned int uval;
+
+    // ========================================================================
+    // UL1/KL1 FIX: INT_MIN SAFE NEGATION
+    // ========================================================================
+    // Нельзя делать:
+    //   value = -value;
+    //
+    // Если value == INT_MIN, то -value вызывает signed integer overflow UB.
+    //
+    // Правильно:
+    //   1. Привести value к unsigned int.
+    //   2. Выполнить беззнаковое отрицание:
+    //        0u - (unsigned int)value
+    //
+    // Беззнаковая арифметика в C детерминирована и выполняется по модулю 2^N.
+    // ========================================================================
     if (is_signed && value < 0) {
         negative = 1;
-        value = -value;
+        uval = 0u - (unsigned int)value;
+    } else {
+        uval = (unsigned int)value;
     }
-    
-    unsigned int uval = (unsigned int)value;
+
     if (uval == 0) {
         tmp[len++] = '0';
     } else {
@@ -135,32 +152,32 @@ static void k_put_int(char** buf, char* end, int value, int base, int width, int
             uval /= base;
         }
     }
-    
+
     int num_digits = len;
     if (precision > num_digits) num_digits = precision;
-    
+
     int sign_len = 0;
     if (negative) sign_len = 1;
     else if (show_sign) sign_len = 1;
     else if (space_flag) sign_len = 1;
-    
+
     int total_len = num_digits + sign_len;
     int pad = width - total_len;
     char pad_char = (pad_zero && precision < 0) ? '0' : ' ';
-    
+
     if (!left_align) {
         while (pad-- > 0 && *buf < end) *(*buf)++ = pad_char;
     }
-    
+
     if (negative && *buf < end) *(*buf)++ = '-';
     else if (show_sign && !negative && *buf < end) *(*buf)++ = '+';
     else if (space_flag && !negative && *buf < end) *(*buf)++ = ' ';
-    
+
     int leading_zeros = num_digits - len;
     while (leading_zeros-- > 0 && *buf < end) *(*buf)++ = '0';
-    
+
     while (len > 0 && *buf < end) *(*buf)++ = tmp[--len];
-    
+
     if (left_align) {
         while (pad-- > 0 && *buf < end) *(*buf)++ = ' ';
     }
