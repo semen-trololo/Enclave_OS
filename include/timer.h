@@ -3,16 +3,18 @@
 
 #include <stdint.h>
 
-// Инициализация PIT с заданной частотой (Гц)
-void timer_init(uint32_t frequency);
+// ============================================================================
+// DIP-3 FIX: Callback Pattern.
+// Timer (L2) НЕ включает task.h (L6).
+// Kernel (L7) инжектит schedule + wake_sleepers через callback.
+// ============================================================================
+typedef void (*timer_tick_callback_t)(uint32_t tick);
 
-// Получить количество тиков с момента инициализации
+void timer_init(uint32_t freq);
+void timer_set_tick_callback(timer_tick_callback_t cb);
+
 uint32_t timer_get_ticks(void);
-
-// Получить текущую частоту таймера
 uint32_t timer_get_frequency(void);
-
-// Блокирующая задержка в миллисекундах
 void k_sleep(uint32_t ms);
 
 #endif
