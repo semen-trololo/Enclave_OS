@@ -126,6 +126,24 @@ vfs_node_t* vfs_generic_finddir(vfs_node_t* node, const char* name);
 int32_t vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
 int32_t vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const uint8_t* buffer);
 
+// В секцию "API ЯДРА (Внутренние функции, Ring 0)" добавить:
+
+// ============================================================================
+// INTERNAL KERNEL API — FD CLOSE FOR ANY TASK
+// ============================================================================
+// Закрывает fd для ЛЮБОЙ задачи (не только current_task).
+// Используется:
+//   - task_exit()           → vfs_close_fd(current_task, i)
+//   - task_kill_current()   → vfs_close_fd(current_task, i)
+//   - task_cleanup_children → vfs_close_fd(child, i)
+//   - sys_close()           → vfs_close_fd(current_task, fd)
+//
+// IRQ-safe. Orphan semantics. Refcount-safe.
+// НЕ является syscall. Не проверяет is_user_pointer.
+// ============================================================================
+struct task;  // forward declaration (task.h не включаем — избегаем цикла)
+int vfs_close_fd(struct task* task, int fd);
+
 // ==========================================
 // API СИСТЕМНЫХ ВЫЗОВОВ (Граница Ring 3 -> Ring 0)
 // ==========================================
