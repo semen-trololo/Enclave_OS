@@ -1,7 +1,6 @@
 #include "isr.h"
 #include "klib.h"
 #include "serial.h"
-#include "vga.h"
 
 // Объявляем 32 ассемблерные заглушки для CPU-исключений (ISR 0-31)
 extern void isr0();   extern void isr1();   extern void isr2();
@@ -59,7 +58,7 @@ static void exception_handler(struct regs* r) {
     serial_printf(" EFLAGS: 0x%x\n", r->eflags);
     
     // 2. Дамп на экран
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_RED);
+    k_set_color(COLOR_WHITE, COLOR_RED);
     k_printf("\n KERNEL PANIC: %s \n", exception_messages[r->int_no]);
     k_printf(" EIP: 0x%x | ERR: 0x%x \n", r->eip, r->err_code);
     
