@@ -325,15 +325,60 @@ void uitoa(unsigned int value, char* buf, int base) {
 
 int atoi(const char* str) {
     if (!str) return 0;
-    int result = 0, sign = 1;
+
     while (*str == ' ') str++;
-    if (*str == '-') { sign = -1; str++; }
-    else if (*str == '+') str++;
-    while (*str >= '0' && *str <= '9') {
-        result = result * 10 + (*str - '0');
+
+    int negative = 0;
+
+    if (*str == '-') {
+        negative = 1;
+        str++;
+    } else if (*str == '+') {
         str++;
     }
-    return result * sign;
+
+    // ========================================================================
+    // UL1/KL1 HARDENING: SAFE ATOI
+    // ========================================================================
+    // Старая версия делала:
+    //   result = result * 10 + digit;
+    //   return result * sign;
+    //
+    // Для "-2147483648" положительный промежуточный результат 2147483648
+    // не помещается в int, что вызывает signed overflow UB.
+    //
+    // Теперь накапливаем magnitude в unsigned int.
+    // ========================================================================
+    unsigned int uresult = 0;
+
+    while (*str >= '0' && *str <= '9') {
+        unsigned int digit = (unsigned int)(*str - '0');
+
+        if (uresult > (0xFFFFFFFFu - digit) / 10) {
+            uresult = 0xFFFFFFFFu;
+        } else {
+            uresult = uresult * 10u + digit;
+        }
+
+        str++;
+    }
+
+    if (negative) {
+        //
+        // 2147483648 соответствует INT_MIN.
+        //
+        if (uresult <= 0x80000000u) {
+            return (int)(0u - uresult);
+        }
+
+        return (int)0x80000000; // INT_MIN
+    } else {
+        if (uresult <= 0x7FFFFFFFu) {
+            return (int)uresult;
+        }
+
+        return (int)0x7FFFFFFF; // INT_MAX
+    }
 }
 
 unsigned long strtoul(const char* str, char** endptr, int base) {
@@ -366,11 +411,61 @@ unsigned long strtoul(const char* str, char** endptr, int base) {
 
 long strtol(const char* str, char** endptr, int base) {
     while (*str == ' ') str++;
+
     int negative = 0;
-    if (*str == '-') { negative = 1; str++; }
-    else if (*str == '+') str++;
+
+    if (*str == '-') {
+        negative = 1;
+        str++;
+    } else if (*str == '+') {
+        str++;
+    }
+
     unsigned long val = strtoul(str, endptr, base);
-    return negative ? -(long)val : (long)val;
+
+    // ========================================================================
+    // UL1/KL1 HARDENING: SAFE STRTOL
+    // ========================================================================
+    // Старая версия делала:
+    //   return negative ? -(long)val : (long)val;
+    //
+    // Для 32-битного long:
+    //   val == 2147483648UL
+    //   (long)val implementation-defined
+    //   -(long)val может быть UB, если (long)val == LONG_MIN
+    //
+    // Теперь используем unsigned negation и saturating clamp.
+    //
+    // Для 32-битной системы:
+    //   LONG_MAX =  2147483647
+    //   LONG_MIN = -2147483648
+    //
+    // Поведение при overflow:
+    //   positive overflow -> LONG_MAX
+    //   negative overflow -> LONG_MIN
+    // ========================================================================
+
+    if (negative) {
+        //
+        // Максимальный magnitude для LONG_MIN:
+        //   2147483648
+        //
+        if (val <= 0x80000000UL) {
+            return (long)(0UL - val);
+        }
+
+        return (long)0x80000000; // LONG_MIN
+    } else {
+        //
+        // Максимальный magnitude для LONG_MAX:
+        //   2147483647
+        //
+        if (val <= 0x7FFFFFFFUL) {
+            return (long)val;
+        }
+
+        return (long)0x7FFFFFFF; // LONG_MAX
+    }
 }
 
 // ============================================================================
