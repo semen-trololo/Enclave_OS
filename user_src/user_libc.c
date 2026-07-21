@@ -618,13 +618,29 @@ int unlink(const char* pathname) {
 static void put_int(char** buf, char* end, int value, int base, int width, int pad_zero, int is_signed) {
     char tmp[33];
     int len = 0;
-    
+    int negative = 0;
+    unsigned int uval;
+
+    // ========================================================================
+    // UL1/KL1 FIX: INT_MIN SAFE NEGATION
+    // ========================================================================
+    // Нельзя делать:
+    //   value = -value;
+    //
+    // Если value == INT_MIN, то -value вызывает signed integer overflow UB.
+    //
+    // Правильно:
+    //   uval = 0u - (unsigned int)value;
+    //
+    // Это детерминированная беззнаковая операция по модулю 2^32.
+    // ========================================================================
     if (is_signed && value < 0) {
-        if (*buf < end) *(*buf)++ = '-';
-        value = -value;
+        negative = 1;
+        uval = 0u - (unsigned int)value;
+    } else {
+        uval = (unsigned int)value;
     }
-    
-    unsigned int uval = (unsigned int)value;
+
     if (uval == 0) {
         tmp[len++] = '0';
     } else {
@@ -634,11 +650,22 @@ static void put_int(char** buf, char* end, int value, int base, int width, int p
             uval /= base;
         }
     }
-    
+
     int pad = width - len;
     char pad_char = pad_zero ? '0' : ' ';
+
+    //
+    // NOTE:
+    // Здесь сохранено исходное поведение форматтера:
+    // знак выводится до padding.
+    //
+    // Это не полностью стандартное поведение printf для width/pad_zero,
+    // но оно совместимо с текущей реализацией vsnprintf().
+    //
+    if (negative && *buf < end) *(*buf)++ = '-';
+
     while (pad-- > 0 && *buf < end) *(*buf)++ = pad_char;
-    
+
     while (len > 0 && *buf < end) *(*buf)++ = tmp[--len];
 }
 
