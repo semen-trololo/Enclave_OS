@@ -381,10 +381,10 @@ static void test_syscall_invalid(void) {
 static void test_time_monotonicity(void) {
     timeval_t tv1, tv2;
     gettimeofday(&tv1, NULL);
-    for (volatile int i = 0; i < 1000000; i++);
+    usleep(10000);  /* 10 ms */
     gettimeofday(&tv2, NULL);
     if (tv2.tv_sec < tv1.tv_sec) exit(1);
-    if (tv2.tv_sec == tv1.tv_sec && tv2.tv_usec < tv1.tv_usec) exit(2);
+    if (tv2.tv_sec == tv1.tv_sec && tv2.tv_usec <= tv1.tv_usec) exit(2);
     exit(0);
 }
 
@@ -679,6 +679,381 @@ static void test_unlink_open_file(void) {
 }
 
 /* ========================================================================
+ * TESTS 33-52: SYSTEM CONTRACT VERIFICATION (Day 30)
+ * ======================================================================== */
+
+/* Test 33: Syscall ENOSYS (invalid syscall number) */
+static void test_syscall_enosys(void) {
+    int ret;
+    __asm__ volatile(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(9999)
+        : "memory"
+    );
+    if (ret != -ENOSYS) exit(1);
+    exit(0);
+}
+
+/* Test 34: Syscall EBADF (invalid file descriptors) */
+static void test_syscall_ebadf(void) {
+    char buf[10];
+
+    if (read(-1, buf, 10) != -1) exit(1);
+    if (write(-1, "x", 1) != -1) exit(2);
+    if (close(-1) != -1) exit(3);
+    if (close(999) != -1) exit(4);
+    if (lseek(-1, 0, SEEK_SET) != -1) exit(5);
+
+    exit(0);
+}
+
+/* Test 35: Syscall ENOENT (open nonexistent file) */
+static void test_syscall_enoent(void) {
+    int fd = open("/nonexistent_file_35.bin", O_RDONLY);
+    if (fd >= 0) { close(fd); exit(1); }
+    exit(0);
+}
+
+/* Test 36: Syscall EACCES (RBAC /boot protection) */
+static void test_syscall_eacces_rbac(void) {
+    int fd = open("/boot/kernel.bin", O_RDONLY);
+    if (fd >= 0) { close(fd); exit(1); }
+    exit(0);
+}
+
+/* Test 37: Syscall EFAULT (NULL pointer) */
+static void test_syscall_efault_null(void) {
+    if (write(1, NULL, 10) != -1) exit(1);
+    if (read(0, NULL, 10) != -1) exit(2);
+    exit(0);
+}
+
+/* Test 38: Syscall EFAULT (kernel pointer) */
+static void test_syscall_efault_kernel(void) {
+    if (write(1, (void*)0xC0000000, 10) != -1) exit(1);
+    if (read(0, (void*)0xC0000000, 10) != -1) exit(2);
+    exit(0);
+}
+
+/* Test 39: VFS dup/dup2 */
+static void test_vfs_dup_dup2(void) {
+    int fd = open("/tmp/dup39.bin", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+
+    int fd2 = dup(fd);
+    if (fd2 < 0 || fd2 == fd) exit(2);
+    write(fd2, "HELLO", 5);
+    close(fd2);
+    close(fd);
+
+    fd = open("/tmp/dup39.bin", O_RDONLY);
+    if (fd < 0) exit(3);
+    char buf[10];
+    int n = read(fd, buf, 10);
+    close(fd);
+    if (n != 5 || buf[0] != 'H' || buf[4] != 'O') exit(4);
+
+    fd = open("/tmp/dup39.bin", O_WRONLY|O_TRUNC);
+    if (fd < 0) exit(5);
+    if (dup2(fd, 42) != 42) exit(6);
+    write(42, "WORLD", 5);
+    close(42);
+    close(fd);
+
+    fd = open("/tmp/dup39.bin", O_RDONLY);
+    if (fd < 0) exit(7);
+    n = read(fd, buf, 10);
+    close(fd);
+    if (n != 5 || buf[0] != 'W') exit(8);
+
+    unlink("/tmp/dup39.bin");
+    exit(0);
+}
+
+/* Test 40: VFS fstat (size + type) */
+static void test_vfs_fstat_size(void) {
+    int fd = open("/tmp/fstat40.bin", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+    write(fd, "12345678", 8);
+    close(fd);
+
+    fd = open("/tmp/fstat40.bin", O_RDONLY);
+    if (fd < 0) exit(2);
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) exit(3);
+    close(fd);
+    unlink("/tmp/fstat40.bin");
+
+    if (st.st_size != 8) exit(4);
+    if (!(st.st_mode & S_IFREG)) exit(5);
+    exit(0);
+}
+
+/* Test 41: VFS readdir (index-based) */
+typedef struct {
+    uint32_t ino;
+    uint32_t type;
+    char     name[256];
+} test_dirent_t;
+
+static inline int32_t test_readdir(int fd, uint32_t index, test_dirent_t* entry) {
+    int32_t ret;
+    __asm__ volatile(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(141), "b"(fd), "c"(index), "d"(entry)
+        : "memory"
+    );
+    return ret;
+}
+
+static void test_vfs_readdir_list(void) {
+    int fd = open("/tmp/rd41_a.txt", O_CREAT|O_WRONLY, 0644);
+    if (fd < 0) exit(1);
+    write(fd, "a", 1); close(fd);
+
+    fd = open("/tmp/rd41_b.txt", O_CREAT|O_WRONLY, 0644);
+    if (fd < 0) exit(2);
+    write(fd, "b", 1); close(fd);
+
+    int dir_fd = open("/tmp", O_RDONLY);
+    if (dir_fd < 0) exit(3);
+
+    int found_a = 0, found_b = 0;
+    test_dirent_t entry;
+    for (uint32_t i = 0; ; i++) {
+        if (test_readdir(dir_fd, i, &entry) != 0) break;
+        if (strcmp(entry.name, "rd41_a.txt") == 0) found_a = 1;
+        if (strcmp(entry.name, "rd41_b.txt") == 0) found_b = 1;
+    }
+    close(dir_fd);
+
+    unlink("/tmp/rd41_a.txt");
+    unlink("/tmp/rd41_b.txt");
+
+    if (!found_a || !found_b) exit(4);
+    exit(0);
+}
+
+/* Test 42: VFS lseek SEEK_CUR */
+static void test_vfs_lseek_cur(void) {
+    int fd = open("/tmp/ls42.bin", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+    write(fd, "ABCDEFGHIJ", 10);
+    close(fd);
+
+    fd = open("/tmp/ls42.bin", O_RDONLY);
+    if (fd < 0) exit(2);
+
+    lseek(fd, 2, SEEK_SET);
+    off_t pos = lseek(fd, 3, SEEK_CUR);
+    if (pos != 5) exit(3);
+
+    char c;
+    read(fd, &c, 1);
+    if (c != 'F') exit(4);
+
+    pos = lseek(fd, -2, SEEK_CUR);
+    if (pos != 4) exit(5);
+
+    read(fd, &c, 1);
+    if (c != 'E') exit(6);
+
+    close(fd);
+    unlink("/tmp/ls42.bin");
+    exit(0);
+}
+
+/* Test 43: Process waitpid WNOHANG */
+static void test_proc_waitpid_wnohang(void) {
+    pid_t pid = fork();
+    if (pid < 0) exit(1);
+
+    if (pid == 0) {
+        usleep(100000);
+        exit(42);
+    }
+
+    int status = 0;
+    int ret = waitpid(pid, &status, WNOHANG);
+    if (ret != 0) exit(2);
+
+    usleep(200000);
+    ret = waitpid(pid, &status, 0);
+    if (ret != pid) exit(3);
+    if (status != 42) exit(4);
+    exit(0);
+}
+
+/* Test 44: Process exec with argv (self-hosting compile + run) */
+static void test_proc_exec_argv(void) {
+    int fd = open("/tmp/argv44.c", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+    const char* src =
+        "int main(int argc, char** argv) {\n"
+        "  if (argc != 3) return 1;\n"
+        "  if (argv[1][0] != 'h') return 2;\n"
+        "  if (argv[2][0] != 'w') return 3;\n"
+        "  return 0;\n"
+        "}\n";
+    write(fd, src, strlen(src));
+    close(fd);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        const char* tcc_argv[] = { "tcc", "/tmp/argv44.c", "-o", "/tmp/argv44.elf", NULL };
+        exec("/bin/tcc.elf", tcc_argv);
+        exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (status != 0) { unlink("/tmp/argv44.c"); exit(5); }
+
+    pid = fork();
+    if (pid == 0) {
+        const char* run_argv[] = { "argv44", "hello", "world", NULL };
+        exec("/tmp/argv44.elf", run_argv);
+        exit(127);
+    }
+    waitpid(pid, &status, 0);
+
+    unlink("/tmp/argv44.c");
+    unlink("/tmp/argv44.elf");
+    exit(status == 0 ? 0 : 6);
+}
+
+/* Test 45: Process exec ENOENT (nonexistent ELF) */
+static void test_proc_exec_enoent(void) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        const char* argv[] = { "nonexistent", NULL };
+        int ret = exec("/nonexistent45.elf", argv);
+        exit(ret == -1 ? 0 : 1);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    exit(status == 0 ? 0 : 2);
+}
+
+/* Test 46: Process fork under IRQ preemption (T3/T4 contract) */
+static void test_proc_fork_preempt(void) {
+    for (int i = 0; i < 5; i++) {
+        for (volatile int j = 0; j < 100000; j++);
+
+        pid_t pid = fork();
+        if (pid < 0) exit(1);
+
+        if (pid == 0) {
+            volatile int x = 0;
+            for (int k = 0; k < 1000; k++) x += k;
+            exit(x > 0 ? 0 : 1);
+        }
+
+        int status;
+        waitpid(pid, &status, 0);
+        if (status != 0) exit(2);
+    }
+    exit(0);
+}
+
+/* Test 47: VMM W^X mprotect reject (SLA #6) */
+static void test_vmm_wx_mprotect_reject(void) {
+    char* page = (char*)mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                             MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) exit(1);
+
+    if (mprotect(page, 4096, PROT_WRITE|PROT_EXEC) != -1) exit(2);
+
+    void* wx = mmap(NULL, 4096, PROT_WRITE|PROT_EXEC,
+                    MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (wx != MAP_FAILED) exit(3);
+
+    munmap(page, 4096);
+    exit(0);
+}
+
+/* Test 48: VMM mmap invalid arguments */
+static void test_vmm_mmap_invalid(void) {
+    void* p = mmap(NULL, 0, PROT_READ|PROT_WRITE,
+                   MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) exit(1);
+
+    p = mmap(NULL, 0x40000001, PROT_READ|PROT_WRITE,
+             MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) exit(2);
+
+    exit(0);
+}
+
+/* Test 49: VMM munmap invalid */
+static void test_vmm_munmap_invalid(void) {
+    if (munmap((void*)0x40000000, 0) != -1) exit(1);
+    exit(0);
+}
+
+/* Test 50: libc printf edge cases (INT_MIN, NULL, hex) */
+static void test_libc_printf_edge(void) {
+    char buf[128];
+
+    snprintf(buf, sizeof(buf), "%d", INT_MIN);
+    if (strcmp(buf, "-2147483648") != 0) exit(1);
+
+    snprintf(buf, sizeof(buf), "%d", INT_MAX);
+    if (strcmp(buf, "2147483647") != 0) exit(2);
+
+    snprintf(buf, sizeof(buf), "%s", "");
+    if (strcmp(buf, "") != 0) exit(3);
+
+    snprintf(buf, sizeof(buf), "%s", (char*)NULL);
+    if (strcmp(buf, "(null)") != 0) exit(4);
+
+    snprintf(buf, sizeof(buf), "%d", 0);
+    if (strcmp(buf, "0") != 0) exit(5);
+
+    snprintf(buf, sizeof(buf), "%x", 0xDEADBEEF);
+    if (strcmp(buf, "deadbeef") != 0) exit(6);
+
+    exit(0);
+}
+
+/* Test 51: libc snprintf buffer safety */
+static void test_libc_snprintf_overflow(void) {
+    char buf[10];
+
+    int n = snprintf(buf, sizeof(buf), "Hello, World! This is long.");
+    if (n < 0) exit(1);
+    if (strlen(buf) != 9) exit(2);
+    if (buf[9] != '\0') exit(3);
+
+    n = snprintf(NULL, 0, "test");
+    if (n != 0) exit(4);
+
+    buf[0] = 'X';
+    snprintf(buf, 1, "test");
+    if (buf[0] != '\0') exit(5);
+
+    exit(0);
+}
+
+/* Test 52: System uname + sysinfo identity */
+static void test_sys_uname_sysinfo(void) {
+    utsname_t uts;
+    if (uname(&uts) != 0) exit(1);
+    if (uts.sysname[0] == '\0') exit(2);
+    if (strcmp(uts.machine, "i686") != 0) exit(3);
+
+    sysinfo_t info;
+    if (sysinfo(&info) != 0) exit(4);
+    if (info.totalram == 0) exit(5);
+    if (info.freeram > info.totalram) exit(6);
+    if (info.procs == 0) exit(7);
+
+    exit(0);
+}
+
+/* ========================================================================
  * REGISTRY & DISPATCHER
  * ======================================================================== */
 
@@ -691,37 +1066,66 @@ typedef struct {
 #define ENTRY(n, d) { #n, TEST_NAME(n), d }
 
 static test_entry_t tests[] = {
+    /* === VMM (6) === */
     ENTRY(vmm_demand_paging, 0),
     ENTRY(vmm_cow_isolation, 0),
     ENTRY(vmm_wx_enforcement, 1),
     ENTRY(vmm_oom_probe, 0),
     ENTRY(vmm_mprotect_flip, 0),
     ENTRY(vmm_mprotect_sigsegv, 1),
+    /* === FPU (5) === */
     ENTRY(fpu_x87_math, 0),
     ENTRY(fpu_fork_preserve, 0),
+    ENTRY(fpu_context_switch, 0),
+    ENTRY(fpu_precision, 0),
+    ENTRY(fpu_syscall_safety, 0),
+    /* === PROCESS (4) === */
     ENTRY(proc_fork_bomb, 0),
     ENTRY(proc_zombie_cascade, 0),
+    ENTRY(proc_waitpid_wnohang, 0),
+    ENTRY(proc_fork_preempt, 0),
+    /* === VFS (9) === */
     ENTRY(vfs_1000_files, 0),
     ENTRY(vfs_large_file, 0),
     ENTRY(vfs_sparse_seek, 0),
     ENTRY(vfs_o_trunc, 0),
     ENTRY(vfs_concurrent_fd, 0),
+    ENTRY(vfs_dup_dup2, 0),
+    ENTRY(vfs_fstat_size, 0),
+    ENTRY(vfs_readdir_list, 0),
+    ENTRY(vfs_lseek_cur, 0),
+    /* === C LANGUAGE (6) === */
     ENTRY(c_packed_bitfields, 0),
     ENTRY(c_union_punning, 0),
     ENTRY(c_variadic_custom, 0),
     ENTRY(c_function_dispatch, 0),
     ENTRY(c_preprocessor_magic, 0),
     ENTRY(c_inline_asm, 0),
+    /* === SYSCALL VALIDATION (8) === */
     ENTRY(syscall_invalid, 0),
+    ENTRY(syscall_enosys, 0),
+    ENTRY(syscall_ebadf, 0),
+    ENTRY(syscall_enoent, 0),
+    ENTRY(syscall_eacces_rbac, 0),
+    ENTRY(syscall_efault_null, 0),
+    ENTRY(syscall_efault_kernel, 0),
     ENTRY(time_monotonicity, 0),
+    /* === EXEC (2) === */
+    ENTRY(proc_exec_argv, 0),
+    ENTRY(proc_exec_enoent, 0),
+    /* === MEMORY EDGE (3) === */
+    ENTRY(vmm_wx_mprotect_reject, 0),
+    ENTRY(vmm_mmap_invalid, 0),
+    ENTRY(vmm_munmap_invalid, 0),
+    /* === LIBC (2) === */
+    ENTRY(libc_printf_edge, 0),
+    ENTRY(libc_snprintf_overflow, 0),
+    /* === SYSTEM (2) === */
+    ENTRY(sys_uname_sysinfo, 0),
     ENTRY(ansi_colors, 0),
-    /* FPU Torture (x87 via C double — TinyCC compatible) */
-    ENTRY(fpu_context_switch, 0),
-    ENTRY(fpu_precision, 0),
-    ENTRY(fpu_syscall_safety, 0),
-    /* === DAY 27.5: PRODUCTION HARDENING (P0) === */
+    /* === PRODUCTION HARDENING (5) === */
     ENTRY(heap_exhaustion, 0),
-    ENTRY(stack_overflow_guard, 1), /* expects SIGSEGV */
+    ENTRY(stack_overflow_guard, 1),
     ENTRY(fd_exhaustion, 0),
     ENTRY(directory_ops, 0),
     ENTRY(unlink_open_file, 0),
@@ -736,9 +1140,10 @@ static int run_test(test_entry_t* t) {
     }
     int status = 0;
     waitpid(pid, &status, 0);
-    
+
     if (t->expect_death) {
-        return (status != 0) ? 0 : -1;
+        /* -1 = task_kill_current (SIGSEGV, OOM, guard page) */
+        return (status == -1) ? 0 : -1;
     } else {
         return (status == 0) ? 0 : -1;
     }
