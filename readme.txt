@@ -946,11 +946,9 @@ waitpid(pid, &status, 0);
 
 1. **Исправить `__isoc23_strtoll`** — должен вызывать `strtoll`, а не `strtoul`.
 
-2. **Добавить `sys_mkdir`** (номер 39 в Linux i386) и переписать `handle_mkdir()` в Shell — текущая реализация создаёт файл.
+2. **Рассмотреть `CONFIG_TCC_MMAP 1`** — при наличии `sys_mmap` это снизит давление на bump allocator и позволит освобождать память через `munmap`.
 
-3. **Рассмотреть `CONFIG_TCC_MMAP 1`** — при наличии `sys_mmap` это снизит давление на bump allocator и позволит освобождать память через `munmap`.
-
-4. **Защитить `libtcc1.o` от race** — добавить `.NOTPARALLEL` или уникальное имя для объекта в INITRD таргете.
+3. **Защитить `libtcc1.o` от race** — добавить `.NOTPARALLEL` или уникальное имя для объекта в INITRD таргете.
 
 ## 9. ГАРАНТИИ СИСТЕМЫ (SLA)
 
@@ -1038,8 +1036,8 @@ USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_tas
 `S_IFDIR` → FS_DIRECTORY с readdir/finddir/create/unlink callbacks.
 Shell переписан на POSIX `mkdir()`. RBAC: `FS_SYSTEM` на родителе → EACCES.
 ENOTEMPTY: `tmpfs_unlink` отвергает удаление непустых директорий. |
-| 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 HIGH |
-| 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH / 🛠 CODE PATCHED — NOT TESTED |
+| 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 FIXED Notest |
+| 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 Fixed / 🛠 CODE PATCHED — NOT TESTED |
  T3/T4: добавлены `irq_save()/irq_restore()` в `include/isr.h`; FD inheritance в `task_fork()` переведён на IRQ-safe критическую секцию; open-coded `pushf/popf` паттерны в `task.c` заменены на `irq_save()/irq_restore()`.
 
 timer.h:   + typedef timer_tick_callback_t
