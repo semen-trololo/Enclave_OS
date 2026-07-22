@@ -21,6 +21,15 @@
 #define FS_MOUNTPOINT  0x40
 #define FS_SYSTEM      0x80
 
+/* POSIX file mode bits (SSOT для create callback: S_IFDIR vs S_IFREG) */
+#ifndef S_IFMT
+#define S_IFMT      0170000
+#define S_IFREG     0100000
+#define S_IFDIR     0040000
+#define S_IFCHR     0020000
+#define S_IFBLK     0060000
+#endif
+
 #define O_RDONLY   0x0000
 #define O_WRONLY   0x0001
 #define O_RDWR     0x0002
