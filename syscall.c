@@ -696,47 +696,75 @@ static int sys_munmap_handler(struct regs* r) {
 // ========================================================================
 // sys_mprotect: изменение прав доступа
 // ========================================================================
+// ============================================================================
+// [DAY 31] S1 FIX: sys_mprotect — VMA Splitting + CoW-safe PTE update
+// ============================================================================
+// S1 FIX:
+//   Раньше: curr->flags = vma_flags для ВСЕЙ VMA (частичное обновление).
+//   Теперь: vma_protect_range() разделяет VMA при частичном покрытии.
+//           Флаги меняются только для запрошенного диапазона [addr, addr+len).
+//
+// CoW SAFETY:
+//   vmm_protect_page_in_pd() сохраняет PAGE_COW.
+//   Если страница CoW — PAGE_WRITE принудительно снимается.
+//
+// POSIX COMPLIANCE:
+//   - W^X: PROT_WRITE|PROT_EXEC → -EPERM (SLA #6)
+//   - Bounds: диапазон должен быть в User Space
+//   - Coverage: диапазон должен пересекать хотя бы одну VMA (-ENOMEM)
+// ============================================================================
 static int sys_mprotect_handler(struct regs* r) {
     uint32_t addr = r->ebx;
-    uint32_t len = r->ecx;
+    uint32_t len  = r->ecx;
     uint32_t prot = r->edx;
 
     if (len == 0) return -EINVAL;
-    if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) return -EPERM;
 
-    uint32_t aligned_addr = addr & ~0xFFF;
-    uint32_t aligned_len = (len + 0xFFF) & ~0xFFF;
-    uint32_t end = aligned_addr + aligned_len;
-
-    vma_node_t* curr = current_task->vma_head;
-    while (curr) {
-        if (curr->end <= aligned_addr || curr->start >= end) {
-            curr = curr->next;
-            continue;
-        }
-        
-        uint32_t vma_flags = 0;
-        if (prot & PROT_READ)  vma_flags |= VMA_READ;
-        if (prot & PROT_WRITE) vma_flags |= VMA_WRITE;
-        if (prot & PROT_EXEC)  vma_flags |= VMA_EXEC;
-        curr->flags = vma_flags;
-        
-        uint32_t p_start = (curr->start > aligned_addr) ? curr->start : aligned_addr;
-        uint32_t p_end = (curr->end < end) ? curr->end : end;
-        
-        uint32_t pte_flags = PAGE_PRESENT | PAGE_USER;
-        if (vma_flags & VMA_WRITE) pte_flags |= PAGE_WRITE;
-        
-        for (uint32_t p = p_start; p < p_end; p += 0x1000) {
-            vmm_protect_page_in_pd(current_task->pdir_virt, p, pte_flags);
-        }
-        
-        curr = curr->next;
+    /* W^X Enforcement (SLA #6) */
+    if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) {
+        serial_printf("[SYSCALL] sys_mprotect: W^X violation (PID %d)\n",
+                      current_task->pid);
+        return -EPERM;
     }
 
+    uint32_t aligned_addr = addr & ~0xFFF;
+    uint32_t aligned_len  = (len + 0xFFF) & ~0xFFF;
+    uint32_t end          = aligned_addr + aligned_len;
+
+    /* Zero Trust: диапазон должен быть в User Space */
+    if (aligned_addr >= KERNEL_SPACE_START || end > USER_SPACE_END + 1) {
+        return -EINVAL;
+    }
+
+    /* POSIX: диапазон должен пересекать хотя бы одну VMA */
+    if (!vma_intersects(current_task, aligned_addr, end, NULL)) {
+        return -ENOMEM;
+    }
+
+    /* Конвертация prot → VMA flags */
+    uint32_t vma_flags = 0;
+    if (prot & PROT_READ)  vma_flags |= VMA_READ;
+    if (prot & PROT_WRITE) vma_flags |= VMA_WRITE;
+    if (prot & PROT_EXEC)  vma_flags |= VMA_EXEC;
+
+    /* 1. Обновляем VMA с автоматическим Split (сохраняет VMA_COW) */
+    int ret = vma_protect_range(current_task, aligned_addr, end, vma_flags);
+    if (ret < 0) return ret;
+
+    /* 2. Обновляем PTE (только present страницы;
+     *    demand paging использует VMA flags при выделении).
+     *    vmm_protect_page_in_pd сохраняет PAGE_COW + PWT/PCD/GLOBAL. */
+    uint32_t pte_flags = PAGE_PRESENT | PAGE_USER;
+    if (vma_flags & VMA_WRITE) pte_flags |= PAGE_WRITE;
+
+    for (uint32_t p = aligned_addr; p < end; p += 0x1000) {
+        vmm_protect_page_in_pd(current_task->pdir_virt, p, pte_flags);
+    }
+
+    serial_printf("[SYSCALL] sys_mprotect: 0x%x-0x%x prot=%d (PID %d)\n",
+                  aligned_addr, end, prot, current_task->pid);
     return 0;
 }
-
 // ============================================================================
 //  sys_fork: создание копии процесса (Copy-on-Write)
 // ============================================================================
