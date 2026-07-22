@@ -52,6 +52,12 @@ uint32_t vma_find_free_area(task_t* task, uint32_t size);
 // Возвращает 0 при успехе, -ENOMEM если не хватило памяти для Split VMA.
 int vma_unmap_range(task_t* task, uint32_t start, uint32_t end);
 
+// [DAY 31] S1 FIX: Изменение прав доступа для диапазона [start, end)
+// с автоматическим Split VMA при частичном покрытии.
+// Сохраняет VMA_COW при обновлении флагов.
+// Возвращает 0 при успехе, -ENOMEM при OOM (split node allocation).
+int vma_protect_range(task_t* task, uint32_t start, uint32_t end, uint32_t new_flags);
+
 // [ДЕНЬ 14] Клонирование списка VMA при fork().
 // Создает глубокую копию всех VMA-нод для ребенка.
 // Возвращает 0 при успехе, -ENOMEM при OOM.
