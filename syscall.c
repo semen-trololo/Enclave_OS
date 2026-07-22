@@ -815,10 +815,10 @@ static int sys_uname_handler(struct regs* r) {
     utsname_t kernel_buf;
     k_memset(&kernel_buf, 0, sizeof(utsname_t));
     
-    k_strncpy(kernel_buf.sysname, "Bare Metal OS", UTSNAME_LENGTH - 1);
+    k_strncpy(kernel_buf.sysname, "Enclave OS", UTSNAME_LENGTH - 1);
     k_strncpy(kernel_buf.nodename, "localhost", UTSNAME_LENGTH - 1);
-    k_strncpy(kernel_buf.release, "0.1-alpha", UTSNAME_LENGTH - 1);
-    k_strncpy(kernel_buf.version, "Day 15 Build", UTSNAME_LENGTH - 1);
+    k_strncpy(kernel_buf.release, "0.3-alpha", UTSNAME_LENGTH - 1);
+    k_strncpy(kernel_buf.version, "Day 30 Build", UTSNAME_LENGTH - 1);
     k_strncpy(kernel_buf.machine, "i686", UTSNAME_LENGTH - 1);
     
     k_memcpy(user_buf, &kernel_buf, sizeof(utsname_t));
@@ -862,11 +862,11 @@ static int sys_dup_handler(struct regs* r) {
     
     for (int i = 0; i < TASK_MAX_OPEN_FILES; i++) {
         if (current_task->fd_table[i] == 0) {
-            __asm__ volatile("cli");
+            irq_flags_t flags = irq_save();
             of->ref_count++;
             if (of->node) of->node->ref_count++;
             current_task->fd_table[i] = of;
-            __asm__ volatile("sti");
+            irq_restore(flags);
             return i;
         }
     }
@@ -894,11 +894,11 @@ static int sys_dup2_handler(struct regs* r) {
     vfs_close_fd(current_task, new_fd);
     }
     
-    __asm__ volatile("cli");
+    irq_flags_t flags = irq_save();
     of->ref_count++;
     if (of->node) of->node->ref_count++;
     current_task->fd_table[new_fd] = of;
-    __asm__ volatile("sti");
+    irq_restore(flags);
     
     return new_fd;
 }
