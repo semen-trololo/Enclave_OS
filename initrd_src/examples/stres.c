@@ -138,6 +138,54 @@ static void test_fpu_x87_math(void) {
     exit(0);
 }
 
+/* Test: VMM mprotect Partial VMA Split (S1 fix)
+ * 3 страницы: mprotect ТОЛЬКО среднюю → READ.
+ * Крайние остаются writable. Средняя readable.
+ * Доказывает: VMA splitting работает, PTE обновлены только для целевой страницы.
+ */
+static void test_vmm_mprotect_partial(void) {
+    char* base = (char*)mmap(NULL, 3 * 4096, PROT_READ|PROT_WRITE,
+                             MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) exit(1);
+
+    base[0]     = 'A';   /* page 0 */
+    base[4096]  = 'B';   /* page 1 */
+    base[8192]  = 'C';   /* page 2 */
+
+    /* mprotect только среднюю страницу → READ */
+    if (mprotect(base + 4096, 4096, PROT_READ) != 0) exit(2);
+
+    /* Крайние страницы остаются writable */
+    base[0]    = 'X';
+    base[8192] = 'Z';
+    if (base[0] != 'X') exit(3);
+    if (base[8192] != 'Z') exit(4);
+
+    /* Средняя страница readable */
+    if (base[4096] != 'B') exit(5);
+
+    munmap(base, 3 * 4096);
+    exit(0);
+}
+
+/* Test: VMM mprotect Partial SIGSEGV (child dies)
+ * mprotect среднюю страницу → READ, затем запись → SIGSEGV.
+ * Доказывает: VMA split + PTE update корректно запрещают запись.
+ */
+static void test_vmm_mprotect_partial_sigsegv(void) {
+    char* base = (char*)mmap(NULL, 3 * 4096, PROT_READ|PROT_WRITE,
+                             MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) exit(1);
+
+    base[4096] = 'B';
+    mprotect(base + 4096, 4096, PROT_READ);
+
+    /* Запись в защищённую страницу → SIGSEGV (task_kill_current) */
+    base[4096] = 'X';
+
+    exit(1);  /* Не должно дойти */
+}
+
 /* Test 7: FPU Fork Preservation */
 static void test_fpu_fork_preserve(void) {
     double val = 3.14159;
@@ -1098,6 +1146,8 @@ static test_entry_t tests[] = {
     ENTRY(vmm_oom_probe, 0),
     ENTRY(vmm_mprotect_flip, 0),
     ENTRY(vmm_mprotect_sigsegv, 1),
+    ENTRY(vmm_mprotect_partial, 0),
+    ENTRY(vmm_mprotect_partial_sigsegv, 1),
     /* === FPU (5) === */
     ENTRY(fpu_x87_math, 0),
     ENTRY(fpu_fork_preserve, 0),
@@ -1193,8 +1243,8 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
     
     printf("\n+--------------------------------------------------------------+\n");
-    printf("|      ENCLAVE OS - OMNI STRESS TEST (32 Tests)                |\n");
-    printf("+--------------------------------------------------------------+\n");
+    printf("|      ENCLAVE OS - OMNI STRESS TEST (54 Tests)                  |\n");
+    printf("+---------------------------------------------------------  -----+\n");
     printf("Compiler: TinyCC in Ring 3 (Self-Hosting)\n\n");
     
     int n = sizeof(tests) / sizeof(tests[0]);
