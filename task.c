@@ -689,8 +689,16 @@ void task_exit(int exit_code) {
     vma_destroy_all(current_task);
 
     if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
+        /* 🛡️ T5 FIX: Переключаем CR3 на boot_page_directory ПЕРЕД уничтожением PD.
+         * Иначе CR3 указывает на освобождённую физическую страницу,
+         * и timer IRQ между destroy и schedule() вызовет Triple Fault
+         * (нарушение SLA #1 — Бессмертное Ядро). */
+        uint32_t boot_cr3 = VIRT_TO_PHYS((uint32_t)boot_page_directory);
+        vmm_switch_pdir(boot_cr3);
+
         vmm_destroy_address_space(current_task->pdir_virt);
         current_task->pdir_virt = NULL;
+        current_task->cr3 = boot_cr3;
     }
 
     current_task->state = TASK_ZOMBIE;
@@ -827,8 +835,16 @@ void task_kill_current(const char* reason) {
     vma_destroy_all(current_task);
 
     if (current_task->pdir_virt && current_task->pdir_virt != boot_page_directory) {
+        /* 🛡️ T5 FIX: Переключаем CR3 на boot_page_directory ПЕРЕД уничтожением PD.
+         * Иначе CR3 указывает на освобождённую физическую страницу,
+         * и timer IRQ между destroy и schedule() вызовет Triple Fault
+         * (нарушение SLA #1 — Бессмертное Ядро). */
+        uint32_t boot_cr3 = VIRT_TO_PHYS((uint32_t)boot_page_directory);
+        vmm_switch_pdir(boot_cr3);
+
         vmm_destroy_address_space(current_task->pdir_virt);
         current_task->pdir_virt = NULL;
+        current_task->cr3 = boot_cr3;
     }
 
     current_task->state = TASK_ZOMBIE;
