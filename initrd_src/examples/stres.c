@@ -125,6 +125,27 @@ static void test_vmm_mprotect_flip(void) {
     exit(0);
 }
 
+/* Test: Process Rapid Fork/Exit Cycle (T5 regression)
+ * 20 циклов fork+exit. Если T5 не исправлен, timer IRQ в окне
+ * между vmm_destroy_address_space и schedule() вызовет Triple Fault.
+ */
+static void test_proc_rapid_fork_exit(void) {
+    for (int i = 0; i < 20; i++) {
+        pid_t pid = fork();
+        if (pid < 0) exit(1);
+        if (pid == 0) {
+            /* Ребёнок: минимальная работа и немедленный exit.
+             * Создаёт максимальное давление на vmm_destroy_address_space. */
+            volatile int x = i;
+            exit(x);
+        }
+        int status;
+        waitpid(pid, &status, 0);
+        if (status != i) exit(2);
+    }
+    exit(0);
+}
+
 /* Test 6: FPU Math */
 static void test_fpu_x87_math(void) {
     double a = 2.0, b = 3.0;
@@ -1148,6 +1169,7 @@ static test_entry_t tests[] = {
     ENTRY(vmm_mprotect_sigsegv, 1),
     ENTRY(vmm_mprotect_partial, 0),
     ENTRY(vmm_mprotect_partial_sigsegv, 1),
+    ENTRY(proc_rapid_fork_exit, 0),
     /* === FPU (5) === */
     ENTRY(fpu_x87_math, 0),
     ENTRY(fpu_fork_preserve, 0),
@@ -1243,7 +1265,7 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
     
     printf("\n+--------------------------------------------------------------+\n");
-    printf("|      ENCLAVE OS - OMNI STRESS TEST (54 Tests)                  |\n");
+    printf("|      ENCLAVE OS - OMNI STRESS TEST (55 Tests)                  |\n");
     printf("+---------------------------------------------------------  -----+\n");
     printf("Compiler: TinyCC in Ring 3 (Self-Hosting)\n\n");
     
