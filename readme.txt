@@ -1,8 +1,8 @@
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
-**Single Source of Truth (SSOT) | Версия: Alpha 0.3 (Day 29 — Self-Hosting Ready)**
-**Дата актуализации:** 20 июля 2026
-**Статус:** Production-Ready SLA достигнут по базовым гарантиям
+**Single Source of Truth (SSOT) | Версия: Alpha 0.4 (Day 31 — mkdir + 52 Tests)**
+**Дата актуализации:** 22 июля 2026
+**Статус:** Production-Ready SLA расширен (52 теста, sys_mkdir, RBAC, ENOTEMPTY)
 
 Enclave Doctrine: Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -407,6 +407,8 @@ project_root/
 | **Size Synchronization** | `node->size = new_size` после write |
 | **Atomic Commit** | kmalloc private_data до link в дерево |
 | **True Mountpoint** | `vfs_mount("/tmp", tmpfs_root)` |
+| **mkdir Support** | `tmpfs_create` с `S_IFDIR` → FS_DIRECTORY + callbacks (Day 31) |
+| **ENOTEMPTY Guard** | `tmpfs_unlink` отвергает удаление непустых директорий (Day 31) |
 
 #### `devfs.c` — Device File System
 
@@ -596,6 +598,7 @@ Write to CoW page:
 | 116 | `sys_sysinfo` | Статистика системы |
 | 7 | `sys_waitpid` | Ожидание ребёнка (WNOHANG) |
 | 45 | `sys_brk` | Управление кучей (VMA Collision Detection) |
+| 39 | `sys_mkdir` | Создание директории (Day 31, RBAC + ENOTEMPTY) |
 
 ### 7.2 Zero Trust Validation
 
@@ -664,6 +667,7 @@ typedef int                pid_t;
 | **system()** | fork + exec(/bin/cmd) + waitpid |
 | **mmap/munmap** | Обёртки над sys_mmap/sys_munmap |
 | **Day 29** | getline, strdup, strerror, perror, time, ioctl |
+| **Day 31** | mkdir, fstat — POSIX обёртки над sys_mkdir / sys_fstat |
 
 ### 8.3 `crt0.asm` — C Runtime Startup
 
@@ -708,7 +712,7 @@ _start:
 | `clear` | Очистка экрана (`\033[2J\033[H`) |
 | `ls [path]` | Список файлов (ANSI colors: dir=blue, ELF=green, .c=yellow) |
 | `cat <file>` | Вывод содержимого файла |
-| `mkdir <path>` | Создание директории |
+| `mkdir <path>` | Создание директории (sys_mkdir, Day 31) |
 | `rm <path>` | Удаление файла |
 | `run <elf> [args]` | Запуск ELF (fork + exec + waitpid) |
 | `compile <c> [out]` | Компиляция через TinyCC |
@@ -960,7 +964,7 @@ waitpid(pid, &status, 0);
 | 9 | **POSIX Compliance** | Orphan Nodes, FD inheritance, variadic open |
 | 10 | **Self-Hosting** | TinyCC компилирует программы внутри ОС |
 
-### Математически доказанные гарантии (Post Day 27)
+### Математически доказанные гарантии (Post Day 31)
 
 | Тест | Что доказано |
 |---|---|
@@ -973,6 +977,21 @@ waitpid(pid, &status, 0);
 | `stack_overflow_guard` | Guard Page убил процесс |
 | `fd_exhaustion` (256 FD) | fd_table лимит работает |
 | `unlink_open_file` | POSIX Orphan Semantics |
+| `directory_ops` | sys_mkdir + S_IFDIR + readdir + ENOTEMPTY (Day 31) |
+| `syscall_enosys` | Invalid syscall number → -ENOSYS, не crash |
+| `syscall_eacces_rbac` | FS_SYSTEM RBAC защищает /boot от Ring 3 |
+| `syscall_efault_null` | NULL pointer → -EFAULT |
+| `syscall_efault_kernel` | Kernel pointer (0xC0000000) → -EFAULT |
+| `vmm_wx_mprotect_reject` | mprotect(W\|X) → -EPERM (SLA #6) |
+| `vfs_dup_dup2` | FD duplication + irq_safe refcount |
+| `vfs_fstat_size` | Inode metadata: size, S_IFREG / S_IFDIR |
+| `vfs_readdir_list` | Index-based directory iteration |
+| `proc_exec_argv` | exec + Stack Forging argv + self-hosting compile |
+| `proc_exec_enoent` | exec nonexistent → -ENOENT, процесс жив |
+| `proc_waitpid_wnohang` | Non-blocking reap (WNOHANG) |
+| `libc_printf_edge` | INT_MIN, NULL string, hex — без UB |
+| `libc_snprintf_overflow` | Buffer truncation safety |
+| `sys_uname_sysinfo` | System identity + resource accounting |
 
 ---
 
@@ -989,7 +1008,10 @@ waitpid(pid, &status, 0);
 `vmm_cow_isolation`, `proc_fork_bomb`, `vmm_mprotect_sigsegv`, `vmm_demand_paging` — PASS.
 | 2 | UL2 | user_libc.c | 20+ функций не реализованы (fwrite, fseek, qsort, ...) | 🔴 FATAL |
 Не критичен на данном этапе.
-| 3 | T2 | task.c | sys_close() из Ring 0 |  CODE Day 31 | NO TES
+| 3 | T2 | task.c | sys_close() из Ring 0 | ✅ FIXED Day 31 |
+`vfs_close_fd(task, fd)` — internal kernel API для закрытия FD любой задачи.
+`task_exit()`, `task_kill_current()`, `task_cleanup_children_on_exit()`
+используют `vfs_close_fd()` вместо `sys_close()`. |
 | 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | ✅ FIXED |
 | 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | ✅ FIXED |
 | 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | 🔴 FATAL |
@@ -1001,7 +1023,11 @@ USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_tas
 Добавлен `task_cleanup_children_on_exit()` для безопасной зачистки детей PID 1. | Omni Stress Test: 31/32 passed. Единственный fail — `directory_ops`, не связан с T1.
 При принудительной зачистке детей PID 1 FD-таблица убитых процессов пока не закрывается безопасно, потому что `sys_close()` работает
 только для `current_task`. Это связано с багом T2 и будет исправлено отдельно.
-| 8 | SH1 | shell_user.c | `handle_mkdir` создаёт файл, а не директорию | 🔴 FATAL |
+| 8 | SH1 | shell_user.c | `handle_mkdir` создаёт файл, а не директорию | ✅ FIXED Day 31 |
+Добавлен `sys_mkdir` (syscall 39, Linux i386 ABI). `tmpfs_create` поддерживает
+`S_IFDIR` → FS_DIRECTORY с readdir/finddir/create/unlink callbacks.
+Shell переписан на POSIX `mkdir()`. RBAC: `FS_SYSTEM` на родителе → EACCES.
+ENOTEMPTY: `tmpfs_unlink` отвергает удаление непустых директорий. |
 | 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 HIGH |
 | 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 HIGH / 🛠 CODE PATCHED — NOT TESTED |
  T3/T4: добавлены `irq_save()/irq_restore()` в `include/isr.h`; FD inheritance в `task_fork()` переведён на IRQ-safe критическую секцию; open-coded `pushf/popf` паттерны в `task.c` заменены на `irq_save()/irq_restore()`.
@@ -1084,6 +1110,10 @@ isr.c:     - #include "vga.h"            ← DIP-5 CLOSED
 | Ring 0 CoW Write | Ring 0 может писать в user CoW только через
 | `vmm_handle_user_write_fault()`: VMA exists, VMA_WRITE, no W^X, refcount-safe, invlpg. Blanket Ring 0 write access запрещён. |
 | vfs_close_fd() | Internal kernel API для закрытия FD любой задачи. Ring 0 НЕ вызывает sys_close(). sys_close() — тонкая обёртка над vfs_close_fd(current_task, fd). |
+| **sys_mkdir RBAC** | `sys_mkdir_handler` проверяет `FS_SYSTEM` на родителе → EACCES для /boot. Ring 3 не может создавать файлы в защищённых директориях. |
+| **tmpfs S_IFDIR** | `tmpfs_create` с `mode & S_IFDIR` → FS_DIRECTORY + readdir/finddir/create/unlink/open/close callbacks. `private_data = NULL` для директорий. |
+| **ENOTEMPTY Guard** | `tmpfs_unlink` проверяет `FS_DIRECTORY && first_child != NULL` → -ENOTEMPTY. POSIX compliance для rmdir semantics. |
+| **waitpid Status Encoding** | `status == exit_code` (normal exit, 0..255); `status == -1` (killed by kernel: SIGSEGV, OOM, guard page). НЕ Linux-compatible (нет `<< 8`). |
 
 ---
 
