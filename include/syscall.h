@@ -123,22 +123,23 @@ typedef struct {
 #define SYS_TIME      13
 #define SYS_MKNOD     14
 #define SYS_CHMOD     15
-#define SYS_LSEEK     19   // ✅ [ДЕНЬ 13]
-#define SYS_FSTAT     28   // ✅ [ДЕНЬ 13]
+#define SYS_LSEEK     19   // 
+#define SYS_FSTAT     28   // 
 #define SYS_BRK       45
-#define SYS_IOCTL     54   // ✅ [ДЕНЬ 13]
+#define SYS_IOCTL     54   // 
 #define SYS_UNAME     164   
-#define SYS_GETTIMEOFDAY 78  // ✅ [ДЕНЬ 15]
+#define SYS_GETTIMEOFDAY 78  // 
 #define SYS_MMAP      90
 #define SYS_MUNMAP    91
-#define SYS_SYSINFO   116  // ✅ [ДЕНЬ 15]
-#define SYS_GETPID    122  // ✅ День 14
+#define SYS_SYSINFO   116  // 
+#define SYS_GETPID    122  // 
 #define SYS_MPROTECT  125
-#define SYS_READDIR   141  // ✅ [ДЕНЬ 24] SSOT
+#define SYS_READDIR   141  //  SSOT
 #define SYS_YIELD     158  // Custom: добровольный yield
-#define SYS_SLEEP     230  // ✅ [ДЕНЬ 15] Custom: sleep в миллисекундах
+#define SYS_SLEEP     230  //  Custom: sleep в миллисекундах
 #define SYS_DUP       41
 #define SYS_DUP2      63
+#define SYS_MKDIR     39   /* [DAY 31] Linux i386 ABI */
 
 // ========================================================================
 // Инициализация таблицы системных вызовов
