@@ -339,6 +339,7 @@ project_root/
 | **Deep Destroy** | `vmm_destroy_address_space()` освобождает PTE + PT + PD |
 | **Strict CoW Teardown** | `pmm_dec_ref()` → free только при refcount == 0 (Day 24) |
 | **PAGE_PS Check** | Защита от 4MB регионов |
+| **CoW-safe mprotect** | `vmm_protect_page_in_pd` сохраняет PAGE_COW + PWT/PCD/GLOBAL (Day 31, S1 fix) |
 
 **Paranoid Page Fault Handler (Zero Trust):**
 1. NULL Pointer Guard (< 0x1000 → SIGSEGV)
@@ -372,6 +373,7 @@ project_root/
 - `vma_find_free_area()` — поиск "дырок" для mmap
 - `vma_unmap_range()` — Split VMA при munmap
 - `vma_destroy_all()` — очистка (Reaper)
+- `vma_protect_range()` — Split VMA при mprotect (Day 31, S1 fix), сохраняет VMA_COW
 
 ### 5.3 Файловая система
 
@@ -409,6 +411,7 @@ project_root/
 | **True Mountpoint** | `vfs_mount("/tmp", tmpfs_root)` |
 | **mkdir Support** | `tmpfs_create` с `S_IFDIR` → FS_DIRECTORY + callbacks (Day 31) |
 | **ENOTEMPTY Guard** | `tmpfs_unlink` отвергает удаление непустых директорий (Day 31) |
+
 
 #### `devfs.c` — Device File System
 
@@ -969,6 +972,8 @@ waitpid(pid, &status, 0);
 | Тест | Что доказано |
 |---|---|
 | `vmm_mprotect_sigsegv` | W^X Enforcement работает |
+| `vmm_mprotect_partial` | S1 fix: VMA splitting при частичном mprotect |
+| `vmm_mprotect_partial_sigsegv` | S1 fix: SIGSEGV при записи в частично защищённую страницу |
 | `proc_fork_bomb` (25 fork'ов) | Scheduler production-ready |
 | `proc_zombie_cascade` (15 зомби) | Supervisor Trees работают |
 | `vfs_1000_files` | tmpfs stable под нагрузкой |
@@ -1014,7 +1019,12 @@ waitpid(pid, &status, 0);
 используют `vfs_close_fd()` вместо `sys_close()`. |
 | 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | ✅ FIXED |
 | 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | ✅ FIXED |
-| 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | 🔴 FATAL |
+| 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | ✅ FIXED No test |
+Добавлена `vma_protect_range()` — VMA splitting при частичном покрытии
+(5 случаев: skip / full / trim-head / trim-tail / split-3).
+`vmm_protect_page_in_pd()` сохраняет PAGE_COW + PWT/PCD/GLOBAL.
+`sys_mprotect_handler` проверяет `vma_intersects()` → -ENOMEM.
+W^X enforcement сохранён. VMA_COW сохраняется при mprotect. |
 | 7 | T1 | task.c | `respawn_init_task` — `temp_task` не инициализирована | ✅ FIXED Day 30 |
 respawn_init_task() полностью переписан. `temp_task` обнуляется через `k_memset()`.
 Stack VMA создаётся как `[USER_STACK_VIRT_TOP - USER_STACK_SIZE,
@@ -1114,6 +1124,8 @@ isr.c:     - #include "vga.h"            ← DIP-5 CLOSED
 | **tmpfs S_IFDIR** | `tmpfs_create` с `mode & S_IFDIR` → FS_DIRECTORY + readdir/finddir/create/unlink/open/close callbacks. `private_data = NULL` для директорий. |
 | **ENOTEMPTY Guard** | `tmpfs_unlink` проверяет `FS_DIRECTORY && first_child != NULL` → -ENOTEMPTY. POSIX compliance для rmdir semantics. |
 | **waitpid Status Encoding** | `status == exit_code` (normal exit, 0..255); `status == -1` (killed by kernel: SIGSEGV, OOM, guard page). НЕ Linux-compatible (нет `<< 8`). |
+| **VMA Splitting (mprotect)** | `vma_protect_range()` разделяет VMA при частичном покрытии (5 случаев). VMA_COW сохраняется. Паттерн идентичен `vma_unmap_range()`. |
+| **CoW-safe mprotect** | `vmm_protect_page_in_pd()` сохраняет PAGE_COW + PWT/PCD/GLOBAL. Если PAGE_COW активен — PAGE_WRITE принудительно снимается (аппаратная защита CoW). |
 
 ---
 
