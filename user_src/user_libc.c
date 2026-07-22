@@ -528,6 +528,12 @@ int dup2(int oldfd, int newfd) {
     return ret;
 }
 
+int fstat(int fd, struct stat* buf) {
+    int ret = sys_fstat(fd, buf);
+    if (ret < 0) { errno = -ret; return -1; }
+    return 0;
+}
+
 // ============================================================================
 // FILE* API С БУФЕРИЗАЦИЕЙ (4KB для ускорения TinyCC парсинга в 10-100x)
 // ============================================================================
