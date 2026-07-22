@@ -82,6 +82,14 @@ typedef unsigned int       time_t;
 #define LONG_MIN (-2147483647L - 1L)
 #define CHAR_BIT 8
 
+/* waitpid options */
+#define WNOHANG 1
+
+/* dirent file types (sync с user_syscalls.h) */
+#define DT_UNKNOWN  0
+#define DT_DIR      4
+#define DT_REG      8
+
 /* --------------------------------------------------------------------------
  * 5. Error Codes (POSIX errno)
  * -------------------------------------------------------------------------- */
