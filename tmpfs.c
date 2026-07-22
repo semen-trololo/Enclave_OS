@@ -130,32 +130,44 @@ static int tmpfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, const u
 static vfs_node_t* tmpfs_create(vfs_node_t* parent, const char* name, uint32_t mode) {
     vfs_node_t* new_node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
     if (!new_node) return NULL;
-    
+
     k_memset(new_node, 0, sizeof(vfs_node_t));
     k_strncpy(new_node->name, name, VFS_MAX_FILENAME - 1);
-    new_node->flags = FS_FILE;
-    new_node->permissions = mode & 07777; 
+    new_node->permissions = mode & 07777;
     new_node->parent = parent;
 
-    // 🛡️ CRITICAL FIX: Allocate private data BEFORE linking to VFS tree!
-    // Если здесь случится OOM, мы просто вернем NULL, и в дереве VFS не останется "призраков".
-    tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)kmalloc(sizeof(tmpfs_file_data_t));
-    if (!fdata) {
-        kfree(new_node);
-        return NULL;
+    if (mode & S_IFDIR) {
+        /* === DIRECTORY === */
+        new_node->flags        = FS_DIRECTORY;
+        new_node->private_data = NULL;
+        new_node->readdir      = vfs_generic_readdir;
+        new_node->finddir      = vfs_generic_finddir;
+        new_node->create       = tmpfs_create;
+        new_node->unlink       = tmpfs_unlink;
+        new_node->open         = tmpfs_open;   /* safe: private_data==NULL → no-op */
+        new_node->close        = tmpfs_close;  /* safe: private_data==NULL → no-op */
+    } else {
+        /* === FILE (existing behavior, unchanged) === */
+        new_node->flags = FS_FILE;
+
+        tmpfs_file_data_t* fdata = (tmpfs_file_data_t*)kmalloc(sizeof(tmpfs_file_data_t));
+        if (!fdata) {
+            kfree(new_node);
+            return NULL;
+        }
+
+        fdata->data     = NULL;
+        fdata->size     = 0;
+        fdata->capacity = 0;
+        new_node->private_data = fdata;
+
+        new_node->read  = tmpfs_read;
+        new_node->write = tmpfs_write;
+        new_node->open  = tmpfs_open;
+        new_node->close = tmpfs_close;
     }
-    
-    fdata->data = NULL;
-    fdata->size = 0;
-    fdata->capacity = 0;
-    new_node->private_data = fdata;
 
-    new_node->read = tmpfs_read;
-    new_node->write = tmpfs_write;
-    new_node->open = tmpfs_open;
-    new_node->close = tmpfs_close;
-
-    // 🛡️ ATOMIC COMMIT: Link to tree ONLY after all resources are secured
+    /* Atomic commit: link to tree ONLY after all resources secured */
     if (!parent->first_child) {
         parent->first_child = new_node;
     } else {
@@ -191,25 +203,25 @@ static int tmpfs_unlink(vfs_node_t* parent, const char* name) {
 
     while (curr) {
         if (k_strcmp(curr->name, name) == 0) {
-            // 1. Убираем из связного списка VFS
+            /* POSIX: нельзя удалить непустую директорию */
+            if ((curr->flags & FS_DIRECTORY) && curr->first_child) {
+                return -ENOTEMPTY;
+            }
+
             if (prev) prev->next_sibling = curr->next_sibling;
             else parent->first_child = curr->next_sibling;
-            
-            curr->parent = NULL;
+
+            curr->parent       = NULL;
             curr->next_sibling = NULL;
-            
-            // 2. Помечаем как удалённую (POSIX Orphan Semantics)
-            // Освобождение памяти — ответственность sys_unlink в vfs.c
-            // через tmpfs_close при последнем close() или сразу.
-            curr->is_unlinked = 1;
-            
+            curr->is_unlinked  = 1;
+
             return 0;
         }
         prev = curr;
         curr = curr->next_sibling;
     }
-    
-    return -2; // ENOENT
+
+    return -ENOENT;
 }
 
 // ============================================================================
