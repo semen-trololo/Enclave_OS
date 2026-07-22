@@ -167,12 +167,10 @@ static void handle_mkdir(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
         return;
     }
 
-    int fd = open(args[1], O_CREAT | O_RDONLY, 0755);
-    if (fd < 0) {
+    if (mkdir(args[1], 0755) != 0) {
         fprintf(stderr, ANSI_RED "mkdir: %s: %s" ANSI_RESET "\n", args[1], strerror(errno));
         return;
     }
-    close(fd);
     printf(ANSI_GREEN "Created directory: %s" ANSI_RESET "\n", args[1]);
 }
 
