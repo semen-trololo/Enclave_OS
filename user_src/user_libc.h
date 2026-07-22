@@ -409,6 +409,7 @@ int chdir(const char* path);
 char* realpath(const char* path, char* resolved_path);
 int dup(int oldfd);
 int dup2(int oldfd, int newfd);
+int fstat(int fd, struct stat* buf);
 // POSIX FUNCTIONS (Day 29 — Enano Text Editor Support)
 ssize_t getline(char** lineptr, size_t* n, FILE* stream);
 char* strdup(const char* s);
