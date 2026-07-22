@@ -513,6 +513,11 @@ off_t lseek(int fd, off_t offset, int whence) {
     return (off_t)ret;
 }
 
+int mkdir(const char* pathname, mode_t mode) {
+    int ret = sys_mkdir(pathname, (uint32_t)mode);
+    if (ret < 0) { errno = -ret; return -1; }
+    return 0;
+}
 // ============================================================================
 // POSIX DUP / DUP2 (Обертки над sys_dup / sys_dup2)
 // ============================================================================
