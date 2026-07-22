@@ -129,6 +129,116 @@ int vma_unmap_range(task_t* task, uint32_t start, uint32_t end) {
 }
 
 // ============================================================================
+// [DAY 31] S1 FIX: PROTECT RANGE (VMA Splitting для sys_mprotect)
+// ============================================================================
+// 5 случаев (аналогично vma_unmap_range):
+//   1. Нет пересечения         → skip
+//   2. Полное покрытие         → curr->flags = new_flags (с сохранением VMA_COW)
+//   3. Обрезание начала        → split: [start,end)=new, [end,curr->end)=old
+//   4. Обрезание конца         → split: [curr->start,start)=old, [start,end)=new
+//   5. Разделение (середина)   → split на 3: old | new | old
+//
+// VMA_COW сохраняется при любых изменениях флагов (mprotect не влияет
+// на CoW tracking — CoW маркер живёт в PTE как PAGE_COW).
+// ============================================================================
+int vma_protect_range(task_t* task, uint32_t start, uint32_t end, uint32_t new_flags) {
+    if (!task) return -EINVAL;
+
+    vma_node_t* curr = task->vma_head;
+
+    while (curr) {
+        /* 1. Нет пересечения */
+        if (curr->end <= start || curr->start >= end) {
+            curr = curr->next;
+            continue;
+        }
+
+        /* 2. Полное покрытие: VMA целиком внутри [start, end) */
+        if (curr->start >= start && curr->end <= end) {
+            curr->flags = (curr->flags & VMA_COW) | new_flags;
+            curr = curr->next;
+            continue;
+        }
+
+        /* 3. Обрезание начала: start <= curr->start && end < curr->end
+         *    → curr = [curr->start, end)  new_flags
+         *    → tail = [end, curr->end)    old_flags
+         */
+        if (start <= curr->start && end < curr->end) {
+            vma_node_t* tail = (vma_node_t*)kmalloc(sizeof(vma_node_t));
+            if (!tail) return -ENOMEM;
+
+            tail->start = end;
+            tail->end   = curr->end;
+            tail->flags = curr->flags;          /* old (с VMA_COW) */
+            tail->next  = curr->next;
+
+            curr->end   = end;
+            curr->flags = (curr->flags & VMA_COW) | new_flags;
+            curr->next  = tail;
+
+            curr = tail->next;
+            continue;
+        }
+
+        /* 4. Обрезание конца: start > curr->start && end >= curr->end
+         *    → curr = [curr->start, start)  old_flags
+         *    → tail = [start, curr->end)    new_flags
+         */
+        if (start > curr->start && end >= curr->end) {
+            vma_node_t* tail = (vma_node_t*)kmalloc(sizeof(vma_node_t));
+            if (!tail) return -ENOMEM;
+
+            tail->start = start;
+            tail->end   = curr->end;
+            tail->flags = (curr->flags & VMA_COW) | new_flags;
+            tail->next  = curr->next;
+
+            curr->end  = start;
+            /* curr->flags остаётся старым (с VMA_COW) */
+            curr->next = tail;
+
+            curr = tail->next;
+            continue;
+        }
+
+        /* 5. Разделение: start > curr->start && end < curr->end
+         *    → curr = [curr->start, start)  old_flags
+         *    → mid  = [start, end)          new_flags
+         *    → tail = [end, curr->end)      old_flags
+         */
+        if (start > curr->start && end < curr->end) {
+            vma_node_t* mid = (vma_node_t*)kmalloc(sizeof(vma_node_t));
+            if (!mid) return -ENOMEM;
+
+            vma_node_t* tail = (vma_node_t*)kmalloc(sizeof(vma_node_t));
+            if (!tail) { kfree(mid); return -ENOMEM; }
+
+            mid->start = start;
+            mid->end   = end;
+            mid->flags = (curr->flags & VMA_COW) | new_flags;
+            mid->next  = tail;
+
+            tail->start = end;
+            tail->end   = curr->end;
+            tail->flags = curr->flags;          /* old (с VMA_COW) */
+            tail->next  = curr->next;
+
+            curr->end  = start;
+            /* curr->flags остаётся старым (с VMA_COW) */
+            curr->next = mid;
+
+            curr = tail->next;
+            continue;
+        }
+
+        curr = curr->next;
+    }
+
+    return 0;
+}
+
+// ============================================================================
 // ДОБАВЛЕНИЕ VMA (Сортированный связный список)
 // ============================================================================
 int vma_add(task_t* task, uint32_t start, uint32_t end, uint32_t flags) {
