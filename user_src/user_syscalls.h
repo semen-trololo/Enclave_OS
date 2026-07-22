@@ -29,22 +29,23 @@
 #define SYS_WAITPID     7
 #define SYS_UNLINK     10
 #define SYS_EXEC       11
-#define SYS_LSEEK      19   // ✅ [ДЕНЬ 13] SSOT
-#define SYS_FSTAT      28   // ✅ [ДЕНЬ 13] SSOT
+#define SYS_LSEEK      19   // 
+#define SYS_FSTAT      28   // 
 #define SYS_BRK        45
-#define SYS_IOCTL      54   // ✅ [ДЕНЬ 13] SSOT
+#define SYS_IOCTL      54   // ✅ 
 #define SYS_UNAME      164
-#define SYS_GETTIMEOFDAY 78 // ✅ [ДЕНЬ 15] SSOT
+#define SYS_GETTIMEOFDAY 78 // ✅ 
 #define SYS_MMAP       90
 #define SYS_MUNMAP     91
-#define SYS_SYSINFO   116   // ✅ [ДЕНЬ 15] SSOT
+#define SYS_SYSINFO   116   // ✅ 
 #define SYS_GETPID    122   // 🛡️ FIX: Было 20 (x86_64), стало 122 (i386)
 #define SYS_MPROTECT  125
 #define SYS_YIELD     158
-#define SYS_SLEEP     230   // ✅ [ДЕНЬ 15] SSOT
+#define SYS_SLEEP     230   // 
 #define SYS_READDIR   141
 #define SYS_DUP       41
 #define SYS_DUP2      63
+#define SYS_MKDIR     39
 
 // ============================================================================
 // [ДЕНЬ 13] SEEK CONSTANTS (SSOT sync)
