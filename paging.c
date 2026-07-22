@@ -827,20 +827,47 @@ void vmm_unmap_and_free_page_in_pd(uint32_t* pd_virt, uint32_t virt) {
     }
 }
 
+// ============================================================================
+// [DAY 31] S1 FIX: PROTECT PAGE (сохранение PAGE_COW + аппаратных флагов)
+// ============================================================================
+// Изменяет флаги прав доступа в PTE без изменения физического адреса.
+//
+// CRITICAL:
+//   PAGE_COW сохраняется. Если страница помечена как CoW, PAGE_WRITE
+//   принудительно снимается (аппаратная защита: запись → CoW fault).
+//   Без этого mprotect на CoW-страницу уничтожит маркер, и два процесса
+//   будут писать в одну физическую страницу → data corruption.
+//
+//   PAGE_PWT / PAGE_PCD / PAGE_GLOBAL сохраняются (аппаратные атрибуты
+//   кэширования не зависят от mprotect). Критично для будущего HAL
+//   (user-space MMIO, Day 35+).
+// ============================================================================
 void vmm_protect_page_in_pd(uint32_t* pd_virt, uint32_t virt, uint32_t flags) {
-    uint32_t dir_index = virt >> 22;
+    uint32_t dir_index   = virt >> 22;
     uint32_t table_index = (virt >> 12) & 0x3FF;
 
     uint32_t pde = pd_virt[dir_index];
-    if (!(pde & PAGE_PRESENT)) return; 
+    if (!(pde & PAGE_PRESENT)) return;
 
     uint32_t pt_phys = pde & 0xFFFFF000;
     uint32_t* pt = (uint32_t*)PHYS_TO_VIRT(pt_phys);
 
     if (pt[table_index] & PAGE_PRESENT) {
-        uint32_t phys = pt[table_index] & 0xFFFFF000;
-        // Сохраняем физический адрес, меняем только флаги
-        pt[table_index] = phys | flags; 
+        uint32_t phys      = pt[table_index] & 0xFFFFF000;
+        uint32_t old_flags = pt[table_index] & 0xFFF;
+
+        /* Сохраняем OS-маркер CoW */
+        uint32_t cow_preserved = old_flags & PAGE_COW;
+
+        /* Сохраняем аппаратные атрибуты кэширования */
+        uint32_t hw_preserved = old_flags & (PAGE_PWT | PAGE_PCD | PAGE_GLOBAL);
+
+        /* Если CoW активен — WRITE должен быть снят (аппаратная защита) */
+        if (cow_preserved) {
+            flags &= ~PAGE_WRITE;
+        }
+
+        pt[table_index] = phys | flags | cow_preserved | hw_preserved;
         __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
     }
 }
