@@ -192,26 +192,11 @@ project_root/
 
 ---
 
-### 3.8 Syscall ABI and POSIX Compatibility Policy
-Enclave OS разделяет внутренний syscall ABI и публичный POSIX-like ABI.
-Kernel syscall ABI является внутренним ABI ядра. Он определяет номера системных вызовов, порядок передачи аргументов, механизм входа и коды ошибок, возвращаемые ядром. На x86 используется INT 0x80. Для будущих архитектур, например ARM, может использоваться SVC. Пространство номеров syscall при этом может оставаться общим и arch-neutral.
-Номера системных вызовов исторически частично повторяют Linux i386, но не гарантируют совместимость с Linux. Linux-номера рассматриваются только как справочные. Единственный публичный контракт для Ring 3 приложений — это POSIX-like API, предоставляемый user_libc и POSIX-заголовками.
-Приложения должны использовать libc API: open, read, write, fork, exec, waitpid, mmap, mkdir и другие функции. Приложения не должны зависеть от номеров syscall, raw syscall wrappers или внутренних kernel handlers.
-Для фиксации текущего состояния и предотвращения расхождений проводится аудит syscall table, user_syscalls.h, user_libc.c, tcc_lib_os.c и POSIX-заголовков. Результатом аудита является единый реестр системных вызовов, матрица POSIX-совместимости и решение о заморозке Enclave syscall ABI.
-
-Я бы сделал так:
-Не называть текущий ABI “Linux i386 ABI”.
-Назвать его “Enclave syscall ABI, Linux-inspired constants”.
-Провести аудит до начала POSIX P2 и ARM port.
-Во время аудита ничего не ломать.
-После аудита заморозить Enclave syscall ABI.
-Публичным контрактом считать user_libc POSIX-like API.
-Номера syscall считать внутренним делом ядра.
-Для ARM использовать тот же Enclave syscall number space, но другой entry mechanism.
-tcc_lib_os.c постепенно удалить как второй libc.
-Все Linux-номера держать только как справочную колонку.
-
-Целевой уровень совместимости — Enclave POSIX Lite Profile v1, профиль P2. Это практичный subset для C-программ, shell, TinyCC, простых утилит и crash-only сервисов: процессы, файлы, каталоги, файловые дескрипторы, базовая память, минимальный терминал и shell-механизмы уровня pipes и redirection.
+3.8 Syscall ABI and POSIX Compatibility Policy
+Enclave OS предоставляет POSIX-like C API для пользовательских программ в Ring 3. Целью является source-level совместимость с простыми POSIX/Linux C-приложениями, а не binary compatibility с Linux и не совместимость с Linux syscall ABI. Приложения используют стандартные C/POSIX функции и заголовки, а user_libc транслирует их во внутренние системные вызовы ядра Enclave. Номера системных вызовов, механизм входа и внутренние kernel handlers являются реализационной деталью и не входят в публичный контракт.
+Внутренний ABI ядра называется Enclave syscall ABI, Linux-inspired constants. Linux-номера и константы используются только как справочные и не гарантируют совместимость с Linux. Публичный контракт — это user_libc POSIX-like API, а не raw syscall wrappers.
+Целевой профиль совместимости — Enclave POSIX Lite P2: процессы, файлы, каталоги, файловые дескрипторы, базовая память, минимальный терминал, pipes и redirection. Полный POSIX, включая сигналы, сокеты, потоки, job control и dynamic linking, не является целью.
+Для предотвращения расхождений проводится аудит user_libc, syscall wrappers, tcc_lib_os.c и POSIX-заголовков. Аудит ничего не ломает, фиксирует текущее состояние, после чего Enclave syscall ABI замораживается. tcc_lib_os.c не должен оставаться вторым libc и постепенно консолидируется в user_libc.
 
 ## 4. КАРТА ПАМЯТИ
 
