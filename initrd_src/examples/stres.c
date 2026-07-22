@@ -615,33 +615,58 @@ static void test_fd_exhaustion(void) {
     exit(0);
 }
 
-/* Test 31: Directory Creation & Nested Paths
- * Проверяет, что VFS корректно обрабатывает вложенные пути и создание "директорий"
- * (в Enclave OS mkdir эмулируется через open с O_CREAT).
+/* Test: Directory Creation & Nested Paths (sys_mkdir, Day 31)
+ * mkdir → файл внутри → fstat(S_IFDIR) → readdir → ENOTEMPTY → unlink.
  */
 static void test_directory_ops(void) {
-    /* Создание "директории" (как делает shell_user.c) */
-    int dir_fd = open("/tmp/testdir_31", O_CREAT | O_RDONLY, 0755);
-    if (dir_fd < 0) exit(1);
-    close(dir_fd);
-    
-    /* Создание файла внутри */
-    int fd = open("/tmp/testdir_31/file.txt", O_CREAT|O_WRONLY, 0644);
+    /* mkdir через POSIX syscall */
+    if (mkdir("/tmp/testdir_51", 0755) != 0) exit(1);
+
+    /* Файл внутри директории */
+    int fd = open("/tmp/testdir_51/file.txt", O_CREAT|O_WRONLY, 0644);
     if (fd < 0) exit(2);
     write(fd, "nested", 6);
     close(fd);
-    
-    /* Чтение файла обратно */
-    fd = open("/tmp/testdir_31/file.txt", O_RDONLY);
+
+    /* Чтение обратно */
+    fd = open("/tmp/testdir_51/file.txt", O_RDONLY);
     if (fd < 0) exit(3);
     char buf[10];
     int n = read(fd, buf, sizeof(buf));
     close(fd);
     if (n != 6 || buf[0] != 'n') exit(4);
-    
-    /* Cleanup */
-    unlink("/tmp/testdir_31/file.txt");
-    unlink("/tmp/testdir_31");
+
+    /* fstat: S_IFDIR */
+    int dir_fd = open("/tmp/testdir_51", O_RDONLY);
+    if (dir_fd < 0) exit(5);
+    struct stat st;
+    if (fstat(dir_fd, &st) != 0) exit(6);
+    close(dir_fd);
+    if (!(st.st_mode & S_IFDIR)) exit(7);
+
+    /* readdir: file.txt виден */
+    dir_fd = open("/tmp/testdir_51", O_RDONLY);
+    if (dir_fd < 0) exit(8);
+    test_dirent_t entry;
+    int found = 0;
+    for (uint32_t i = 0; ; i++) {
+        if (test_readdir(dir_fd, i, &entry) != 0) break;
+        if (strcmp(entry.name, "file.txt") == 0) found = 1;
+    }
+    close(dir_fd);
+    if (!found) exit(9);
+
+    /* ENOTEMPTY: нельзя удалить непустую директорию */
+    if (unlink("/tmp/testdir_51") == 0) exit(10);
+
+    /* Cleanup: файл → директория */
+    unlink("/tmp/testdir_51/file.txt");
+    unlink("/tmp/testdir_51");
+
+    /* Директория удалена */
+    fd = open("/tmp/testdir_51", O_RDONLY);
+    if (fd >= 0) { close(fd); exit(11); }
+
     exit(0);
 }
 
