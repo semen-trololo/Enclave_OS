@@ -122,7 +122,7 @@ static int sys_exec_handler(struct regs* r) {
         }
     }
     
-    // 🛡️ [ДЕНЬ 16] Bounds Check: User Stack Underflow Protection
+    // 🛡️ Bounds Check: User Stack Underflow Protection
     uint32_t total_args_size = 0;
     for (int i = 0; i < argc; i++) {
         total_args_size += k_strlen(k_argv_buf[i]) + 1;
@@ -902,6 +902,66 @@ static int sys_dup2_handler(struct regs* r) {
     
     return new_fd;
 }
+
+/* ============================================================================
+ * sys_mkdir: создание директории (Day 31)
+ * ebx = user_path, ecx = mode
+ * ========================================================================== */
+static int sys_mkdir_handler(struct regs* r) {
+    const char* user_path = (const char*)r->ebx;
+    uint32_t mode         = (uint32_t)r->ecx;
+    char path_buf[256];
+
+    int ret = copy_string_from_user(path_buf, user_path, sizeof(path_buf));
+    if (ret < 0) return ret;
+
+    int len = k_strlen(path_buf);
+    if (len == 0 || len >= 256) return -EINVAL;
+
+    /* Находим последний '/' → разделяем parent / name */
+    int last_slash = -1;
+    for (int i = len - 1; i >= 0; i--) {
+        if (path_buf[i] == '/') { last_slash = i; break; }
+    }
+    if (last_slash < 0) return -EINVAL;
+
+    const char* name = path_buf + last_slash + 1;
+    if (name[0] == '\0') return -EINVAL;
+
+    /* Защита: name не должен содержать '/' */
+    for (int i = 0; name[i]; i++) {
+        if (name[i] == '/') return -EINVAL;
+    }
+
+    char parent_buf[256];
+    if (last_slash == 0) {
+        parent_buf[0] = '/';
+        parent_buf[1] = '\0';
+    } else {
+        k_memcpy(parent_buf, path_buf, last_slash);
+        parent_buf[last_slash] = '\0';
+    }
+
+    vfs_node_t* parent = vfs_findnode(parent_buf);
+    if (!parent) return -ENOENT;
+
+    if (!(parent->flags & FS_DIRECTORY)) return -ENOTDIR;
+
+    /* 🛡️ RBAC: Ring 3 не может создавать в FS_SYSTEM (/boot) */
+    if (parent->flags & FS_SYSTEM) return -EACCES;
+
+    if (!parent->create) return -EPERM;
+
+    /* EEXIST: имя не должно быть занято */
+    if (parent->finddir && parent->finddir(parent, name)) return -EEXIST;
+
+    vfs_node_t* new_dir = parent->create(parent, name, (mode & 07777) | S_IFDIR);
+    if (!new_dir) return -ENOMEM;
+
+    serial_printf("[SYSCALL] sys_mkdir: '%s/%s' (PID %d)\n",
+                  parent_buf, name, current_task->pid);
+    return 0;
+}
 // ========================================================================
 // ✅ Диспатчер системных вызовов
 // ========================================================================
@@ -953,6 +1013,7 @@ void syscall_init(void) {
     syscall_table[SYS_READDIR] = sys_readdir_handler;
     syscall_table[SYS_DUP]    = sys_dup_handler;
     syscall_table[SYS_DUP2]   = sys_dup2_handler;
+    syscall_table[SYS_MKDIR]  = sys_mkdir_handler;
     
     extern void isr128(); 
     idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE);
