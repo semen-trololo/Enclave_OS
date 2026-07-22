@@ -1069,12 +1069,17 @@ isr.c:     - #include "vga.h"            ← DIP-5 CLOSED
 
 | День | Задача | Статус |
 |---|---|---|
-| **30** | Исправление топ-10 критических багов | 📋 Planned |
-| **31** | `sys_mkdir` + полноценный mkdir в Shell | 📋 Planned |
-| **32** | Capability-Based Security (CAP_KEYBOARD, CAP_FRAMEBUFFER) | 📋 Planned |
-| **33** | Resource Containers (Zones) + OOM Killer | 📋 Planned |
-| **34** | Core Dumps (`/var/crash/app.core`) | 📋 Planned |
+
 | **35** | HAL (Hardware Abstraction Layer) | 📋 Planned |
+Правильный порядок:
+
+1. Зафиксировать POSIX ABI policy.       ✅ уже сделано
+2. Сделать syscall/POSIX audit.          желательно
+3. Начать HAL.                           критично
+4. Сделать RPi bare-metal spike.         полезно
+5. Перенести spike в arch/arm.           правильно
+6. Запустить UART/timer/MMU.             milestone
+7. Запустить init + shell over UART.     большой milestone
 | **36-40** | 🍓 Raspberry Pi Port (BCM2835, ARM1176JZF-S) | 📋 Planned |
 | **41+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
 | **45+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
