@@ -1,0 +1,1377 @@
+Отлично. Ниже — **практический план стабилизации Enclave OS на 7 дней**.
+
+Цель плана — не добавить новые фичи, а перевести текущую **Alpha 0.4 / Day 31** в состояние, где можно безопасно двигаться дальше: к HAL, ARM-порту или расширению POSIX-профиля.
+
+---
+
+# 🎯 Цель 7-дневной стабилизации
+
+Довести Enclave OS до состояния:
+
+> **Alpha 0.5-rc1: стабилизированное ядро, закрытые критические баги, регресс-тесты на все ключевые подсистемы, замороженный пользовательский ABI, единый SSOT-документ.**
+
+---
+
+# 🧊 Главные правила на эти 7 дней
+
+На неделю вводится жёсткий freeze:
+
+## ❌ Нельзя
+1. Добавлять новые syscall.
+2. Добавлять новые драйверы.
+3. Начинать HAL / ARM / Raspberry Pi.
+4. Добавлять сигналы, потоки, сокеты, job control.
+5. Ломать текущий `user_libc` API.
+6. Менять поведение `waitpid`, `exec`, `fork`, `mmap`, `mprotect`, `open`, `close`, `dup2`, кроме исправления подтверждённых багов.
+7. Делать большие рефакторинги без тестов.
+
+## ✅ Можно
+1. Чинить известные баги.
+2. Писать тесты.
+3. Наводить порядок в SSOT.
+4. Делать безопасные внутренние рефакторинги.
+5. Консолидировать `tcc_lib_os.c` в `user_libc.c`, если это не ломает TCC.
+6. Улучшать диагностику и serial-логи.
+
+---
+
+# 📌 Definition of Done для всей недели
+
+К концу 7-го дня проект должен удовлетворять следующим критериям.
+
+## 1. Документация
+- SSOT содержит одну версию: **Alpha 0.5-rc1** или **Alpha 0.4-stable**.
+- Нет противоречия между шапкой и футером.
+- Есть changelog за неделю.
+- Зафиксирован публичный пользовательский ABI.
+- Зафиксировано, что syscall numbers — internal ABI.
+
+## 2. Баги
+- Нет открытых критических багов.
+- Все статусы `FIXED`, `NOT TESTED`, `CODE PATCHED — NOT TESTED` закрыты тестами.
+- Для каждого известного бага есть:
+  - ID;
+  - статус;
+  - тест;
+  - владелец;
+  - решение.
+
+## 3. Тесты
+- Все старые 52 теста проходят.
+- Omni Stress Test проходит как минимум **32/32**.
+- Добавлены новые регресс-тесты на:
+  - memory;
+  - CoW;
+  - mprotect;
+  - process lifecycle;
+  - init respawn;
+  - VFS;
+  - FD cleanup;
+  - RBAC;
+  - mkdir;
+  - libc;
+  - TCC self-hosting.
+- Итоговый набор: желательно **70+ тестов**.
+
+## 4. Ядро
+- `pmm_check_balance()` не показывает утечек.
+- `heap_check_balance()` не показывает утечек.
+- Нет утечек FD.
+- Нет утечек `open_file_t` / `vfs_node_t` refcount.
+- Нет утечек VMA.
+- Нет утечек page directories / page tables.
+- Ring 3 не может уронить ядро.
+
+## 5. Userspace
+- Shell стабильно перезапускается.
+- Init стабильно перезапускается.
+- TinyCC стабильно компилирует hello-world внутри ОС.
+- Скомпилированный ELF стабильно запускается.
+- `__isoc23_strtoll` исправлен.
+- Makefile race для `libtcc1.o` устранён.
+
+---
+
+# 🗓 План по дням
+
+---
+
+# День 1. SSOT, аудит багов, тестовый baseline
+
+## Цель дня
+Навести порядок в документации, заморозить текущее состояние и получить воспроизводимый тестовый baseline.
+
+---
+
+## Задачи
+
+### 1.1. Исправить рассинхрон SSOT
+Сейчас в документе есть конфликт:
+
+- шапка говорит: `Alpha 0.4 (Day 31 — mkdir + 52 Tests)`;
+- футер говорит: `Alpha 0.3 | Day 29`.
+
+Нужно привести к одному состоянию.
+
+#### Сделать
+- Удалить старый футер `Alpha 0.3`.
+- Зафиксировать текущую версию как:
+  - `Alpha 0.4-stable` или
+  - `Alpha 0.5-rc1`.
+- Обновить дату.
+- Добавить раздел:
+  - `Changelog / Stabilization Week`.
+
+#### Артефакт
+Файл:
+
+```text
+BARE_METAL_OS.txt
+```
+
+или отдельный:
+
+```text
+docs/CHANGELOG.md
+```
+
+---
+
+### 1.2. Создать таблицу известных багов
+Нужен единый трекер состояния.
+
+#### Формат
+| ID | Подсистема | Описание | Статус | Тест | Приоритет |
+|---|---|---|---|---|---|
+| V1 | paging | Ring 0 CoW write | FIXED | REG-MEM-002 | High |
+| T1 | task | init respawn temp_task | FIXED | REG-PROC-006 | High |
+| T2 | task/vfs | sys_close from Ring 0 | FIXED | REG-VFS-002 | High |
+| T3/T4 | task | cli/sti without EFLAGS | PATCHED | REG-PROC-010 | High |
+| T5 | task | pdir_virt NULL before schedule | FIXED | REG-PROC-011 | Medium |
+| S1 | syscall/vmm | partial mprotect | FIXED | REG-MEM-004 | High |
+| SH1 | shell/tmpfs | mkdir created file | FIXED | REG-VFS-013 | Medium |
+| UL2 | user_libc | missing functions | TRIAGE | REG-LIBC-* | Medium |
+
+#### Артефакт
+```text
+docs/BUG_MATRIX.md
+```
+
+---
+
+### 1.3. Зафиксировать ABI policy
+Нужно явно разделить:
+
+1. **Public user ABI**
+   - `user_libc.h`;
+   - POSIX-like C API;
+   - поведение `fork`, `exec`, `waitpid`, `open`, `close`, `read`, `write`, `mmap`, `mprotect`, `mkdir`, `fstat`.
+
+2. **Internal kernel ABI**
+   - номера syscall;
+   - внутренние структуры;
+   - `vfs_close_fd()`;
+   - kernel handlers.
+
+#### Сделать документ
+```text
+docs/ABI_POLICY.md
+```
+
+#### Обязательно зафиксировать
+- `waitpid()` status encoding:
+  - normal exit: `status == exit_code`;
+  - killed by kernel: `status == -1`;
+  - это не Linux-compatible.
+- `exec()` сохраняет FD table.
+- `fork()` наследует FD с refcount increment.
+- `mprotect(W|X)` запрещён.
+- Ring 3 не имеет прямого доступа к kernel memory.
+- `FS_SYSTEM` даёт `EACCES` для Ring 3.
+
+---
+
+### 1.4. Сделать воспроизводимый test baseline
+Нужен простой способ прогнать все тесты.
+
+#### Минимальный вариант
+```bash
+make clean
+make iso
+qemu-system-i386 \
+  -cdrom build/metal_os.iso \
+  -m 1024M \
+  -serial file:serial.log \
+  -display none \
+  -no-reboot
+```
+
+#### Проверка
+```bash
+grep -E "\[TEST\].*PASS" serial.log
+grep -E "\[TEST\].*FAIL" serial.log
+```
+
+#### Артефакт
+Скрипт:
+
+```text
+scripts/run_tests.sh
+```
+
+Пример:
+
+```bash
+#!/bin/sh
+set -e
+
+make clean
+make iso
+
+rm -f serial.log
+
+qemu-system-i386 \
+  -cdrom build/metal_os.iso \
+  -m 1024M \
+  -serial file:serial.log \
+  -display none \
+  -no-reboot
+
+./scripts/check_tests.sh serial.log
+```
+
+И:
+
+```text
+scripts/check_tests.sh
+```
+
+---
+
+### 1.5. Прогнать текущий набор тестов
+Нужно зафиксировать текущее состояние.
+
+#### Ожидаемый baseline
+- 52 основных теста.
+- Omni Stress Test: ранее было 31/32.
+- После Day 31 нужно добиться:
+  - `directory_ops` PASS;
+  - итого 32/32.
+
+#### Тесты дня
+| Тест | Ожидание |
+|---|---|
+| `baseline_boot` | ОС загружается до shell |
+| `baseline_52_tests` | 52/52 PASS |
+| `omni_stress_32` | 32/32 PASS |
+| `serial_log_clean` | нет triple fault / kernel panic |
+| `meta_ssot_version` | нет конфликта Alpha 0.3 / Alpha 0.4 |
+
+---
+
+## Критерий закрытия дня
+
+День завершён, если:
+
+- SSOT имеет одну версию.
+- Создана bug matrix.
+- Создан ABI policy.
+- Есть скрипт запуска тестов.
+- Baseline пройден и сохранён.
+- Все известные расхождения задокументированы.
+
+---
+
+# День 2. Стабилизация памяти: PMM, VMM, CoW, mprotect
+
+## Цель дня
+Закрыть самые опасные баги в памяти и доказать, что memory subsystem не течёт и не нарушает W^X.
+
+---
+
+## Основные риски
+- CoW refcount leak.
+- Ring 0 write to CoW page after fork/exec.
+- Partial mprotect ломает VMA.
+- Demand paging пропускает invalid write.
+- OOM убивает не процесс, а ядро.
+- `pmm_refcounts` расходятся.
+
+---
+
+## Задачи
+
+### 2.1. Проверить `vmm_handle_user_write_fault()`
+Это критическая точка после фикса V1.
+
+#### Проверить
+- Ring 0 может писать в user CoW только через resolver.
+- Проверяется VMA.
+- Проверяется `VMA_WRITE`.
+- Проверяется W^X.
+- Refcount безопасно уменьшается.
+- Делается `invlpg`.
+- Нет blanket Ring 0 write access.
+
+---
+
+### 2.2. Проверить strict CoW teardown
+#### Проверить
+- `pmm_dec_ref()` освобождает страницу только при `refcount == 0`.
+- После `fork()` + `exit()` refcount возвращается.
+- После `exec()` старые страницы корректно освобождаются.
+- `vmm_destroy_address_space()` освобождает:
+  - PTE;
+  - PT;
+  - PD.
+
+---
+
+### 2.3. Проверить mprotect
+Особенно после S1.
+
+#### Проверить
+- Полный диапазон работает.
+- Частичный диапазон корректно сплитит VMA.
+- `VMA_COW` сохраняется.
+- `PAGE_COW` сохраняется на уровне PTE.
+- `PWT/PCD/GLOBAL` не теряются.
+- `PROT_WRITE | PROT_EXEC` возвращает `-EPERM`.
+
+---
+
+### 2.4. Проверить demand paging и guard pages
+#### Проверить
+- User stack demand paging работает.
+- Kernel heap demand paging работает.
+- Stack guard page убивает процесс, а не ядро.
+- Kernel stack guard page не пробивается.
+
+---
+
+## Новые тесты дня
+
+### Memory regression tests
+
+| ID | Тест | Что проверяет |
+|---|---|---|
+| REG-MEM-001 | `cow_fork_write` | После fork родитель и ребёнок пишут в shared page, страницы разделяются |
+| REG-MEM-002 | `cow_exec_ring0_write` | Ring 0 пишет в user CoW при exec после fork без fault loop |
+| REG-MEM-003 | `cow_refcount_balance` | После fork/write/exit pmm refcount возвращается |
+| REG-MEM-004 | `mprotect_full_range` | mprotect на всю VMA меняет права |
+| REG-MEM-005 | `mprotect_partial_range` | Частичный mprotect сплитит VMA |
+| REG-MEM-006 | `mprotect_partial_sigsegv` | Запись в защищённую часть даёт SIGSEGV |
+| REG-MEM-007 | `mprotect_wx_reject` | `PROT_WRITE | PROT_EXEC` → `-EPERM` |
+| REG-MEM-008 | `mprotect_cow_preserve` | mprotect не ломает CoW |
+| REG-MEM-009 | `demand_paging_user_stack` | Stack растёт по demand |
+| REG-MEM-010 | `demand_paging_kernel_heap` | Kernel heap demand paging работает |
+| REG-MEM-011 | `user_stack_guard` | Stack overflow → process kill |
+| REG-MEM-012 | `kernel_stack_guard` | Kernel stack guard срабатывает безопасно |
+| REG-MEM-013 | `oom_process_kill` | OOM убивает процесс, не ядро |
+| REG-MEM-014 | `pmm_balance_after_fork_exit` | `pmm_check_balance()` == 0 |
+| REG-MEM-015 | `heap_balance_after_vfs_ops` | `heap_check_balance()` == 0 |
+
+---
+
+## Дополнительные проверки
+
+### PMM
+```c
+pmm_check_balance();
+```
+
+Вызывать:
+- после boot;
+- после fork bomb;
+- после exec;
+- после init respawn;
+- после 1000 файлов;
+- после TCC compile.
+
+### Heap
+```c
+heap_check_balance();
+```
+
+Вызывать там же.
+
+---
+
+## Критерий закрытия дня
+
+День завершён, если:
+
+- Все REG-MEM тесты PASS.
+- Нет утечек физических страниц.
+- Нет утечек kernel heap.
+- W^X не нарушается.
+- Partial mprotect работает.
+- CoW teardown доказан тестами.
+- Omni Stress memory-часть стабильна.
+
+---
+
+# День 3. Процессы: fork, exec, waitpid, zombie, reaper, init respawn
+
+## Цель дня
+Доказать, что процессная модель полностью crash-safe и не оставляет утечек.
+
+---
+
+## Основные риски
+- Zombie leak.
+- Orphan adoption ломает дерево процессов.
+- Init respawn оставляет старые FD.
+- Shell respawn не очищает `/dev/console`.
+- `monitor_children` убивает детей, но FD-таблицы закрываются небезопасно.
+- `waitpid` возвращает неправильный status.
+- `exec` теряет FD или ломает stack forging.
+
+---
+
+## Задачи
+
+### 3.1. Проверить fork
+#### Проверить
+- `fork()` возвращает 0 ребёнку.
+- Родитель получает правильный PID.
+- VMA клонируются.
+- FD наследуются.
+- `open_file_t->ref_count` увеличивается.
+- `vfs_node_t->ref_count` увеличивается.
+- Kernel stack копируется.
+- Child stack forging корректен.
+- CR3 новый.
+- FPU state корректно изолирован.
+
+---
+
+### 3.2. Проверить exec
+#### Проверить
+- `exec()` заменяет address space.
+- FD table сохраняется.
+- Старый PD уничтожается.
+- Новый ELF загружается.
+- `argc/argv/envp` корректно лежат на user stack.
+- `r->useresp` обновляется, не `r->esp`.
+- `exec nonexistent` возвращает `-ENOENT`, процесс жив.
+- `exec` после fork с CoW не ломает Ring 0 write.
+
+---
+
+### 3.3. Проверить waitpid
+#### Проверить
+- `waitpid(pid, &status, 0)` ждёт ребёнка.
+- `WNOHANG` не блокирует.
+- Normal exit: `status == exit_code`.
+- Killed by kernel: `status == -1`.
+- Zombie переходит в DEAD после waitpid.
+- Reaper освобождает задачу.
+
+---
+
+### 3.4. Проверить reaper и zombie cascade
+#### Проверить
+- Мёртвые задачи попадают в reaper queue.
+- Reaper освобождает:
+  - kernel stack;
+  - PD;
+  - VMA;
+  - FD table;
+  - task_t.
+- 15 зомби не приводят к утечке.
+- 25 fork'ов не ломают scheduler.
+
+---
+
+### 3.5. Проверить init respawn
+Это критично для SLA.
+
+#### Проверить
+- PID 1 умирает.
+- Reaper видит PID 1.
+- Загружается `/sbin/init.elf`.
+- Новый процесс получает PID 1.
+- `init_task` обновляется.
+- `monitor_children = 1`.
+- Старый Shell убивается.
+- Новый Shell запускается.
+- `/dev/console` открывается новым Shell.
+- Нет double-open console conflict.
+
+---
+
+### 3.6. Проверить shell respawn
+#### Проверить
+- Shell exit.
+- Shell crash.
+- Shell kill.
+- Init перезапускает Shell < 100 мс.
+- История и терминал не ломают систему.
+
+---
+
+## Новые тесты дня
+
+### Process regression tests
+
+| ID | Тест | Что проверяет |
+|---|---|---|
+| REG-PROC-001 | `fork_returns_zero` | Ребёнок видит fork() == 0 |
+| REG-PROC-002 | `fork_pid_valid` | Родитель получает валидный PID |
+| REG-PROC-003 | `fork_fd_inherit` | FD наследуется с refcount |
+| REG-PROC-004 | `fork_cow_isolation` | Запись в parent/child не пересекается |
+| REG-PROC-005 | `fork_bomb_25` | 25 процессов, scheduler жив |
+| REG-PROC-006 | `exec_argv_stack` | argv корректно передаётся |
+| REG-PROC-007 | `exec_preserves_fd` | FD сохраняются после exec |
+| REG-PROC-008 | `exec_enoent` | exec nonexistent → -ENOENT |
+| REG-PROC-009 | `exec_after_fork_cow` | exec после fork не ловит Ring 0 CoW bug |
+| REG-PROC-010 | `waitpid_exit_code` | status == exit_code |
+| REG-PROC-011 | `waitpid_killed_status` | killed → status == -1 |
+| REG-PROC-012 | `waitpid_wnohang` | Non-blocking reap |
+| REG-PROC-013 | `zombie_cascade_15` | 15 зомби очищаются |
+| REG-PROC-014 | `reaper_frees_resources` | Нет утечек task/PD/VMA/FD |
+| REG-PROC-015 | `init_kill_respawn` | PID 1 перезапускается |
+| REG-PROC-016 | `shell_exit_respawn` | Shell перезапускается |
+| REG-PROC-017 | `shell_crash_respawn` | Crash Shell обрабатывается |
+| REG-PROC-018 | `monitor_children_cleanup` | Дети PID 1 убиваются при смерти init |
+| REG-PROC-019 | `orphan_adoption` | Сироты усыновляются |
+| REG-PROC-020 | `fpu_context_switch` | FPU state не протекает между задачами |
+
+---
+
+## Критерий закрытия дня
+
+День завершён, если:
+
+- Все REG-PROC тесты PASS.
+- Init respawn работает.
+- Shell respawn работает.
+- Zombie/reaper не текут.
+- `waitpid` semantics зафиксированы и проверены.
+- `monitor_children` безопасно убивает детей.
+- FD cleanup детей PID 1 больше не является known issue.
+
+---
+
+# День 4. VFS, FD, tmpfs, RBAC, mkdir, teardown correctness
+
+## Цель дня
+Закрыть вопросы с файловыми дескрипторами, refcount и безопасным закрытием FD у чужих задач.
+
+---
+
+## Основные риски
+- `sys_close()` вызывается из Ring 0 для чужой задачи.
+- `task_cleanup_children_on_exit()` не закрывает FD безопасно.
+- Утечки `open_file_t`.
+- Утечки `vfs_node_t`.
+- `dup2` не атомарен или ломает refcount.
+- `unlink` открытого файла ломает orphan semantics.
+- `mkdir` не соблюдает RBAC.
+- `rmdir`/`unlink` директории не проверяет `ENOTEMPTY`.
+
+---
+
+## Задачи
+
+### 4.1. Закрыть T2 окончательно
+Проверить, что Ring 0 никогда не вызывает `sys_close()` напрямую.
+
+#### Правило
+```c
+sys_close(fd)
+  -> vfs_close_fd(current_task, fd)
+```
+
+Для kernel cleanup:
+
+```c
+vfs_close_fd(target_task, fd)
+```
+
+#### Проверить
+- `task_exit()` использует `vfs_close_fd()`.
+- `task_kill_current()` использует `vfs_close_fd()`.
+- `task_cleanup_children_on_exit()` использует `vfs_close_fd()`.
+- Нет прямых вызовов `sys_close()` из Ring 0.
+
+---
+
+### 4.2. Проверить FD teardown при смерти процесса
+#### Проверить
+- При `exit()` закрываются все FD.
+- При `kill()` закрываются все FD.
+- При убийстве детей PID 1 FD закрываются безопасно.
+- `open_file_t->ref_count` уменьшается.
+- `vfs_node_t->ref_count` уменьшается.
+- При `ref_count == 0` файл освобождается.
+- Orphan node корректно удаляется.
+
+---
+
+### 4.3. Проверить dup / dup2
+#### Проверить
+- `dup(fd)` создаёт новый FD.
+- `dup2(fd, newfd)` закрывает `newfd`, если он был открыт.
+- `dup2(fd, fd)` не закрывает сам себя.
+- Refcount корректен.
+- `close()` одного FD не ломает другой.
+- IRQ-safe critical sections используют `irq_save()/irq_restore()`.
+
+---
+
+### 4.4. Проверить tmpfs
+#### Проверить
+- Создание файла.
+- Создание директории.
+- `O_TRUNC`.
+- Sparse files.
+- Dynamic growth.
+- `TMPFS_MAX_FILE_SIZE`.
+- `readdir`.
+- `unlink`.
+- `ENOTEMPTY`.
+- `mkdir` на `/boot` → `EACCES`.
+
+---
+
+### 4.5. Проверить RBAC
+#### Проверить
+- `/boot` имеет `FS_SYSTEM`.
+- Ring 3 не может писать в `/boot`.
+- Ring 3 не может создавать файлы в `/boot`.
+- Ring 3 не может удалять файлы из `/boot`.
+- `sys_mkdir` проверяет `FS_SYSTEM` на родителе.
+
+---
+
+## Новые тесты дня
+
+### VFS regression tests
+
+| ID | Тест | Что проверяет |
+|---|---|---|
+| REG-VFS-001 | `open_read_write_close` | Базовый файловый цикл |
+| REG-VFS-002 | `close_current_task` | sys_close для current_task |
+| REG-VFS-003 | `close_on_exit` | exit закрывает все FD |
+| REG-VFS-004 | `close_on_kill` | kill закрывает все FD |
+| REG-VFS-005 | `child_fd_cleanup_on_init_death` | Дети PID 1 безопасно закрывают FD |
+| REG-VFS-006 | `open_file_refcount_balance` | refcount open_file_t сходится |
+| REG-VFS-007 | `vfs_node_refcount_balance` | refcount vfs_node_t сходится |
+| REG-VFS-008 | `dup_basic` | dup создаёт новый FD |
+| REG-VFS-009 | `dup2_basic` | dup2 дублирует FD |
+| REG-VFS-010 | `dup2_overwrite` | dup2 закрывает старый FD |
+| REG-VFS-011 | `dup2_same_fd` | dup2(fd, fd) безопасен |
+| REG-VFS-012 | `fd_exhaustion_256` | FD limit работает |
+| REG-VFS-013 | `unlink_open_file` | POSIX orphan semantics |
+| REG-VFS-014 | `tmpfs_1000_files` | tmpfs стабилен под нагрузкой |
+| REG-VFS-015 | `tmpfs_truncate` | O_TRUNC работает |
+| REG-VFS-016 | `tmpfs_sparse_file` | Дырки заполняются нулями |
+| REG-VFS-017 | `mkdir_basic` | mkdir создаёт директорию |
+| REG-VFS-018 | `mkdir_eacces_boot` | mkdir /boot/subdir → EACCES |
+| REG-VFS-019 | `unlink_dir_enotempty` | Удаление непустой директории → ENOTEMPTY |
+| REG-VFS-020 | `readdir_list` | readdir показывает файлы и директории |
+| REG-VFS-021 | `fstat_size` | fstat возвращает size и type |
+| REG-VFS-022 | `mountpoint_teleport` | mountpoint корректно пробрасывается |
+| REG-VFS-023 | `console_exclusive_access` | `/dev/console` не открывается повторно неправильно |
+| REG-VFS-024 | `path_too_long` | Слишком длинный путь → ошибка, не crash |
+| REG-VFS-025 | `invalid_fd` | Операции с плохим FD → EBADF |
+
+---
+
+## Критерий закрытия дня
+
+День завершён, если:
+
+- Все REG-VFS тесты PASS.
+- Нет утечек FD.
+- Нет утечек `open_file_t`.
+- Нет утечек `vfs_node_t`.
+- `vfs_close_fd()` используется везде для kernel cleanup.
+- `mkdir`, `RBAC`, `ENOTEMPTY` работают.
+- `dup/dup2` безопасны.
+
+---
+
+# День 5. Userspace: user_libc, TCC, Makefile, self-hosting
+
+## Цель дня
+Стабилизировать пользовательский слой и toolchain.
+
+---
+
+## Основные риски
+- `__isoc23_strtoll` вызывает `strtoul`.
+- `tcc_lib_os.c` становится вторым libc.
+- Bump allocator течёт в долгоживущих процессах.
+- Makefile race ломает `libtcc1.o`.
+- TCC longjmp ломается из-за tail-call optimization.
+- Fake POSIX headers расходятся с `user_libc.h`.
+- `libc.a` содержит дубли символов.
+
+---
+
+## Задачи
+
+### 5.1. Исправить `__isoc23_strtoll`
+Это конкретный баг из документа.
+
+#### Сейчас плохо
+```c
+__isoc23_strtoll(...)
+{
+    return strtoul(...);
+}
+```
+
+#### Должно быть
+```c
+long long __isoc23_strtoll(const char *nptr, char **endptr, int base)
+{
+    return strtoll(nptr, endptr, base);
+}
+```
+
+Аналогично проверить:
+- `__isoc23_strtol`;
+- `__isoc23_strtoul`;
+- `__isoc23_strtoull`.
+
+---
+
+### 5.2. Устранить Makefile race для `libtcc1.o`
+Из документа:
+
+> Защитить `libtcc1.o` от race — добавить `.NOTPARALLEL` или уникальное имя для объекта.
+
+#### Вариант 1 — простой
+```makefile
+.NOTPARALLEL:
+```
+
+#### Вариант 2 — правильный
+Использовать уникальное имя объекта:
+
+```makefile
+build/libtcc1_initrd.o: external/tcc_src/libtcc1.c
+	$(CC) $(TCC_CFLAGS) -c $< -o $@
+```
+
+Не использовать один и тот же `libtcc1.o` для разных таргетов.
+
+---
+
+### 5.3. Провести аудит `tcc_lib_os.c`
+Нужно предотвратить второй libc.
+
+#### Сделать таблицу
+| Функция | Где сейчас | Нужна в user_libc? | Дублирует? | План |
+|---|---|---|---|---|
+| `fwrite` | tcc_lib_os.c | Да | Возможно | Мигрировать |
+| `fseek` | tcc_lib_os.c | Да | Возможно | Мигрировать |
+| `qsort` | tcc_lib_os.c | Да | Нет | Оставить/мигрировать |
+| `strtod` | tcc_lib_os.c | Да | Нет | Мигрировать |
+| `mprotect` | tcc_lib_os.c | Да | Обёртка | В user_libc |
+| `__errno_location` | tcc_lib_os.c | Да | Compat | Оставить compat shim |
+
+#### Артефакт
+```text
+docs/LIBC_AUDIT.md
+```
+
+---
+
+### 5.4. Решить политику по allocator
+Сейчас:
+
+- `malloc` через `sys_brk`;
+- `free = no-op`;
+- это нормально для коротких TCC-процессов;
+- плохо для долгоживущих сервисов.
+
+#### Решение на stabilization week
+Не менять allocator резко.
+
+#### Зафиксировать
+1. Для TCC — bump allocator допустим.
+2. Для shell/init — acceptable, если процессы перезапускаются.
+3. Для будущих долгоживущих сервисов — нужен mmap-based allocator.
+4. Рассмотреть `CONFIG_TCC_MMAP 1` отдельно после стабилизации.
+
+#### Артефакт
+```text
+docs/ALLOCATOR_POLICY.md
+```
+
+---
+
+### 5.5. Проверить self-hosting pipeline
+#### Сценарий
+```sh
+compile /examples/hello.c /tmp/hello.elf
+run /tmp/hello.elf
+```
+
+#### Проверить
+- fork/exec TCC.
+- TCC читает исходник.
+- TCC пишет ELF в `/tmp`.
+- waitpid возвращает 0.
+- Shell запускает ELF.
+- Программа печатает результат.
+- exit code корректный.
+- TCC error path не роняет shell.
+- Ошибка компиляции обрабатывается через longjmp.
+
+---
+
+## Новые тесты дня
+
+### Libc / TCC regression tests
+
+| ID | Тест | Что проверяет |
+|---|---|---|
+| REG-LIBC-001 | `printf_edge` | INT_MIN, NULL string, hex |
+| REG-LIBC-002 | `snprintf_overflow` | Безопасное усечение |
+| REG-LIBC-003 | `strtol_basic` | strtol корректен |
+| REG-LIBC-004 | `strtoul_basic` | strtoul корректен |
+| REG-LIBC-005 | `strtoll_negative` | strtoll обрабатывает отрицательные |
+| REG-LIBC-006 | `strtoll_range` | strtoll не делает UB |
+| REG-LIBC-007 | `isoc23_strtoll_correct` | `__isoc23_strtoll` вызывает `strtoll` |
+| REG-LIBC-008 | `getline_basic` | getline работает |
+| REG-LIBC-009 | `strdup_basic` | strdup выделяет копию |
+| REG-LIBC-010 | `strerror_basic` | strerror возвращает строку |
+| REG-LIBC-011 | `file_read_write` | FILE* API работает |
+| REG-LIBC-012 | `file_buffer_flush` | fflush/exit не теряют данные |
+| REG-TCC-001 | `tcc_compile_hello` | Компиляция hello.c |
+| REG-TCC-002 | `tcc_run_hello` | Запуск скомпилированного ELF |
+| REG-TCC-003 | `tcc_compile_error` | Ошибка компиляции не роняет shell |
+| REG-TCC-004 | `tcc_longjmp_recovery` | setjmp/longjmp работает |
+| REG-TCC-005 | `tcc_big_source` | Большой .c не падает |
+| REG-TCC-006 | `make_parallel_safe` | `make -j` не ломает libtcc1 |
+| REG-TCC-007 | `libc_archive_symbols` | Нет опасных дублей символов |
+
+---
+
+## Критерий закрытия дня
+
+День завершён, если:
+
+- `__isoc23_strtoll` исправлен.
+- Makefile race устранён.
+- TCC стабильно компилирует и падает безопасно.
+- Self-hosting pipeline проходит.
+- Есть аудит `tcc_lib_os.c`.
+- Есть политика по allocator.
+- Все REG-LIBC / REG-TCC тесты PASS.
+
+---
+
+# День 6. Syscall validation, security, fault injection, stress
+
+## Цель дня
+Проверить Zero Trust Sandbox на прочность.
+
+---
+
+## Основные риски
+- Ring 3 может передать kernel pointer.
+- Ring 3 может передать NULL.
+- Ring 3 может передать слишком большую длину.
+- Ring 3 может вызвать invalid syscall.
+- Ring 3 может обойти RBAC.
+- Ring 3 может запросить `W|X`.
+- Ring 3 может исчерпать FD, память, процессы.
+- Ring 3 может вызвать UB в libc.
+
+---
+
+## Задачи
+
+### 6.1. Проверить каждый syscall на валидацию
+Для каждого syscall проверить:
+
+1. Invalid arguments.
+2. NULL pointers.
+3. Kernel pointers.
+4. Overflow sizes.
+5. Bad FD.
+6. Bad flags.
+7. Bad path.
+8. Permission denied.
+9. ENOSYS для неизвестного номера.
+10. Процесс остаётся жив, если ошибка не фатальная.
+
+---
+
+### 6.2. Проверить `is_user_pointer()`
+#### Проверить
+- NULL → false.
+- Kernel address → false.
+- Partially kernel range → false.
+- Size overflow → false.
+- Valid user range → true.
+
+---
+
+### 6.3. Проверить `copy_string_from_user()`
+#### Проверить
+- Короткая строка копируется.
+- Длинная строка обрезается безопасно.
+- Kernel string не копируется.
+- NULL string → ошибка.
+- Нет выхода за max_len.
+
+---
+
+### 6.4. Проверить W^X
+#### Проверить
+- `mmap(PROT_WRITE | PROT_EXEC)` → reject.
+- `mprotect(PROT_WRITE | PROT_EXEC)` → reject.
+- ELF `.text` read-only/exec.
+- ELF `.data` write/noexec.
+- TCC codegen не нарушает W^X.
+
+---
+
+### 6.5. Fault injection
+Нужно специально ломать процессы.
+
+#### Сценарии
+- NULL deref.
+- Kernel pointer deref.
+- Write to read-only.
+- Stack overflow.
+- Heap exhaustion.
+- FD exhaustion.
+- Fork bomb.
+- Zombie flood.
+- Bad syscall number.
+- Bad open flags.
+- Bad path length.
+- Bad ioctl request.
+- Bad mmap address.
+- Bad brk request.
+
+---
+
+## Новые тесты дня
+
+### Security / syscall regression tests
+
+| ID | Тест | Что проверяет |
+|---|---|---|
+| REG-SEC-001 | `syscall_invalid_number` | -ENOSYS, не crash |
+| REG-SEC-002 | `pointer_null` | -EFAULT |
+| REG-SEC-003 | `pointer_kernel` | -EFAULT |
+| REG-SEC-004 | `pointer_overflow_size` | -EFAULT |
+| REG-SEC-005 | `string_kernel_copy_reject` | Kernel string не копируется |
+| REG-SEC-006 | `string_too_long` | Безопасное обрезание |
+| REG-SEC-007 | `open_bad_flags` | -EINVAL |
+| REG-SEC-008 | `open_bad_fd` | -EBADF |
+| REG-SEC-009 | `read_bad_fd` | -EBADF |
+| REG-SEC-010 | `write_bad_fd` | -EBADF |
+| REG-SEC-011 | `close_bad_fd` | -EBADF |
+| REG-SEC-012 | `dup_bad_fd` | -EBADF |
+| REG-SEC-013 | `dup2_bad_fd` | -EBADF |
+| REG-SEC-014 | `mmap_wx_reject` | W^X |
+| REG-SEC-015 | `mprotect_wx_reject` | W^X |
+| REG-SEC-016 | `mmap_bad_addr` | -EINVAL/-ENOMEM |
+| REG-SEC-017 | `brk_collision` | brk не ломает VMA |
+| REG-SEC-018 | `rbac_boot_read` | /boot read policy |
+| REG-SEC-019 | `rbac_boot_write` | /boot write denied |
+| REG-SEC-020 | `rbac_boot_mkdir` | /boot mkdir denied |
+| REG-SEC-021 | `rbac_boot_unlink` | /boot unlink denied |
+| REG-SEC-022 | `ioctl_bad_request` | -EINVAL |
+| REG-SEC-023 | `exec_bad_elf` | Bad ELF не роняет ядро |
+| REG-SEC-024 | `exec_nonelf` | Не ELF → ошибка |
+| REG-SEC-025 | `nanosleep_bad_value` | -EINVAL или безопасное поведение |
+
+---
+
+## Stress tests
+
+| ID | Тест | Что проверяет |
+|---|---|---|
+| REG-STRESS-001 | `fork_bomb_25` | Scheduler |
+| REG-STRESS-002 | `zombie_cascade_15` | Reaper |
+| REG-STRESS-003 | `tmpfs_1000_files` | VFS/tmpfs |
+| REG-STRESS-004 | `fd_exhaustion_256` | FD table |
+| REG-STRESS-005 | `heap_exhaustion` | brk/OOM |
+| REG-STRESS-006 | `stack_overflow_guard` | Guard page |
+| REG-STRESS-007 | `compile_and_run_loop` | TCC stability |
+| REG-STRESS-008 | `init_shell_respawn_loop` | Supervisor stability |
+| REG-STRESS-009 | `mixed_workload` | fork + files + compile + kill |
+| REG-STRESS-010 | `long_run_10min` | Нет утечек за 10 минут |
+
+---
+
+## Критерий закрытия дня
+
+День завершён, если:
+
+- Ни один Ring 3 баг не роняет ядро.
+- Все invalid syscall paths возвращают ошибки.
+- W^X не обходится.
+- RBAC работает.
+- Stress tests проходят.
+- После 10 минут нагрузки `pmm_check_balance()` и `heap_check_balance()` чистые.
+
+---
+
+# День 7. Release candidate, финальная регрессия, документация
+
+## Цель дня
+Собрать всё воедино и зафиксировать стабилизированный релиз.
+
+---
+
+## Задачи
+
+### 7.1. Полная регрессия
+Прогнать всё:
+
+1. Boot test.
+2. 52 базовых теста.
+3. Omni Stress.
+4. REG-MEM.
+5. REG-PROC.
+6. REG-VFS.
+7. REG-LIBC.
+8. REG-TCC.
+9. REG-SEC.
+10. REG-STRESS.
+
+#### Ожидаемый итог
+- 0 FAIL.
+- 0 kernel panic.
+- 0 triple fault.
+- 0 unexpected reboot.
+
+---
+
+### 7.2. Проверить логи
+#### Serial log должен содержать
+- Все тесты PASS.
+- Нет `FAIL`.
+- Нет `PANIC`.
+- Нет `TRIPLE FAULT`.
+- Нет `heap imbalance`.
+- Нет `pmm imbalance`.
+- Нет `fd leak`.
+
+---
+
+### 7.3. Обновить SSOT
+#### Добавить
+- Текущая версия: `Alpha 0.5-rc1`.
+- Дата.
+- Changelog stabilization week.
+- Список закрытых багов.
+- Список новых тестов.
+- ABI policy reference.
+- Known limitations.
+
+---
+
+### 7.4. Обновить known issues
+Оставить только осознанные ограничения.
+
+Например:
+
+| ID | Ограничение | Почему допустимо |
+|---|---|---|
+| LIMIT-001 | Bump allocator | Acceptable for short-lived TCC processes |
+| LIMIT-002 | No signals | Не входит в Enclave POSIX Lite P2 |
+| LIMIT-003 | No threads | Не требуется на данной фазе |
+| LIMIT-004 | No dynamic linking | Static-only by design |
+| LIMIT-005 | waitpid not Linux-compatible | Enclave ABI |
+
+---
+
+### 7.5. Подготовить release checklist
+#### Файл
+```text
+docs/RELEASE_CHECKLIST.md
+```
+
+#### Содержание
+- [x] SSOT version fixed
+- [x] ABI policy fixed
+- [x] Bug matrix updated
+- [x] All critical bugs closed
+- [x] All fixed bugs tested
+- [x] Memory balance clean
+- [x] FD balance clean
+- [x] Process teardown clean
+- [x] TCC self-hosting works
+- [x] Stress tests pass
+- [x] Serial log clean
+- [x] Release tag created
+
+---
+
+### 7.6. Создать тег
+Если используется Git:
+
+```bash
+git tag -a alpha-0.5-rc1 -m "Enclave OS stabilization week complete"
+```
+
+---
+
+## Финальные тесты дня
+
+| ID | Тест | Что проверяет |
+|---|---|---|
+| REG-REL-001 | `full_regression` | Все тесты PASS |
+| REG-REL-002 | `cold_boot` | Чистая загрузка |
+| REG-REL-003 | `serial_log_clean` | Нет ошибок |
+| REG-REL-004 | `memory_balance_final` | PMM/heap balance |
+| REG-REL-005 | `fd_balance_final` | FD/refcount balance |
+| REG-REL-006 | `self_hosting_final` | compile + run |
+| REG-REL-007 | `init_respawn_final` | PID 1 respawn |
+| REG-REL-008 | `shell_respawn_final` | Shell respawn |
+| REG-REL-009 | `long_run_final` | 10 минут без утечек |
+| REG-REL-010 | `docs_consistency` | SSOT не противоречив |
+
+---
+
+## Критерий закрытия дня
+
+День завершён, если:
+
+- Все тесты PASS.
+- Документация согласована.
+- Bug matrix закрыта.
+- Нет открытых критических проблем.
+- Можно тегать `Alpha 0.5-rc1`.
+- Можно переходить к HAL только после этого.
+
+---
+
+# 📊 Сводная таблица 7 дней
+
+| День | Тема | Главные результаты |
+|---|---|---|
+| 1 | SSOT / bugs / baseline | Документация, bug matrix, ABI policy, test runner |
+| 2 | Memory | CoW, mprotect, demand paging, OOM, pmm/heap balance |
+| 3 | Processes | fork/exec/waitpid/zombie/reaper/init respawn |
+| 4 | VFS/FD | vfs_close_fd, dup/dup2, mkdir, RBAC, ENOTEMPTY |
+| 5 | Userspace/TCC | strtoll fix, Makefile race, libc audit, self-hosting |
+| 6 | Security/stress | Zero Trust validation, fault injection, stress |
+| 7 | Release candidate | Полная регрессия, docs, tag, release checklist |
+
+---
+
+# 🧪 Итоговое тестовое покрытие
+
+После недели стабилизации желательно иметь следующую структуру тестов.
+
+## Категории
+```text
+REG-MEM-*      Memory / VMM / CoW / mprotect
+REG-PROC-*     Process / scheduler / reaper / init
+REG-VFS-*      VFS / FD / tmpfs / RBAC
+REG-LIBC-*     user_libc
+REG-TCC-*      TinyCC / self-hosting
+REG-SEC-*      syscall validation / zero trust
+REG-STRESS-*   mixed load / long run
+REG-REL-*      release gates
+```
+
+## Минимально желательное количество
+| Категория | Количество |
+|---|---:|
+| REG-MEM | 15 |
+| REG-PROC | 20 |
+| REG-VFS | 25 |
+| REG-LIBC | 12 |
+| REG-TCC | 7 |
+| REG-SEC | 25 |
+| REG-STRESS | 10 |
+| REG-REL | 10 |
+| **Итого** | **124** |
+
+Можно начать не со всех 124, но к концу недели критически важно иметь хотя бы:
+
+- 15 memory tests;
+- 20 process tests;
+- 25 VFS tests;
+- 12 libc tests;
+- 7 TCC tests;
+- 25 security tests;
+- 10 stress tests.
+
+То есть примерно **114+ тестов**.
+
+Если это слишком много для 7 дней, то минимальный обязательный порог:
+
+> **70 тестов, включая все critical path tests.**
+
+---
+
+# ⚠️ Риски недели и что делать, если всё пошло не так
+
+## Риск 1: FD cleanup вскрывает VFS refcount bugs
+### Признаки
+- `open_file_t` refcount не возвращается.
+- `vfs_node_t` не освобождается.
+- `unlink_open_file` падает.
+
+### Действие
+- Остановиться.
+- Не идти в HAL.
+- Расширить Day 4 ещё на 1 день.
+- Добавить debug counters:
+  - `open_file_count`;
+  - `vfs_node_count`;
+  - `fd_open_count`.
+
+---
+
+## Риск 2: CoW refcount leak
+### Признаки
+- После fork/exit `pmm_total_allocs != pmm_total_frees`.
+- Память постепенно заканчивается.
+
+### Действие
+- Вернуться в Day 2.
+- Проверить:
+  - `pmm_inc_ref`;
+  - `pmm_dec_ref`;
+  - `vmm_clone_address_space`;
+  - `vmm_destroy_address_space`;
+  - CoW page fault path.
+
+---
+
+## Риск 3: Init respawn нестабилен
+### Признаки
+- Новый PID 1 не запускается.
+- Shell не убивается.
+- `/dev/console` занят.
+
+### Действие
+- Расширить Day 3.
+- Проверить:
+  - `respawn_init_task`;
+  - `monitor_children`;
+  - `task_cleanup_children_on_exit`;
+  - `console_open_count`.
+
+---
+
+## Риск 4: TCC ломается из-за libc
+### Признаки
+- `longjmp` улетает не туда.
+- `qsort` падает.
+- `strtoll` возвращает мусор.
+- `fwrite` теряет данные.
+
+### Действие
+- Не мигрировать всё сразу.
+- Сначала исправить критические баги:
+  - `__isoc23_strtoll`;
+  - Makefile race;
+  - setjmp/longjmp flags.
+- Затем мигрировать функции по одной.
+
+---
+
+# 🚦 Gate для перехода к HAL
+
+После этой недели можно переходить к HAL **только если**:
+
+1. Все critical bugs закрыты.
+2. Все fixed bugs покрыты тестами.
+3. Memory balance сходится.
+4. FD balance сходится.
+5. Init/Shell respawn работают.
+6. TCC self-hosting работает.
+7. SSOT не противоречив.
+8. ABI policy зафиксирован.
+9. Full regression проходит.
+10. Есть release tag.
+
+Если хотя бы один пункт не выполнен — **HAL начинать рано**.
+
+---
+
+# 🧱 Короткая версия плана
+
+Если сжать до самого главного:
+
+## День 1
+- Починить SSOT.
+- Сделать bug matrix.
+- Сделать ABI policy.
+- Сделать test runner.
+- Прогнать baseline.
+
+## День 2
+- CoW.
+- mprotect.
+- demand paging.
+- OOM.
+- pmm/heap balance.
+
+## День 3
+- fork.
+- exec.
+- waitpid.
+- zombie.
+- reaper.
+- init respawn.
+- shell respawn.
+
+## День 4
+- FD cleanup.
+- vfs_close_fd.
+- dup/dup2.
+- refcounts.
+- mkdir.
+- RBAC.
+- ENOTEMPTY.
+
+## День 5
+- user_libc.
+- TCC.
+- `__isoc23_strtoll`.
+- Makefile race.
+- libc audit.
+- self-hosting.
+
+## День 6
+- syscall validation.
+- EFAULT.
+- ENOSYS.
+- RBAC.
+- W^X.
+- fault injection.
+- stress.
+
+## День 7
+- full regression.
+- docs.
+- changelog.
+- release checklist.
+- tag `alpha-0.5-rc1`.
+
+---
+
+# ✅ Итоговый ожидаемый результат
+
+Через 7 дней Enclave OS должна быть в состоянии:
+
+> **Стабильная zero-trust bare-metal ОС с доказанной изоляцией Ring 3, безопасным process teardown, работающим self-hosting TinyCC, замороженным user ABI и полным набором регресс-тестов.**
+
+После этого уже можно осознанно выбирать следующий трек:
+
+1. **HAL** — если цель ARM/RPi.
+2. **POSIX Lite P2 expansion** — если цель совместимость.
+3. **IPC / message passing** — если цель Minix/QNX-like микроядро.
+4. **User-mode drivers** — если цель максимальная изоляция.
+
+Но до этого — сначала закрыть стабилизацию.
