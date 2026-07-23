@@ -288,6 +288,271 @@ Enclave OS предоставляет POSIX-like C API для пользоват
 Целевой профиль совместимости — Enclave POSIX Lite P2: процессы, файлы, каталоги, файловые дескрипторы, базовая память, минимальный терминал, pipes и redirection. Полный POSIX, включая сигналы, сокеты, потоки, job control и dynamic linking, не является целью.
 Для предотвращения расхождений проводится аудит user_libc, syscall wrappers, tcc_lib_os.c и POSIX-заголовков. Аудит ничего не ломает, фиксирует текущее состояние, после чего Enclave syscall ABI замораживается. tcc_lib_os.c не должен оставаться вторым libc и постепенно консолидируется в user_libc.
 
+## 3.10 ABI Inventory and Stabilization Progress
+
+**Дата аудита:** 23 июля 2026  
+**База:** Alpha 0.4   
+**Режим:** stabilization freeze  
+**Тестирование:** временно недоступно  
+**Метод проверки:** source audit + SSOT cross-check
+
+---
+
+### 3.10.1 Легенда статусов
+
+| Статус | Значение |
+|---|---|
+| ✅ | Подтверждено исходным кодом или SSOT |
+| 🟡 | Задокументировано, но требует дополнительной проверки исходника |
+| ⚠️ | Требует аудита, уточнения или архитектурного решения |
+| ❌ | Не реализовано в проверенном файле |
+| 🧊 | Заморожено до Alpha 0.5-rc1 |
+| 🛠 | Требуется исправление |
+| 📋 | Требуется решение / инвентаризация |
+
+---
+
+### 3.10.2 ABI Policy Checkpoints
+
+| ID | Пункт политики | Статус | Подтверждение | Комментарий |
+|---|---|---:|---|---|
+| P1 | Public User ABI — это POSIX-like C API, а не Linux binary ABI | 🧊 | SSOT 3.8 | Зафиксировано концептуально |
+| P2 | Public ABI предоставляется `libc.a`, а не только `user_libc.c` | 🟡 | SSOT 8.6.6 | `libc.a = user_libc.o + tcc_lib_os.o + setjmp.o` |
+| P3 | Internal Kernel ABI — внутренняя деталь реализации | ✅ | `syscall.h`, `user_syscalls.h` | Syscall numbers Linux-inspired, но internal |
+| P4 | `waitpid()` status encoding: normal exit = `exit_code`, killed = `-1` | 🟡 | SSOT Appendix A | Нужно проверить `task.c` |
+| P5 | `waitpid()` не Linux-compatible | 🟡 | SSOT Appendix A | Нет `<< 8`, нет WIFEXITED semantics |
+| P6 | `exec()` сохраняет FD table | ✅ | `syscall.c` | `saved_fds[]` + restore |
+| P7 | `exec()` failure до точки замены сохраняет процесс | ⚠️ | `syscall.c` | Есть point-of-no-return после destroy old PD |
+| P8 | `fork()` наследует FD с refcount increment | 🟡 | SSOT 6.5 | Нужно проверить `task_fork()` |
+| P9 | `dup()` / `dup2()` увеличивают refcount IRQ-safe | ✅ | `syscall.c` | `irq_save()/irq_restore()` |
+| P10 | `mprotect(PROT_WRITE | PROT_EXEC)` запрещён | ✅ | `syscall.c` | Возвращает `-EPERM` |
+| P11 | `mmap(PROT_WRITE | PROT_EXEC)` запрещён | ✅ | `syscall.c` | Возвращает `-EPERM` |
+| P12 | `mprotect()` поддерживает partial VMA split | ✅ | `syscall.c`, SSOT S1 | `vma_protect_range()` |
+| P13 | `mprotect()` сохраняет CoW state | 🟡 | SSOT S1 | Нужно проверить `vmm_protect_page_in_pd()` |
+| P14 | Ring 3 не имеет доступа к kernel memory | ⚠️ | `syscall.c`, SSOT | Нужен аудит `paging.c` |
+| P15 | Syscall validates user pointers | ⚠️ | `syscall.c` | `is_user_pointer()` требует math hardening |
+| P16 | Strings copy from user safely | ⚠️ | `syscall.c` | `copy_string_from_user()` требует fault audit |
+| P17 | `FS_SYSTEM` даёт `EACCES` для Ring 3 | ⚠️ | `sys_mkdir_handler()` | Нужно проверить VFS/open/exec/unlink |
+| P18 | `sprintf()` безопасен | ⚠️ | `user_libc.c` | Сейчас потенциально unbounded |
+| P19 | `vsnprintf()` полностью C99 compliant | ⚠️ | `user_libc.c` | Return semantics не полностью C99 |
+| P20 | `struct dirent` ABI стабилен | ⚠️ | `user_libc.h`, `user_syscalls.h` | Есть mismatch `struct dirent` vs `dirent_t` |
+| P21 | Unimplemented prototypes не считаются ABI | 📋 | `user_libc.h` | Требуется inventory decision |
+| P22 | Freeze rules приняты | 🧊 | SSOT Day 1 | Новые syscall/drivers запрещены |
+
+---
+
+### 3.10.3 Public User ABI Inventory
+
+| Категория | API / элемент | `user_libc.h` | `user_libc.c` | `tcc_lib_os.c` / asm | ABI статус | Риск | Progress action |
+|---|---|---:|---:|---:|---|---|---|
+| Header model | `user_libc.h` monolithic bypass | ✅ | ✅ | — | Public | Low | Подтвердить как SSOT header |
+| Header model | Fake POSIX headers | ✅ | — | 🟡 | Public | Low | Проверить initrd/include |
+| Header model | `#include <stdint.h>` в `user_libc.c` | — | ⚠️ | — | Internal | Low | Решить: убрать или разрешить |
+| Errno | `errno` global | ✅ | ✅ | — | Public | Low | Frozen |
+| Errno | `__errno_location()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| Errno | `strerror()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Errno | `perror()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Memory | `malloc()` | ✅ | ✅ | — | Public | Low | Bump allocator by design |
+| Memory | `calloc()` | ✅ | ✅ | — | Public | Low | Проверить overflow check |
+| Memory | `realloc()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Memory | `free()` | ✅ | ✅ | — | Public | Low | No-op by design |
+| Memory | `mmap()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Memory | `munmap()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Memory | `mprotect()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| Memory | `sysconf(_SC_PAGESIZE)` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Mem ops | `memset()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Mem ops | `memcpy()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Mem ops | `memcmp()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Mem ops | `memmove()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strlen()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strcmp()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strncmp()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strcpy()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strncpy()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strcat()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strncat()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strchr()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strrchr()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strstr()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strdup()` | ✅ | ✅ | — | Public | Low | Frozen |
+| String | `strndup()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| String | `strpbrk()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| String | `getline()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Conversion | `atoi()` | ✅ | ✅ | — | Public | Low | INT_MIN hardened |
+| Conversion | `strtol()` | ✅ | ✅ | — | Public | Low | Saturating clamp |
+| Conversion | `strtoul()` | ✅ | ✅ | — | Public | Low | Нет `ERANGE` |
+| Conversion | `itoa()` | ✅ | ✅ | — | Enclave extension | Low | Non-standard |
+| Conversion | `uitoa()` | ✅ | ✅ | — | Enclave extension | Low | Non-standard |
+| Conversion | `strtod()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| Conversion | `strtof()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| Conversion | `strtold()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| Conversion | `ldexp()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| Conversion | `ldexpl()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| glibc compat | `__isoc23_strtol()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить реализацию |
+| glibc compat | `__isoc23_strtoul()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить реализацию |
+| glibc compat | `__isoc23_strtoll()` | ✅ | ❌ | ⚠️ | Public | High | SSOT: должен вызывать `strtoll`, не `strtoul` |
+| glibc compat | `__isoc23_strtoull()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить реализацию |
+| Printf | `printf()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Printf | `fprintf()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Printf | `sprintf()` | ✅ | ✅ | — | Public | High | Unbounded; требует policy |
+| Printf | `snprintf()` | ✅ | ✅ | — | Public | Medium | Return semantics не полностью C99 |
+| Printf | `vprintf()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Printf | `vfprintf()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Printf | `vsprintf()` | ✅ | ✅ | — | Public | High | Использует `size = -1` |
+| Printf | `vsnprintf()` | ✅ | ✅ | — | Public | Medium | Проверить C99 return |
+| FILE basic | `stdin/stdout/stderr` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `fopen()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `fclose()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `fflush()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `fread()` | ✅ | ✅ | — | Public | Medium | Проверить overflow `size*nmemb` |
+| FILE basic | `fgetc()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `fputc()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `fgets()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `ferror()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE basic | `feof()` | ✅ | ✅ | — | Public | Low | Frozen |
+| FILE advanced | `fwrite()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| FILE advanced | `fputs()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| FILE advanced | `fseek()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| FILE advanced | `ftell()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| FILE advanced | `fdopen()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| FILE advanced | `freopen()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| FILE advanced | `remove()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| File I/O | `open()` | ✅ | ✅ | — | Public | Low | Variadic mode OK |
+| File I/O | `close()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `read()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `write()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `lseek()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `unlink()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `mkdir()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `fstat()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `dup()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `dup2()` | ✅ | ✅ | — | Public | Low | Frozen |
+| File I/O | `ioctl()` | ✅ | ✅ | — | Public | Low | TIOCGWINSZ only |
+| File I/O | `isatty()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Path | `getcwd()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Path | `chdir()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Path | `realpath()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Directory | `struct dirent` | ✅ | — | — | Public | High | Mismatch с `dirent_t` |
+| Directory | `dirent_t` internal | — | — | ✅ | Internal | High | Нужно ABI decision |
+| Directory | POSIX `readdir()` wrapper | ❌ | ❌ | ❌ | Public | High | Сейчас только raw `sys_readdir()` |
+| Process | `fork()` | ✅ | ✅ | — | Public | Low | Wrapper OK |
+| Process | `exec()` | ✅ | ✅ | — | Public | Low | FD preserve OK |
+| Process | `waitpid()` | ✅ | ✅ | — | Public | Medium | Encoding требует `task.c` audit |
+| Process | `exit()` | ✅ | ✅ | — | Public | Low | Flushes stdout/stderr |
+| Process | `getpid()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Process | `system()` | ✅ | ✅ | — | Public | Medium | Simple command parsing |
+| Process | `execvp()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Process | `abort()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Process | `atexit()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `tcc_lib_os.c` |
+| Process | `__run_atexit_handlers()` | ✅ | ❌ | 🟡 | Internal/Public | Medium | Используется в `exit()` |
+| Process | `signal()` | ✅ | ✅ | — | Stub | Low | No-op |
+| jmp | `setjmp()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `setjmp.asm` |
+| jmp | `longjmp()` | ✅ | ❌ | 🟡 | Public | Medium | Проверить `setjmp.asm` |
+| jmp | `_setjmp()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `setjmp.asm` |
+| Time | `gettimeofday()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Time | `uname()` | ✅ | ✅ | — | Public | Low | Версия в syscall stale |
+| Time | `sysinfo()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Time | `sleep()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Time | `usleep()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Time | `time()` | ✅ | ✅ | — | Public | Low | Frozen |
+| Time | `clock()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Time | `localtime()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Sort/Search | `qsort()` | ✅ | ❌ | 🟡 | Public | Medium | SSOT: Heapsort |
+| Sort/Search | `bsearch()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Env | `getenv()` | ✅ | ✅ | — | Stub | Low | Всегда NULL |
+| Env | `environ` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Debug | `assert()` macro | ✅ | — | — | Public | Low | Macro only |
+| Debug | `__assert_fail()` | ✅ | ❌ | 🟡 | Public | Low | Проверить `tcc_lib_os.c` |
+| Dynamic | `dlopen()` | ✅ | ✅ | — | Stub | Low | ENOSYS |
+| Dynamic | `dlsym()` | ✅ | ✅ | — | Stub | Low | ENOSYS |
+| Dynamic | `dlclose()` | ✅ | ✅ | — | Stub | Low | ENOSYS |
+| Dynamic | `dlerror()` | ✅ | ✅ | — | Stub | Low | Static string |
+| Syscall wrappers | `syscall0/1/2/3` | — | — | ✅ | Internal | Low | Frozen |
+| Syscall wrappers | `sys_mmap()` asm | — | — | ⚠️ | Internal | Medium | EBP constraint risk |
+| Syscall wrappers | `sys_dup()` asm | — | — | ⚠️ | Internal | Low | Нет memory clobber |
+| Syscall wrappers | `sys_dup2()` asm | — | — | ⚠️ | Internal | Low | Нет memory clobber |
+| Kernel ABI | syscall numbers | ✅ | — | ✅ | Internal | Low | Linux-inspired, internal |
+| Kernel ABI | syscall dispatcher | — | — | ✅ | Internal | Low | `-ENOSYS` fallback |
+| Kernel ABI | `is_user_pointer()` | — | — | ⚠️ | Internal | Medium | Math hardening |
+| Kernel ABI | `copy_string_from_user()` | — | — | ⚠️ | Internal | Medium | Fault handling audit |
+| Kernel ABI | `sys_exec_handler()` | — | — | ⚠️ | Internal | High | FS_SYSTEM + point-of-no-return |
+| Kernel ABI | `sys_mkdir_handler()` | — | — | ✅ | Internal | Low | RBAC OK |
+| Kernel ABI | `sys_mprotect_handler()` | — | — | ✅ | Internal | Low | W^X + VMA split |
+| Kernel ABI | `sys_mmap_handler()` | — | — | ✅ | Internal | Low | W^X OK |
+| Kernel ABI | `sys_dup_handler()` | — | — | ✅ | Internal | Low | IRQ-safe refcount |
+| Kernel ABI | `sys_dup2_handler()` | — | — | ✅ | Internal | Low | IRQ-safe refcount |
+| Kernel ABI | `sys_brk_handler()` | — | — | ⚠️ | Internal | Low | Shrink не освобождает страницы |
+| Kernel ABI | `sys_sleep_handler()` | — | — | ⚠️ | Internal | Low | Tick overflow |
+| Kernel ABI | `sys_uname_handler()` | — | — | ⚠️ | Internal | Low | Stale version string |
+
+---
+
+### 3.10.4 Stabilization Findings Matrix
+
+| ID | Область | Файл / место | Находка | Severity | ABI impact | Статус | Действие |
+|---|---|---|---|---:|---|---|---|
+| F1 | Public ABI | `user_libc.h` | Много прототипов без реализации в `user_libc.c` | High | High | 📋 | Зафиксировать, что ABI = `libc.a`, не только `user_libc.c` |
+| F2 | Directory ABI | `user_libc.h`, `user_syscalls.h` | `struct dirent` не совпадает с `dirent_t` | High | High | 🛠 | Выбрать один ABI layout |
+| F3 | libc safety | `user_libc.c` | `sprintf()` / `vsprintf()` unbounded | High | Medium | 🛠 | Либо исправить, либо задокументировать unsafe |
+| F4 | libc compliance | `user_libc.c` | `vsnprintf()` возвращает фактическую длину | Medium | Medium | 📋 | Либо исправить, либо убрать C99 claim |
+| F5 | syscall security | `syscall.c` | `is_user_pointer()` large size arithmetic | Medium | High | 🛠 | Использовать safe upper-bound check |
+| F6 | syscall security | `syscall.c` | `copy_string_from_user()` без fault recovery | Medium | High | 📋 | Проверить page fault handler |
+| F7 | RBAC | `syscall.c` | `sys_exec_handler()` не проверяет `FS_SYSTEM` | High | High | 🛠 | Добавить `EACCES` для FS_SYSTEM |
+| F8 | exec reliability | `syscall.c` | Point-of-no-return после destroy old PD | Medium | Medium | 🛠 | Либо исправить, либо задокументировать |
+| F9 | exec reliability | `syscall.c` | Invalid argv string silently becomes empty | Medium | Medium | 🛠 | Лучше возвращать `-EFAULT` |
+| F10 | FILE I/O | `user_libc.c` | `fflush_write()` не обрабатывает partial write | Medium | Medium | 🛠 | Добавить loop/retry или error |
+| F11 | memory | `syscall.c` | `sys_brk()` shrink не unmap pages | Low | Low | 📋 | Задокументировать advisory shrink |
+| F12 | time | `syscall.c` | `sys_sleep()` tick overflow | Low | Low | 📋 | Опционально saturating sleep |
+| F13 | SSOT | `syscall.c` | `uname()` release/version stale | Low | Low | 🛠 | Синхронизировать с Alpha 0.5-rc1 |
+| F14 | header model | `user_libc.c` | Includes `<stdint.h>` despite monolithic bypass | Low | Low | 📋 | Привести к единому header policy |
+| F15 | syscall asm | `user_syscalls.h` | `sys_mmap()` EBP constraint risk | Medium | Medium | 📋 | Проверить/упростить wrapper |
+| F16 | syscall asm | `user_syscalls.h` | `sys_dup()` / `sys_dup2()` no memory clobber | Low | Low | 🛠 | Добавить `"memory"` |
+| F17 | conversion | `user_libc.c` | `strtoul()` не устанавливает `ERANGE` | Low | Low | 📋 | Опционально POSIX compliance |
+| F18 | conversion | `tcc_lib_os.c` | `__isoc23_strtoll()` должен вызывать `strtoll` | High | Medium | 🛠 | SSOT recommendation |
+| F19 | tasking | `task.c` | `fork()` FD refcount not source-verified here | Medium | High | 📋 | Проверить `task_fork()` |
+| F20 | tasking | `task.c` | `waitpid()` status encoding not source-verified here | Medium | High | 📋 | Проверить `task_waitpid()` |
+| F21 | VFS | `vfs.c` | `FS_SYSTEM` enforcement not fully source-verified | High | High | 📋 | Проверить open/read/write/unlink |
+| F22 | paging | `paging.c` | Ring 3 kernel access → SIGSEGV not source-verified here | High | High | 📋 | Проверить page fault handler |
+
+---
+
+### 3.10.5 Progress Gate for Alpha 0.5-rc1
+
+| Gate | Критерий | Статус | Комментарий |
+|---|---|---:|---|
+| G1 | SSOT имеет одну версию | ❌ | Есть Alpha 0.4 / Alpha 0.3 рассинхрон |
+| G2 | ABI policy draft создан | ✅ | Подготовлен раздел 3.9 |
+| G3 | ABI inventory создан | ✅ | Этот раздел |
+| G4 | Public ABI boundary понятен | 🟡 | Нужен `libc.a` inventory |
+| G5 | Internal ABI frozen | 🧊 | Syscall numbers frozen |
+| G6 | `waitpid` encoding verified | 🟡 | Нужен `task.c` audit |
+| G7 | `exec` FD preserve verified | ✅ | `syscall.c` |
+| G8 | `fork` FD refcount verified | 🟡 | Нужен `task.c` audit |
+| G9 | W^X verified | ✅ | `sys_mmap`, `sys_mprotect` |
+| G10 | Ring 3 isolation verified | 🟡 | Нужен `paging.c` audit |
+| G11 | `FS_SYSTEM` RBAC verified | ⚠️ | `mkdir` OK, нужен VFS/exec audit |
+| G12 | `dirent` ABI resolved | ❌ | Нужен decision |
+| G13 | `sprintf` policy resolved | ❌ | Нужен decision |
+| G14 | Baseline tests passed | ❌ | Тестирование временно недоступно |
+| G15 | Known HIGH findings triaged | ⚠️ | F1, F2, F3, F7, F18, F21 |
+
+---
+
+### 3.10.6 Recommended Priority
+
+| Приоритет | Задача | Причина |
+|---:|---|---|
+| 1 | `FS_SYSTEM` enforcement audit + `sys_exec` EACCES | Security / RBAC |
+| 2 | `dirent` ABI decision | Public ABI mismatch |
+| 3 | `sprintf` / `vsprintf` policy | Userspace safety |
+| 4 | `task.c` audit: fork FD refcount + waitpid status | Core ABI |
+| 5 | `paging.c` audit: Ring 3 kernel access + CoW | Core security |
+| 6 | `tcc_lib_os.c` source verification | ABI inventory completeness |
+| 7 | `is_user_pointer()` hardening | Zero Trust |
+| 8 | `copy_string_from_user()` fault audit | Zero Trust |
+| 9 | `sys_mmap` asm EBP constraint check | Potential correctness |
+| 10 | SSOT version cleanup | Documentation hygiene |
+
 ## 4. КАРТА ПАМЯТИ
 
 ### 4.1 Виртуальное адресное пространство
