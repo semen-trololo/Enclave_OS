@@ -90,16 +90,145 @@ static void handle_uptime(void) {
            hours, minutes, seconds);
 }
 
+// ============================================================================
+// SYSINFO: расширенная и красивая информация о системе
+// ============================================================================
+
+static void sysinfo_print_uptime(uint32_t total_seconds) {
+    uint32_t days    = total_seconds / 86400;
+    uint32_t hours   = (total_seconds % 86400) / 3600;
+    uint32_t minutes = (total_seconds % 3600) / 60;
+    uint32_t seconds = total_seconds % 60;
+
+    if (days > 0) {
+        printf("%ud %uh %um %us", days, hours, minutes, seconds);
+    } else if (hours > 0) {
+        printf("%uh %um %us", hours, minutes, seconds);
+    } else if (minutes > 0) {
+        printf("%um %us", minutes, seconds);
+    } else {
+        printf("%us", seconds);
+    }
+}
+
+static void sysinfo_print_ram(uint32_t bytes) {
+    uint32_t kb = bytes / 1024;
+    uint32_t mb = bytes / (1024 * 1024);
+
+    if (mb >= 1024) {
+        uint32_t gb_whole = mb / 1024;
+        uint32_t gb_frac  = (mb % 1024) * 10 / 1024;
+        printf("%u.%u GB", gb_whole, gb_frac);
+    } else if (mb >= 1) {
+        uint32_t mb_frac = (bytes % (1024 * 1024)) * 10 / (1024 * 1024);
+        printf("%u.%u MB", mb, mb_frac);
+    } else {
+        printf("%u KB", kb);
+    }
+}
+
+static void sysinfo_print_bar(uint32_t used_percent) {
+    const int bar_width = 30;
+    int filled = (int)((used_percent * bar_width) / 100);
+
+    printf("[");
+
+    for (int i = 0; i < bar_width; i++) {
+        if (i < filled) {
+            if (used_percent >= 90) {
+                printf(ANSI_RED "#" ANSI_RESET);
+            } else if (used_percent >= 70) {
+                printf(ANSI_YELLOW "#" ANSI_RESET);
+            } else {
+                printf(ANSI_GREEN "#" ANSI_RESET);
+            }
+        } else {
+            printf(ANSI_WHITE "-" ANSI_RESET);
+        }
+    }
+
+    printf("] %u%%", used_percent);
+}
+
 static void handle_sysinfo(void) {
     sysinfo_t info;
-    sysinfo(&info);
+    utsname_t uname_buf;
 
-    printf(ANSI_CYAN ANSI_BOLD "=== System Information ===" ANSI_RESET "\n");
-    printf(ANSI_BOLD "Uptime:       " ANSI_RESET "%u seconds\n", info.uptime);
-    printf(ANSI_BOLD "Total RAM:    " ANSI_RESET "%u MB\n", info.totalram / (1024 * 1024));
-    printf(ANSI_BOLD "Free RAM:     " ANSI_RESET "%u MB\n", info.freeram / (1024 * 1024));
-    printf(ANSI_BOLD "Processes:    " ANSI_RESET "%u\n", info.procs);
+    // Собираем данные из всех доступных syscalls.
+    sysinfo(&info);
+    uname(&uname_buf);
+
+    // ------------------------------------------------------------------------
+    // RAM: учитываем mem_unit (POSIX sysinfo convention).
+    // ------------------------------------------------------------------------
+    uint32_t unit = (info.mem_unit > 0) ? info.mem_unit : 1;
+
+    uint32_t total_bytes = info.totalram * unit;
+    uint32_t free_bytes  = info.freeram * unit;
+    uint32_t used_bytes  = (total_bytes > free_bytes) ? (total_bytes - free_bytes) : 0;
+
+    uint32_t used_percent = 0;
+    if (total_bytes > 0) {
+        used_percent = (used_bytes * 100) / total_bytes;
+    }
+
+    // ------------------------------------------------------------------------
+    // Вывод
+    // ------------------------------------------------------------------------
+    printf(ANSI_CYAN ANSI_BOLD "=== Enclave OS — System Information ===" ANSI_RESET "\n\n");
+
+    // [ OS ]
+    printf(ANSI_YELLOW "  [ Operating System ]" ANSI_RESET "\n");
+    printf("  " ANSI_BOLD "OS:           " ANSI_RESET "%s %s\n",
+           uname_buf.sysname, uname_buf.release);
+    printf("  " ANSI_BOLD "Version:      " ANSI_RESET "%s\n", uname_buf.version);
+    printf("  " ANSI_BOLD "Machine:      " ANSI_RESET "%s\n", uname_buf.machine);
+    printf("  " ANSI_BOLD "Hostname:     " ANSI_RESET "%s\n", uname_buf.nodename);
     printf("\n");
+
+    // [ Uptime ]
+    printf(ANSI_YELLOW "  [ Uptime ]" ANSI_RESET "\n");
+    printf("  " ANSI_BOLD "Up:           " ANSI_RESET);
+    sysinfo_print_uptime(info.uptime);
+    printf("\n\n");
+
+    // [ Memory ]
+    printf(ANSI_YELLOW "  [ Memory ]" ANSI_RESET "\n");
+
+    printf("  " ANSI_BOLD "Total:        " ANSI_RESET);
+    sysinfo_print_ram(total_bytes);
+    printf("\n");
+
+    printf("  " ANSI_BOLD "Free:         " ANSI_RESET);
+    sysinfo_print_ram(free_bytes);
+    printf("\n");
+
+    printf("  " ANSI_BOLD "Used:         " ANSI_RESET);
+    sysinfo_print_ram(used_bytes);
+    printf(" (%u%%)\n", used_percent);
+
+    printf("  " ANSI_BOLD "Usage:        " ANSI_RESET);
+    sysinfo_print_bar(used_percent);
+    printf("\n\n");
+
+    // [ Processes ]
+    printf(ANSI_YELLOW "  [ Processes ]" ANSI_RESET "\n");
+    printf("  " ANSI_BOLD "Total:        " ANSI_RESET "%u\n", info.procs);
+    printf("  " ANSI_BOLD "Shell PID:    " ANSI_RESET "%d\n", getpid());
+    printf("\n");
+
+    // [ Terminal ]
+    struct winsize ws;
+    ws.ws_row = 0;
+    ws.ws_col = 0;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 &&
+        ws.ws_col > 0 && ws.ws_row > 0) {
+        printf(ANSI_YELLOW "  [ Terminal ]" ANSI_RESET "\n");
+        printf("  " ANSI_BOLD "Size:         " ANSI_RESET "%u columns x %u rows\n",
+               ws.ws_col, ws.ws_row);
+        printf("\n");
+    }
 }
 
 // ============================================================================
@@ -409,55 +538,67 @@ static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     fflush(stdout);
 }
 
+// ============================================================================
+// CAT: быстрая версия с буфером 4 KB
+// ============================================================================
+
+#define CAT_BUFFER_SIZE 4096
+
 static void handle_cat(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     if (argc < 2) {
-        fprintf(stderr, ANSI_RED "Usage: cat <filepath>" ANSI_RESET "\n");
+        fprintf(stderr, ANSI_RED "Usage: cat <file> [file2 ...]" ANSI_RESET "\n");
         return;
     }
 
-    const char* path = args[1];
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, ANSI_RED "cat: %s: %s" ANSI_RESET "\n", path, strerror(errno));
-        return;
+    // Static buffer: не тратим 4 KB user stack.
+    static char cat_buffer[CAT_BUFFER_SIZE];
+
+    for (int i = 1; i < argc; i++) {
+        const char* path = args[i];
+
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr,
+                    ANSI_RED "cat: %s: %s" ANSI_RESET "\n",
+                    path,
+                    strerror(errno));
+            continue;
+        }
+
+        // Защита от чтения директории.
+        struct stat st;
+        if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+            fprintf(stderr,
+                    ANSI_RED "cat: %s: Is a directory" ANSI_RESET "\n",
+                    path);
+            close(fd);
+            continue;
+        }
+
+        ssize_t bytes_read;
+        char last_char = 0;
+
+        while ((bytes_read = read(fd, cat_buffer, CAT_BUFFER_SIZE)) > 0) {
+            write(STDOUT_FILENO, cat_buffer, (size_t)bytes_read);
+            last_char = cat_buffer[bytes_read - 1];
+        }
+
+        if (bytes_read < 0) {
+            fprintf(stderr,
+                    ANSI_RED "cat: %s: read error: %s" ANSI_RESET "\n",
+                    path,
+                    strerror(errno));
+        }
+
+        // Добавляем перевод строки только если файл не заканчивается на '\n'.
+        if (last_char != '\n' && last_char != '\0') {
+            write(STDOUT_FILENO, "\n", 1);
+        }
+
+        close(fd);
     }
 
-    char buffer[512];
-    ssize_t bytes_read;
-
-    while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) {
-        write(STDOUT_FILENO, buffer, bytes_read);
-    }
-
-    printf("\n");
-    close(fd);
-}
-
-static void handle_mkdir(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
-    if (argc < 2) {
-        fprintf(stderr, ANSI_RED "Usage: mkdir <path>" ANSI_RESET "\n");
-        return;
-    }
-
-    if (mkdir(args[1], 0755) != 0) {
-        fprintf(stderr, ANSI_RED "mkdir: %s: %s" ANSI_RESET "\n", args[1], strerror(errno));
-        return;
-    }
-    printf(ANSI_GREEN "Created directory: %s" ANSI_RESET "\n", args[1]);
-}
-
-static void handle_rm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
-    if (argc < 2) {
-        fprintf(stderr, ANSI_RED "Usage: rm <path>" ANSI_RESET "\n");
-        return;
-    }
-
-    int ret = unlink(args[1]);
-    if (ret < 0) {
-        fprintf(stderr, ANSI_RED "rm: %s: %s" ANSI_RESET "\n", args[1], strerror(errno));
-        return;
-    }
-    printf(ANSI_GREEN "Removed: %s" ANSI_RESET "\n", args[1]);
+    fflush(stdout);
 }
 
 static void handle_run(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
