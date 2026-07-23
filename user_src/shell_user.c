@@ -102,39 +102,311 @@ static void handle_sysinfo(void) {
     printf("\n");
 }
 
+// ============================================================================
+// LS: минимальный правильный табличный вывод
+// ============================================================================
+//
+// Требования:
+//   - директории синие + '/'
+//   - ELF зелёные
+//   - обычные файлы белые
+//   - табличный вывод
+//   - сортировка: сначала директории по алфавиту, потом файлы по алфавиту
+//
+// ============================================================================
+
+#define LS_MAX_ENTRIES    1024
+#define LS_NAME_MAX       256
+#define LS_COL_PADDING    2
+#define LS_DEFAULT_WIDTH  80
+
+#ifndef DT_DIR
+#define DT_DIR 4
+#endif
+
+#ifndef DT_REG
+#define DT_REG 8
+#endif
+
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#endif
+
+typedef struct {
+    char name[LS_NAME_MAX];
+    unsigned char type;
+} ls_entry_t;
+
+// ----------------------------------------------------------------------------
+// Компаратор для qsort:
+//   1. Сначала директории
+//   2. Потом файлы
+//   3. Внутри каждой группы — по алфавиту
+// ----------------------------------------------------------------------------
+static int ls_entry_cmp(const void* a, const void* b) {
+    const ls_entry_t* ea = (const ls_entry_t*)a;
+    const ls_entry_t* eb = (const ls_entry_t*)b;
+
+    int ea_dir = (ea->type == DT_DIR);
+    int eb_dir = (eb->type == DT_DIR);
+
+    if (ea_dir != eb_dir) {
+        return ea_dir ? -1 : 1;
+    }
+
+    return strcmp(ea->name, eb->name);
+}
+
+// ----------------------------------------------------------------------------
+// Определение ELF по расширению.
+// Для Enclave OS это пока нормальный и дешёвый подход.
+// ----------------------------------------------------------------------------
+static int ls_is_elf_name(const char* name) {
+    size_t len = strlen(name);
+
+    if (len > 4 && strcmp(name + len - 4, ".elf") == 0) {
+        return 1;
+    }
+
+    return 0;
+}
+
+// ----------------------------------------------------------------------------
+// Видимая длина имени:
+//   - для файла: strlen(name)
+//   - для директории: strlen(name) + 1, потому что добавляем '/'
+// ----------------------------------------------------------------------------
+static int ls_visible_len(const ls_entry_t* e) {
+    int len = (int)strlen(e->name);
+
+    if (e->type == DT_DIR) {
+        len++; // '/'
+    }
+
+    return len;
+}
+
+// ----------------------------------------------------------------------------
+// Ширина терминала.
+// Если ioctl не работает или вернул 0 — используем 80 колонок.
+// ----------------------------------------------------------------------------
+static int ls_get_terminal_width(void) {
+    struct winsize ws;
+
+    ws.ws_row = 0;
+    ws.ws_col = 0;
+    ws.ws_xpixel = 0;
+    ws.ws_ypixel = 0;
+
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+        return (int)ws.ws_col;
+    }
+
+    return LS_DEFAULT_WIDTH;
+}
+
+// ----------------------------------------------------------------------------
+// Печать пробелов для выравнивания.
+// Используем printf, чтобы не смешивать buffered stdio и raw write.
+// ----------------------------------------------------------------------------
+static void ls_print_spaces(int n) {
+    while (n-- > 0) {
+        printf(" ");
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Печать одной записи с цветом.
+// ----------------------------------------------------------------------------
+static void ls_print_entry(const ls_entry_t* e) {
+    if (e->type == DT_DIR) {
+        // Директория: синяя жирная + '/'
+        printf(ANSI_BLUE ANSI_BOLD "%s/" ANSI_RESET, e->name);
+    } else if (ls_is_elf_name(e->name)) {
+        // ELF: зелёный жирный
+        printf(ANSI_GREEN ANSI_BOLD "%s" ANSI_RESET, e->name);
+    } else {
+        // Обычный файл: белый / светло-серый
+        printf(ANSI_WHITE "%s" ANSI_RESET, e->name);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// ls [path]
+// ----------------------------------------------------------------------------
 static void handle_ls(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
     const char* path = "/";
-    if (argc > 1) path = args[1];
+
+    if (argc > 1) {
+        path = args[1];
+    }
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        fprintf(stderr, ANSI_RED "ls: cannot access '%s': %s" ANSI_RESET "\n", path, strerror(errno));
+        fprintf(stderr,
+                ANSI_RED "ls: cannot access '%s': %s" ANSI_RESET "\n",
+                path,
+                strerror(errno));
         return;
     }
 
-    dirent_t entry;
-    uint32_t index = 0;
+    // ------------------------------------------------------------------------
+    // Если путь указывает на обычный файл, а не директорию,
+    // выводим его имя и выходим.
+    // ------------------------------------------------------------------------
+    struct stat st;
 
-    int32_t res = sys_readdir(fd, index, &entry);
-    while (res == 0) {
-        char type_char = (entry.type == 4) ? 'd' : '-';
-        int len = strlen(entry.name);
-        
-        if (entry.type == 4) {
-            printf("  %c " ANSI_BLUE ANSI_BOLD "%s" ANSI_RESET "\n", type_char, entry.name);
-        } else if (len > 4 && strcmp(entry.name + len - 4, ".elf") == 0) {
-            printf("  %c " ANSI_GREEN ANSI_BOLD "%s" ANSI_RESET "\n", type_char, entry.name);
-        } else if (len > 2 && strcmp(entry.name + len - 2, ".c") == 0) {
-            printf("  %c " ANSI_YELLOW "%s" ANSI_RESET "\n", type_char, entry.name);
+    if (fstat(fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
+        const char* base = strrchr(path, '/');
+
+        if (base == NULL) {
+            base = path;
+        } else if (base[1] != '\0') {
+            base++;
         } else {
-            printf("  %c %s\n", type_char, entry.name);
+            base = "/";
         }
-        
+
+        ls_entry_t single;
+
+        strncpy(single.name, base, LS_NAME_MAX - 1);
+        single.name[LS_NAME_MAX - 1] = '\0';
+        single.type = DT_REG;
+
+        ls_print_entry(&single);
+        printf("\n");
+
+        close(fd);
+        fflush(stdout);
+        return;
+    }
+
+    // ------------------------------------------------------------------------
+    // Читаем директорий.
+    // static, чтобы не тратить 256+ KB user stack.
+    // ------------------------------------------------------------------------
+    static ls_entry_t entries[LS_MAX_ENTRIES];
+
+    int count = 0;
+    int truncated = 0;
+    uint32_t index = 0;
+    dirent_t entry;
+
+    while (1) {
+        if (count >= LS_MAX_ENTRIES) {
+            truncated = 1;
+            break;
+        }
+
+        int32_t res = sys_readdir(fd, index, &entry);
+        if (res != 0) {
+            break;
+        }
+
+        // Защита от пустых или служебных записей.
+        if (entry.name[0] == '\0') {
+            index++;
+            continue;
+        }
+
+        // Пропускаем . и .. если они есть.
+        if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0) {
+            index++;
+            continue;
+        }
+
+        strncpy(entries[count].name, entry.name, LS_NAME_MAX - 1);
+        entries[count].name[LS_NAME_MAX - 1] = '\0';
+        entries[count].type = entry.type;
+
+        count++;
         index++;
-        res = sys_readdir(fd, index, &entry);
     }
 
     close(fd);
+
+    if (count == 0) {
+        return;
+    }
+
+    // ------------------------------------------------------------------------
+    // Сортировка:
+    //   - сначала директории;
+    //   - потом файлы;
+    //   - внутри групп по алфавиту.
+    // ------------------------------------------------------------------------
+    qsort(entries, (size_t)count, sizeof(ls_entry_t), ls_entry_cmp);
+
+    // ------------------------------------------------------------------------
+    // Считаем максимальную видимую длину имени.
+    // ------------------------------------------------------------------------
+    int term_width = ls_get_terminal_width();
+    int max_len = 0;
+
+    for (int i = 0; i < count; i++) {
+        int len = ls_visible_len(&entries[i]);
+
+        if (len > max_len) {
+            max_len = len;
+        }
+    }
+
+    int col_width = max_len + LS_COL_PADDING;
+
+    if (col_width < 1) {
+        col_width = 1;
+    }
+
+    int cols = term_width / col_width;
+
+    if (cols < 1) {
+        cols = 1;
+    }
+
+    if (cols > count) {
+        cols = count;
+    }
+
+    // ------------------------------------------------------------------------
+    // Табличный вывод.
+    //
+    // Здесь используется row-major порядок:
+    //
+    //   dir1   dir2   dir3
+    //   dir4   file1  file2
+    //
+    // Это хорошо сочетается с требованием "директории сверху".
+    //
+    // Если захочешь поведение как у GNU ls, то есть column-major,
+    // я ниже покажу, как заменить цикл.
+    // ------------------------------------------------------------------------
+    for (int i = 0; i < count; i++) {
+        ls_print_entry(&entries[i]);
+
+        if ((i + 1) % cols != 0) {
+            int pad = col_width - ls_visible_len(&entries[i]);
+
+            if (pad < LS_COL_PADDING) {
+                pad = LS_COL_PADDING;
+            }
+
+            ls_print_spaces(pad);
+        } else {
+            printf("\n");
+        }
+    }
+
+    if (count % cols != 0) {
+        printf("\n");
+    }
+
+    if (truncated) {
+        fprintf(stderr,
+                ANSI_YELLOW "ls: warning: too many entries, truncated to %d" ANSI_RESET "\n",
+                LS_MAX_ENTRIES);
+    }
+
+    fflush(stdout);
 }
 
 static void handle_cat(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
