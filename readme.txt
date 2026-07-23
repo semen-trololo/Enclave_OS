@@ -319,20 +319,20 @@ Enclave OS предоставляет POSIX-like C API для пользоват
 | P1 | Public User ABI — это POSIX-like C API, а не Linux binary ABI | 🧊 | SSOT 3.8 | Зафиксировано концептуально |
 | P2 | Public ABI предоставляется `libc.a`, а не только `user_libc.c` | 🟡 | SSOT 8.6.6 | `libc.a = user_libc.o + tcc_lib_os.o + setjmp.o` |
 | P3 | Internal Kernel ABI — внутренняя деталь реализации | ✅ | `syscall.h`, `user_syscalls.h` | Syscall numbers Linux-inspired, но internal |
-| P4 | `waitpid()` status encoding: normal exit = `exit_code`, killed = `-1` | 🟡 | SSOT Appendix A | Нужно проверить `task.c` |
+| P4 | `waitpid()` status encoding: normal exit = `exit_code`, killed = `-1` | ✅ / ⚠️ | code | Encoding подтверждён, но нет truncation exit_code & 0xFF |
 | P5 | `waitpid()` не Linux-compatible | 🟡 | SSOT Appendix A | Нет `<< 8`, нет WIFEXITED semantics |
 | P6 | `exec()` сохраняет FD table | ✅ | `syscall.c` | `saved_fds[]` + restore |
 | P7 | `exec()` failure до точки замены сохраняет процесс | ⚠️ | `syscall.c` | Есть point-of-no-return после destroy old PD |
-| P8 | `fork()` наследует FD с refcount increment | 🟡 | SSOT 6.5 | Нужно проверить `task_fork()` |
+| P8 | `fork()` наследует FD с refcount increment | ✅ | SSOT 6.5 |  `task_fork()` |
 | P9 | `dup()` / `dup2()` увеличивают refcount IRQ-safe | ✅ | `syscall.c` | `irq_save()/irq_restore()` |
 | P10 | `mprotect(PROT_WRITE | PROT_EXEC)` запрещён | ✅ | `syscall.c` | Возвращает `-EPERM` |
 | P11 | `mmap(PROT_WRITE | PROT_EXEC)` запрещён | ✅ | `syscall.c` | Возвращает `-EPERM` |
 | P12 | `mprotect()` поддерживает partial VMA split | ✅ | `syscall.c`, SSOT S1 | `vma_protect_range()` |
-| P13 | `mprotect()` сохраняет CoW state | 🟡 | SSOT S1 | Нужно проверить `vmm_protect_page_in_pd()` |
-| P14 | Ring 3 не имеет доступа к kernel memory | ⚠️ | `syscall.c`, SSOT | Нужен аудит `paging.c` |
+| P13 | `mprotect()` сохраняет CoW state | ✅ | SSOT S1 | vmm_protect_page_in_pd() подтверждён |
+| P14 | Ring 3 не имеет доступа к kernel memory | ✅ / ⚠️ | `syscall.c`, SSOT | PF handler подтверждён, но FB PAGE_USER — hardening risk |
 | P15 | Syscall validates user pointers | ⚠️ | `syscall.c` | `is_user_pointer()` требует math hardening |
 | P16 | Strings copy from user safely | ⚠️ | `syscall.c` | `copy_string_from_user()` требует fault audit |
-| P17 | `FS_SYSTEM` даёт `EACCES` для Ring 3 | ⚠️ | `sys_mkdir_handler()` | Нужно проверить VFS/open/exec/unlink |
+| P17 | `FS_SYSTEM` даёт `EACCES` для Ring 3 | ❌ / ⚠️ | `sys_mkdir_handler()` | mkdir OK, но open/create/unlink/readdir/exec неполны |
 | P18 | `sprintf()` безопасен | ⚠️ | `user_libc.c` | Сейчас потенциально unbounded |
 | P19 | `vsnprintf()` полностью C99 compliant | ⚠️ | `user_libc.c` | Return semantics не полностью C99 |
 | P20 | `struct dirent` ABI стабилен | ⚠️ | `user_libc.h`, `user_syscalls.h` | Есть mismatch `struct dirent` vs `dirent_t` |
