@@ -417,6 +417,12 @@ static int sys_open_handler(struct regs* r) {
 // ========================================================================
 static int sys_close_handler(struct regs* r) {
     int fd = (int)r->ebx;
+    
+    /* Zero Trust: bounds check (SSOT §3.2, SLA #5) */
+    if (fd < 0 || fd >= TASK_MAX_OPEN_FILES) {
+        return -EBADF;
+    }
+    
     return vfs_close_fd(current_task, fd);
 }
 

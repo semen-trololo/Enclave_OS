@@ -725,14 +725,20 @@ int open(const char* pathname, int flags, ...) {
         va_end(args);
     }
     int fd = sys_open(pathname, flags, mode);
-    if (fd < 0) errno = -fd;
+    if (fd < 0) {
+        errno = -fd;
+        return -1;
+    }
     return fd;
 }
 
 int close(int fd) {
     int ret = sys_close(fd);
-    if (ret < 0) errno = -ret;
-    return ret;
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return 0;
 }
 
 ssize_t read(int fd, void* buf, size_t count) {

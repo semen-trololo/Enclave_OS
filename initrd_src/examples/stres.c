@@ -10,6 +10,28 @@
 void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
 int munmap(void* addr, size_t length);
 
+/* ========================================================================
+ * SHARED: Raw readdir via INT 0x80
+ * Определено ОДИН раз в начале файла.
+ * TCC v0.9.27: без static/inline (file scope safety).
+ * ======================================================================== */
+typedef struct {
+    uint32_t ino;
+    uint32_t type;
+    char     name[256];
+} test_dirent_t;
+
+int32_t test_readdir(int fd, uint32_t index, test_dirent_t* entry) {
+    int32_t ret;
+    __asm__ volatile(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(141), "b"(fd), "c"(index), "d"(entry)
+        : "memory"
+    );
+    return ret;
+}
+
 /* ---- ANSI Colors ---- */
 #define RED     "\033[31m"
 #define GREEN   "\033[32m"
@@ -125,17 +147,12 @@ static void test_vmm_mprotect_flip(void) {
     exit(0);
 }
 
-/* Test: Process Rapid Fork/Exit Cycle (T5 regression)
- * 20 циклов fork+exit. Если T5 не исправлен, timer IRQ в окне
- * между vmm_destroy_address_space и schedule() вызовет Triple Fault.
- */
+/* Test: Process Rapid Fork/Exit Cycle (T5 regression) */
 static void test_proc_rapid_fork_exit(void) {
     for (int i = 0; i < 20; i++) {
         pid_t pid = fork();
         if (pid < 0) exit(1);
         if (pid == 0) {
-            /* Ребёнок: минимальная работа и немедленный exit.
-             * Создаёт максимальное давление на vmm_destroy_address_space. */
             volatile int x = i;
             exit(x);
         }
@@ -159,40 +176,30 @@ static void test_fpu_x87_math(void) {
     exit(0);
 }
 
-/* Test: VMM mprotect Partial VMA Split (S1 fix)
- * 3 страницы: mprotect ТОЛЬКО среднюю → READ.
- * Крайние остаются writable. Средняя readable.
- * Доказывает: VMA splitting работает, PTE обновлены только для целевой страницы.
- */
+/* Test: VMM mprotect Partial VMA Split (S1 fix) */
 static void test_vmm_mprotect_partial(void) {
     char* base = (char*)mmap(NULL, 3 * 4096, PROT_READ|PROT_WRITE,
                              MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) exit(1);
 
-    base[0]     = 'A';   /* page 0 */
-    base[4096]  = 'B';   /* page 1 */
-    base[8192]  = 'C';   /* page 2 */
+    base[0]     = 'A';
+    base[4096]  = 'B';
+    base[8192]  = 'C';
 
-    /* mprotect только среднюю страницу → READ */
     if (mprotect(base + 4096, 4096, PROT_READ) != 0) exit(2);
 
-    /* Крайние страницы остаются writable */
     base[0]    = 'X';
     base[8192] = 'Z';
     if (base[0] != 'X') exit(3);
     if (base[8192] != 'Z') exit(4);
 
-    /* Средняя страница readable */
     if (base[4096] != 'B') exit(5);
 
     munmap(base, 3 * 4096);
     exit(0);
 }
 
-/* Test: VMM mprotect Partial SIGSEGV (child dies)
- * mprotect среднюю страницу → READ, затем запись → SIGSEGV.
- * Доказывает: VMA split + PTE update корректно запрещают запись.
- */
+/* Test: VMM mprotect Partial SIGSEGV (child dies) */
 static void test_vmm_mprotect_partial_sigsegv(void) {
     char* base = (char*)mmap(NULL, 3 * 4096, PROT_READ|PROT_WRITE,
                              MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
@@ -201,10 +208,9 @@ static void test_vmm_mprotect_partial_sigsegv(void) {
     base[4096] = 'B';
     mprotect(base + 4096, 4096, PROT_READ);
 
-    /* Запись в защищённую страницу → SIGSEGV (task_kill_current) */
     base[4096] = 'X';
 
-    exit(1);  /* Не должно дойти */
+    exit(1);
 }
 
 /* Test 7: FPU Fork Preservation */
@@ -450,7 +456,7 @@ static void test_syscall_invalid(void) {
 static void test_time_monotonicity(void) {
     timeval_t tv1, tv2;
     gettimeofday(&tv1, NULL);
-    usleep(10000);  /* 10 ms */
+    usleep(10000);
     gettimeofday(&tv2, NULL);
     if (tv2.tv_sec < tv1.tv_sec) exit(1);
     if (tv2.tv_sec == tv1.tv_sec && tv2.tv_usec <= tv1.tv_usec) exit(2);
@@ -476,16 +482,15 @@ static void test_vmm_mprotect_sigsegv(void) {
     exit(1);
 }
 
-/* Test 25: FPU Context Switch Isolation (x87 via C double)
- * TinyCC генерирует x87 инструкции (fld/fstp/fadd) для double,
- * которые триггерят тот же #NM Handler и fxsave/fxrstor, что и SSE.
- * Проверяем, что FPU-регистры (ST0-ST7) не "протекают" между процессами.
- */
+/* ========================================================================
+ * TESTS 25-27: FPU Context Switch / Precision / Syscall Safety
+ * ======================================================================== */
+
+/* Test 25: FPU Context Switch Isolation */
 static void test_fpu_context_switch(void) {
     volatile double parent_val = 3.14159265358979;
     volatile double child_val  = 2.71828182845904;
 
-    /* Форсируем загрузку parent_val в x87 ST0 через volatile read + math */
     volatile double check = parent_val * 1.0;
     if (check < 3.14 || check > 3.15) exit(1);
 
@@ -493,24 +498,20 @@ static void test_fpu_context_switch(void) {
     if (pid < 0) exit(2);
 
     if (pid == 0) {
-        /* Ребенок загружает своё значение в x87 и гоняет математику */
         volatile double c = child_val;
         for (int i = 0; i < 20; i++) {
             c = c * 1.0001;
             c = c / 1.0001;
             if (c < 2.71 || c > 2.72) exit(3);
-            /* Отдаём CPU, форсируя context switch и fxsave/fxrstor */
             for (volatile int j = 0; j < 50000; j++);
         }
         exit(0);
     }
 
-    /* Родитель тоже отдаёт CPU, позволяя планировщику гонять задачи */
     for (int i = 0; i < 20; i++) {
         for (volatile int j = 0; j < 50000; j++);
     }
 
-    /* Проверяем, что x87 родителя не затёрся значением ребёнка */
     if (parent_val < 3.14 || parent_val > 3.15) exit(4);
 
     int status = 0;
@@ -520,28 +521,19 @@ static void test_fpu_context_switch(void) {
     exit(0);
 }
 
-/* Test 26: FPU Math Precision (x87 80-bit extended)
- * Проверяем, что x87 FPU сохраняет полную точность 80-bit extended precision
- * после fork + context switch. Расширенный диапазон допуска для robustness.
- */
+/* Test 26: FPU Math Precision */
 static void test_fpu_precision(void) {
-    /* Число, требующее полной 80-bit точности */
     volatile double a = 1.0 / 3.0;
     volatile double b = a * 3.0;
 
-    /* Расширенный диапазон допуска (0.999..1.001 вместо 0.9999..1.0001)
-     * Это делает тест robust к особенностям округления IEEE 754 
-     * и различиям между 64-bit/80-bit precision в x87 */
     if (b < 0.999 || b > 1.001) exit(1);
 
     pid_t pid = fork();
     if (pid < 0) exit(2);
 
     if (pid == 0) {
-        /* Ребёнок делает свою математику */
         volatile double x = 2.0 / 7.0;
         volatile double y = x * 7.0;
-        /* Аналогично расширенный допуск */
         if (y < 1.999 || y > 2.001) exit(3);
         exit(0);
     }
@@ -549,134 +541,97 @@ static void test_fpu_precision(void) {
     int status = 0;
     waitpid(pid, &status, 0);
 
-    /* Проверяем, что точность родителя не деградировала */
     volatile double c = a * 3.0;
     if (c < 0.999 || c > 1.001) exit(4);
     if (status != 0) exit(5);
     exit(0);
 }
 
-/* Test 27: FPU Syscall Ring Transition Safety
- * Доказывает, что переходы Ring 3 -> Ring 0 (syscall) -> Ring 3
- * не затирают x87 FPU state. Ядро (Ring 0) не использует FPU,
- * но INT 0x80 триггерит context switch, который должен сохранить ST0-ST7.
- */
+/* Test 27: FPU Syscall Ring Transition Safety */
 static void test_fpu_syscall_safety(void) {
     volatile double magic = 9.99999;
     volatile double check = 0.0;
 
-    /* Загружаем magic в x87 через volatile */
     check = magic * 1.0;
     if (check < 9.99 || check > 10.01) exit(1);
 
-    /* 100 переходов в Ring 0 и обратно */
     for (int i = 0; i < 100; i++) {
-        getpid(); /* syscall: Ring 3 -> Ring 0 -> Ring 3 */
+        getpid();
     }
 
-    /* Проверяем, что x87 state сохранился */
     check = magic * 1.0;
     if (check < 9.99 || check > 10.01) exit(2);
     exit(0);
 }
 
 /* ========================================================================
- * TESTS 28-32 (Production Hardening — P0 Critical Edge Cases)
+ * TESTS 28-32: Production Hardening — P0 Critical Edge Cases
  * ======================================================================== */
 
-/* Test 28: Heap Exhaustion (sys_brk OOM Protection + PMM OOM Trap)
- * Проверяет два сценария OOM:
- * 1. sys_brk лимит (USER_HEAP_MAX_SIZE = 64MB) — malloc возвращает NULL
- * 2. PMM OOM — malloc возвращает указатель, но запись вызывает SIGSEGV
- * Тест проходит, если либо malloc вернул NULL, либо процесс убит ядром.
- */
+/* Test 28: Heap Exhaustion */
 static void test_heap_exhaustion(void) {
     void* ptrs[2048];
     int allocated = 0;
-    
-    /* Выделяем блоки по 32KB. 64MB / 32KB = 2048 блоков (лимит sys_brk) */
+
     for (int i = 0; i < 2048; i++) {
         ptrs[i] = malloc(32768);
-        if (ptrs[i] == NULL) break;  /* sys_brk вернул -ENOMEM */
+        if (ptrs[i] == NULL) break;
         allocated++;
-        
-        /* Форсируем Page Fault для выделения физической страницы.
-         * Если PMM закончился, это вызовет SIGSEGV (OOM Trap). */
         ((char*)ptrs[i])[0] = (char)(i & 0xFF);
     }
-    
-    /* Если выделили меньше 1800 блоков — что-то пошло не так */
+
     if (allocated < 1800) exit(1);
-    
-    /* Следующий malloc должен вернуть NULL (sys_brk лимит) */
+
     void* overflow = malloc(32768);
     if (overflow == NULL) {
-        /* Сценарий 1: sys_brk защитил от OOM */
         exit(0);
     }
-    
-    /* Если malloc вернул указатель, пытаемся записать.
-     * Если PMM закончился — SIGSEGV (тест проходит через expect_death).
-     * Если запись успешна — sys_brk не защитил (тест падает). */
+
     ((char*)overflow)[0] = 'X';
-    
-    /* Если дошли сюда — sys_brk не работает */
+
     exit(2);
 }
 
-/* Test 29: Stack Overflow (Guard Page SIGSEGV)
- * Ожидает смерти процесса (expect_death = 1).
- * Проверяет, что глубокая рекурсия пробивает USER_STACK_SIZE (64KB) и триггерит
- * Page Fault на Guard Page, который ядро корректно обрабатывает как SIGSEGV.
- */
+/* Test 29: Stack Overflow (Guard Page SIGSEGV) */
 static volatile int depth_29 = 0;
 static void recurse_29(void) {
     depth_29++;
-    char buf[4096]; /* 4KB per frame */
-    memset(buf, 'X', sizeof(buf)); /* Форсируем Page Fault на каждой странице */
-    if (depth_29 < 10000) recurse_29(); /* 10000 * 4KB = 40MB >> 64KB stack */
+    char buf[4096];
+    memset(buf, 'X', sizeof(buf));
+    if (depth_29 < 10000) recurse_29();
 }
 
 static void test_stack_overflow_guard(void) {
     recurse_29();
-    exit(1); /* Не должно дойти сюда */
+    exit(1);
 }
 
-/* Test 30: FD Exhaustion (EMFILE Protection)
- * Проверяет, что fd_table защищен от переполнения (TASK_MAX_OPEN_FILES=256).
- * При исчерпании лимита sys_open должен вернуть -EMFILE.
- */
+/* Test 30: FD Exhaustion (EMFILE Protection) */
 static void test_fd_exhaustion(void) {
     const char* test_file = "/tmp/fd_single_30.bin";
-    
-    /* Создаём один тестовый файл */
+
     int base_fd = open(test_file, O_CREAT|O_WRONLY, 0644);
     if (base_fd < 0) exit(1);
     write(base_fd, "test", 4);
     close(base_fd);
-    
+
     int fds[300];
     int opened = 0;
-    
-    /* Открываем ОДИН файл до 260 раз
-     * (с запасом: 256 - 3 стандартных FD = 253 доступных) */
+
     for (int i = 0; i < 260; i++) {
         fds[i] = open(test_file, O_RDONLY);
         if (fds[i] < 0) break;
         opened++;
     }
-    
-    /* Должны открыть минимум 240 файлов (с запасом на внутренние FD) */
+
     if (opened < 240) exit(2);
-    
-    /* Следующий open должен вернуть -EMFILE (< 0) */
+
     int overflow = open(test_file, O_RDONLY);
     if (overflow >= 0) {
         close(overflow);
-        exit(3); /* fd_table не защитил от переполнения */
+        exit(3);
     }
-    
-    /* Cleanup */
+
     for (int i = 0; i < opened; i++) {
         close(fds[i]);
     }
@@ -684,20 +639,15 @@ static void test_fd_exhaustion(void) {
     exit(0);
 }
 
-/* Test: Directory Creation & Nested Paths (sys_mkdir, Day 31)
- * mkdir → файл внутри → fstat(S_IFDIR) → readdir → ENOTEMPTY → unlink.
- */
+/* Test 31: Directory Creation & Nested Paths (sys_mkdir, Day 31) */
 static void test_directory_ops(void) {
-    /* mkdir через POSIX syscall */
     if (mkdir("/tmp/testdir_51", 0755) != 0) exit(1);
 
-    /* Файл внутри директории */
     int fd = open("/tmp/testdir_51/file.txt", O_CREAT|O_WRONLY, 0644);
     if (fd < 0) exit(2);
     write(fd, "nested", 6);
     close(fd);
 
-    /* Чтение обратно */
     fd = open("/tmp/testdir_51/file.txt", O_RDONLY);
     if (fd < 0) exit(3);
     char buf[10];
@@ -705,7 +655,6 @@ static void test_directory_ops(void) {
     close(fd);
     if (n != 6 || buf[0] != 'n') exit(4);
 
-    /* fstat: S_IFDIR */
     int dir_fd = open("/tmp/testdir_51", O_RDONLY);
     if (dir_fd < 0) exit(5);
     struct stat st;
@@ -713,7 +662,6 @@ static void test_directory_ops(void) {
     close(dir_fd);
     if (!(st.st_mode & S_IFDIR)) exit(7);
 
-    /* readdir: file.txt виден */
     dir_fd = open("/tmp/testdir_51", O_RDONLY);
     if (dir_fd < 0) exit(8);
     test_dirent_t entry;
@@ -725,50 +673,40 @@ static void test_directory_ops(void) {
     close(dir_fd);
     if (!found) exit(9);
 
-    /* ENOTEMPTY: нельзя удалить непустую директорию */
     if (unlink("/tmp/testdir_51") == 0) exit(10);
 
-    /* Cleanup: файл → директория */
     unlink("/tmp/testdir_51/file.txt");
     unlink("/tmp/testdir_51");
 
-    /* Директория удалена */
     fd = open("/tmp/testdir_51", O_RDONLY);
     if (fd >= 0) { close(fd); exit(11); }
 
     exit(0);
 }
 
-/* Test 32: Unlink Open File (POSIX Orphan Semantics)
- * Критический POSIX-тест: файл удаляется из VFS (unlink), но остается доступным
- * через открытый FD до вызова close(). Проверяет ref_count в open_file_t и
- * механизмы Orphan Nodes в tmpfs.
- */
+/* Test 32: Unlink Open File (POSIX Orphan Semantics) */
 static void test_unlink_open_file(void) {
     int fd = open("/tmp/orphan_32.bin", O_CREAT|O_WRONLY, 0644);
     if (fd < 0) exit(1);
-    
+
     write(fd, "orphan_data", 11);
-    
-    /* unlink пока файл открыт (ref_count > 0) */
+
     if (unlink("/tmp/orphan_32.bin") != 0) exit(2);
-    
-    /* Файл должен быть доступен через открытый fd */
+
     lseek(fd, 0, SEEK_SET);
     char buf[20];
     int n = read(fd, buf, sizeof(buf));
     if (n != 11) exit(3);
     if (buf[0] != 'o' || buf[5] != 'n') exit(4);
-    
-    close(fd); /* Теперь ref_count == 0, tmpfs должен физически освободить память */
-    
-    /* Файл должен исчезнуть из VFS */
+
+    close(fd);
+
     fd = open("/tmp/orphan_32.bin", O_RDONLY);
     if (fd >= 0) {
         close(fd);
-        exit(5); /* Файл не был удален после close (Orphan Node Leak) */
+        exit(5);
     }
-    
+
     exit(0);
 }
 
@@ -776,7 +714,7 @@ static void test_unlink_open_file(void) {
  * TESTS 33-52: SYSTEM CONTRACT VERIFICATION (Day 30)
  * ======================================================================== */
 
-/* Test 33: Syscall ENOSYS (invalid syscall number) */
+/* Test 33: Syscall ENOSYS */
 static void test_syscall_enosys(void) {
     int ret;
     __asm__ volatile(
@@ -789,7 +727,7 @@ static void test_syscall_enosys(void) {
     exit(0);
 }
 
-/* Test 34: Syscall EBADF (invalid file descriptors) */
+/* Test 34: Syscall EBADF */
 static void test_syscall_ebadf(void) {
     char buf[10];
 
@@ -802,7 +740,7 @@ static void test_syscall_ebadf(void) {
     exit(0);
 }
 
-/* Test 35: Syscall ENOENT (open nonexistent file) */
+/* Test 35: Syscall ENOENT */
 static void test_syscall_enoent(void) {
     int fd = open("/nonexistent_file_35.bin", O_RDONLY);
     if (fd >= 0) { close(fd); exit(1); }
@@ -886,23 +824,6 @@ static void test_vfs_fstat_size(void) {
 }
 
 /* Test 41: VFS readdir (index-based) */
-typedef struct {
-    uint32_t ino;
-    uint32_t type;
-    char     name[256];
-} test_dirent_t;
-
-static inline int32_t test_readdir(int fd, uint32_t index, test_dirent_t* entry) {
-    int32_t ret;
-    __asm__ volatile(
-        "int $0x80"
-        : "=a"(ret)
-        : "a"(141), "b"(fd), "c"(index), "d"(entry)
-        : "memory"
-    );
-    return ret;
-}
-
 static void test_vfs_readdir_list(void) {
     int fd = open("/tmp/rd41_a.txt", O_CREAT|O_WRONLY, 0644);
     if (fd < 0) exit(1);
@@ -981,7 +902,7 @@ static void test_proc_waitpid_wnohang(void) {
     exit(0);
 }
 
-/* Test 44: Process exec with argv (self-hosting compile + run) */
+/* Test 44: Process exec with argv */
 static void test_proc_exec_argv(void) {
     int fd = open("/tmp/argv44.c", O_CREAT|O_WRONLY|O_TRUNC, 0644);
     if (fd < 0) exit(1);
@@ -1018,7 +939,7 @@ static void test_proc_exec_argv(void) {
     exit(status == 0 ? 0 : 6);
 }
 
-/* Test 45: Process exec ENOENT (nonexistent ELF) */
+/* Test 45: Process exec ENOENT */
 static void test_proc_exec_enoent(void) {
     pid_t pid = fork();
     if (pid == 0) {
@@ -1031,7 +952,7 @@ static void test_proc_exec_enoent(void) {
     exit(status == 0 ? 0 : 2);
 }
 
-/* Test 46: Process fork under IRQ preemption (T3/T4 contract) */
+/* Test 46: Process fork under IRQ preemption */
 static void test_proc_fork_preempt(void) {
     for (int i = 0; i < 5; i++) {
         for (volatile int j = 0; j < 100000; j++);
@@ -1087,7 +1008,7 @@ static void test_vmm_munmap_invalid(void) {
     exit(0);
 }
 
-/* Test 50: libc printf edge cases (INT_MIN, NULL, hex) */
+/* Test 50: libc printf edge cases */
 static void test_libc_printf_edge(void) {
     char buf[128];
 
@@ -1160,7 +1081,7 @@ typedef struct {
 #define ENTRY(n, d) { #n, TEST_NAME(n), d }
 
 static test_entry_t tests[] = {
-    /* === VMM (6) === */
+    /* === VMM (9) === */
     ENTRY(vmm_demand_paging, 0),
     ENTRY(vmm_cow_isolation, 0),
     ENTRY(vmm_wx_enforcement, 1),
@@ -1239,7 +1160,6 @@ static int run_test(test_entry_t* t) {
     waitpid(pid, &status, 0);
 
     if (t->expect_death) {
-        /* -1 = task_kill_current (SIGSEGV, OOM, guard page) */
         return (status == -1) ? 0 : -1;
     } else {
         return (status == 0) ? 0 : -1;
@@ -1254,7 +1174,7 @@ static void print_padded(const char* str, int width) {
     int len = 0;
     const char* p = str;
     while (*p++) len++;
-    
+
     printf("%s", str);
     for (int i = len; i < width; i++) {
         printf(" ");
@@ -1263,17 +1183,17 @@ static void print_padded(const char* str, int width) {
 
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
-    
+
     printf("\n+--------------------------------------------------------------+\n");
-    printf("|      ENCLAVE OS - OMNI STRESS TEST (55 Tests)                  |\n");
-    printf("+---------------------------------------------------------  -----+\n");
+    printf("|      ENCLAVE OS - OMNI STRESS TEST (55 Tests)                |\n");
+    printf("+--------------------------------------------------------------+\n");
     printf("Compiler: TinyCC in Ring 3 (Self-Hosting)\n\n");
-    
+
     int n = sizeof(tests) / sizeof(tests[0]);
     for (int i = 0; i < n; i++) {
         printf("[%02d] ", i + 1);
         print_padded(tests[i].name, 40);
-        
+
         int result = run_test(&tests[i]);
         if (result == 0) {
             printf("PASS\n");
@@ -1284,7 +1204,7 @@ int main(int argc, char** argv) {
         }
         g_total++;
     }
-    
+
     printf("\n+--------------------------------------------------------------+\n");
     printf("| RESULTS: %d/%d PASSED (%d failed)                            \n",
            g_pass, g_total, g_fail);
@@ -1294,6 +1214,6 @@ int main(int argc, char** argv) {
         printf("| SOME TESTS FAILED. Check kernel logs.                        \n");
     }
     printf("+--------------------------------------------------------------+\n");
-    
+
     return g_fail == 0 ? 0 : 1;
 }

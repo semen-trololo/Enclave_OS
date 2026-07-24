@@ -45,7 +45,7 @@
 #define SYS_READDIR   141
 #define SYS_DUP       41
 #define SYS_DUP2      63
-#define SYS_MKDIR     39
+#define SYS_MKDIR     39   // Linux i386 ABI. NOTE: совпадает с ENOTEMPTY=39 (errno), но это РАЗНЫЕ пространства имён: syscall# vs errno 
 
 // ============================================================================
 // [ДЕНЬ 13] SEEK CONSTANTS (SSOT sync)
@@ -283,6 +283,14 @@ static inline int sys_dup2(int oldfd, int newfd) {
     int ret;
     __asm__ volatile("int $0x80" : "=a"(ret) : "a"(SYS_DUP2), "b"(oldfd), "c"(newfd));
     return ret;
+}
+
+// ============================================================================
+// [DAY 31] sys_mkdir — создание директории (RBAC + ENOTEMPTY)
+// Linux i386 ABI: eax=39, ebx=pathname, ecx=mode
+// ============================================================================
+static inline int sys_mkdir(const char* pathname, uint32_t mode) {
+    return syscall2(SYS_MKDIR, (int)pathname, (int)mode);
 }
 
 #endif // USER_SYSCALLS_H

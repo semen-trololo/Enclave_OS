@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "idt.h"
 #include "vfs.h"
+#include "kerrno.h"
 
 // ============================================================================
 // FORWARD DECLARATIONS (Разрыв циклической зависимости с vma.h)
@@ -29,14 +30,6 @@ typedef struct vma_node vma_node_t;
 // ============================================================================
 // POSIX-COMPATIBLE ERROR CODES & OPTIONS (Kernel-wide)
 // ============================================================================
-#ifndef EBADF
-#define EBADF   9
-#endif
-
-#ifndef ENOMEM
-#define ENOMEM  12
-#endif
-
 #ifndef WNOHANG
 #define WNOHANG 1
 #endif

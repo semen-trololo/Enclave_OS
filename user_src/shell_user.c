@@ -681,6 +681,43 @@ static void handle_compile(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
 }
 
 // ============================================================================
+// [DAY 31] MKDIR: создание директории (POSIX mkdir через sys_mkdir)
+// ============================================================================
+static void handle_mkdir(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
+    if (argc < 2) {
+        fprintf(stderr, ANSI_RED "Usage: mkdir <path> [path2 ...]" ANSI_RESET "\n");
+        return;
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (mkdir(args[i], 0755) < 0) {
+            fprintf(stderr,
+                    ANSI_RED "mkdir: cannot create directory '%s': %s" ANSI_RESET "\n",
+                    args[i],
+                    strerror(errno));
+        }
+    }
+}
+
+// ============================================================================
+// [DAY 31] RM: удаление файла или пустой директории (POSIX unlink)
+// ============================================================================
+static void handle_rm(int argc, char args[MAX_ARGS][MAX_ARG_LEN]) {
+    if (argc < 2) {
+        fprintf(stderr, ANSI_RED "Usage: rm <path> [path2 ...]" ANSI_RESET "\n");
+        return;
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (unlink(args[i]) < 0) {
+            fprintf(stderr,
+                    ANSI_RED "rm: cannot remove '%s': %s" ANSI_RESET "\n",
+                    args[i],
+                    strerror(errno));
+        }
+    }
+}
+// ============================================================================
 // ДИСПЕТЧЕР КОМАНД
 // ============================================================================
 static void execute_command(char* buffer) {

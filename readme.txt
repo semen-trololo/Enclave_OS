@@ -1,8 +1,14 @@
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
+<<<<<<< HEAD
 **Single Source of Truth (SSOT) | Версия: Alpha 0.4 **
 **Дата актуализации:** 22 июля 2026
 **Статус:** Production-Ready SLA
+=======
+**Single Source of Truth (SSOT) | Версия: Alpha 0.4 (Day 31 — 54/55 Tests Baseline)**
+**Дата актуализации:** 24 июля 2026
+**Статус:** Stabilization Freeze — Day 1 Complete. 54/55 PASS. 1 known issue (WXR1).
+>>>>>>> 7808044 (Fix Bag)
 
 Enclave Doctrine: Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -207,6 +213,21 @@ project_root/
 
 ---
 
+<<<<<<< HEAD
+=======
+### 1.5. Прогнать текущий набор тестов
+Нужно зафиксировать текущее состояние.
+
+
+#### Тесты дня
+| Тест | Ожидание |
+|---|---|
+| `baseline_boot` | ОС загружается до shell |
+| `stres.elf` | 54/55 PASS |
+
+---
+
+>>>>>>> 7808044 (Fix Bag)
 ## Критерий закрытия дня
 
 День завершён, если:
@@ -1017,6 +1038,7 @@ waitpid(pid, &status, 0);
 | 8 | **Kernel Stack Protection** | Guard Pages (Day 16) |
 | 9 | **POSIX Compliance** | Orphan Nodes, FD inheritance, variadic open |
 | 10 | **Self-Hosting** | TinyCC компилирует программы внутри ОС |
+| 11 | **54/55 Stress Test** | Omni Stress: VMM(9), FPU(5), Process(4), VFS(9), C(6), Syscall(8), Exec(2), Memory(3), Libc(2), System(2), Hardening(5) |
 
 ### Математически доказанные гарантии (Post)
 
@@ -1048,12 +1070,34 @@ waitpid(pid, &status, 0);
 | `libc_printf_edge` | INT_MIN, NULL string, hex — без UB |
 | `libc_snprintf_overflow` | Buffer truncation safety |
 | `sys_uname_sysinfo` | System identity + resource accounting |
+| `syscall_ebadf` | close(-1)/read(-1)/write(-1)/lseek(-1) → EBADF (Day 31) |
+| `proc_rapid_fork_exit` | 20× fork+exit без Triple Fault (T5 regression) |
 
 ---
 
 ## 10. ИЗВЕСТНЫЕ ПРОБЛЕМЫ И ROADMAP
 
+<<<<<<< HEAD
+=======
+### 10.1 Критические баги (из код-ревью, июль 2026)
+
+| # | ID | Файл | Проблема | Приоритет |
+|---|---|---|---|---|
+
+| 11 | EBADF1 | user_libc.c, syscall.c | `close()`/`open()` возвращали raw errno вместо -1; `sys_close_handler` не проверял fd bounds | ✅ FIXED Day 31 |
+`sys_close_handler`: добавлен bounds check `fd < 0 || fd >= TASK_MAX_OPEN_FILES → -EBADF`.
+`close()` в user_libc.c: `return ret` → `return -1` при ошибке (POSIX compliance).
+`open()` в user_libc.c: `return fd` → `return -1` при ошибке (POSIX compliance).
+Omni Stress Test: 54/55 PASS. `syscall_ebadf` — PASS. |
+| 12 | WXR1 | tcc_lib_os.c | `mprotect()` обёртка → SIGSEGV при W^X reject (TinyCC линковка) | 🛠 KNOWN ISSUE |
+Ядро работает корректно: `sys_mprotect(W|X)` → `-EPERM`, `sys_mmap(W|X)` → `-EPERM`.
+Проблема в цепочке: stres.c (TinyCC) → mprotect() (tcc_lib_os.o) → sys_mprotect() (inline asm).
+SIGSEGV происходит между mprotect() и вторым mmap(). Предположительно: линковка tcc_lib_os.o или inline asm в user_syscalls.h.
+Не блокирует ARM port (user_libc будет портироваться отдельно). |
+>>>>>>> 7808044 (Fix Bag)
 | **35** | HAL (Hardware Abstraction Layer) | 📋 Planned |
+
+
 Правильный порядок:
 
 1. Зафиксировать POSIX ABI policy.       критично
@@ -1118,6 +1162,7 @@ waitpid(pid, &status, 0);
 | **waitpid Status Encoding** | `status == exit_code` (normal exit, 0..255); `status == -1` (killed by kernel: SIGSEGV, OOM, guard page). НЕ Linux-compatible (нет `<< 8`). |
 | **VMA Splitting (mprotect)** | `vma_protect_range()` разделяет VMA при частичном покрытии (5 случаев). VMA_COW сохраняется. Паттерн идентичен `vma_unmap_range()`. |
 | **CoW-safe mprotect** | `vmm_protect_page_in_pd()` сохраняет PAGE_COW + PWT/PCD/GLOBAL. Если PAGE_COW активен — PAGE_WRITE принудительно снимается (аппаратная защита CoW). |
+| **POSIX Return Convention** | Все POSIX-обёртки в user_libc.c при ошибке возвращают `-1` (или `MAP_FAILED` для mmap) и устанавливают `errno = -ret`. Raw errno НЕ возвращается пользователю. Аудит Day 31: close(), open() исправлены; read(), write(), lseek(), mkdir(), dup(), dup2(), fstat(), unlink(), munmap(), exec(), ioctl() — подтверждены. |
 
 ---
 

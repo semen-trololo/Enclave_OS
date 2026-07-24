@@ -42,6 +42,7 @@
 #define EDOM        33   /* Math argument out of domain */
 #define ERANGE      34   /* Math result not representable */
 #define ENOSYS      38   /* Function not implemented */
+#define ENOTEMPTY   39   /* Directory not empty (POSIX errno — НЕ syscall number!) */
 #define ENAMETOOLONG 36  /* File name too long */
 #define ELOOP       40   /* Too many symbolic links encountered */
 
