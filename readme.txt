@@ -1,8 +1,8 @@
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
-**Single Source of Truth (SSOT) | Версия: Alpha 0.4 (Day 31 — mkdir + 52 Tests)**
+**Single Source of Truth (SSOT) | Версия: Alpha 0.4 **
 **Дата актуализации:** 22 июля 2026
-**Статус:** Production-Ready SLA расширен (52 теста, sys_mkdir, RBAC, ENOTEMPTY)
+**Статус:** Production-Ready SLA
 
 Enclave Doctrine: Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -133,7 +133,6 @@ project_root/
     ├── user_linker.ld            # ELF linker script
     ├── user_libc.h               # ⭐ Monolithic SSOT header
     ├── user_libc.c               # POSIX libc (Bump Allocator)
-    ├── tcc_lib_os.c              # TinyCC adaptation layer
     ├── setjmp.asm                # setjmp/longjmp (NASM)
     ├── crt0.asm                  # C Runtime Startup
     ├── init.c                    # ⭐ PID 1 (/sbin/init.elf)
@@ -164,10 +163,9 @@ project_root/
 2. Писать тесты.
 3. Наводить порядок в SSOT.
 4. Делать безопасные внутренние рефакторинги.
-5. Консолидировать `tcc_lib_os.c` в `user_libc.c`, если это не ломает TCC.
 6. Улучшать диагностику и serial-логи.
 
-# День 1. SSOT, аудит багов, тестовый baseline
+# День 1. SSOT
 
 ## Цель дня
 Навести порядок в документации, заморозить текущее состояние и получить воспроизводимый тестовый baseline.
@@ -209,28 +207,13 @@ project_root/
 
 ---
 
-### 1.5. Прогнать текущий набор тестов
-Нужно зафиксировать текущее состояние.
-
-
-#### Тесты дня
-| Тест | Ожидание |
-|---|---|
-| `baseline_boot` | ОС загружается до shell |
-| `stres.elf` | 55/55 PASS |
-
----
-
 ## Критерий закрытия дня
 
 День завершён, если:
 
 - SSOT имеет одну версию.
 - Создан ABI policy.
-- Baseline пройден и сохранён.
 - Все известные расхождения задокументированы.
-
-
 ---
 
 ## 3. АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
@@ -281,63 +264,6 @@ project_root/
 | **Zero Trust I/O** | Устройства через VFS (`/dev/console`) |
 
 ---
-
-3.8 Syscall ABI and POSIX Compatibility Policy
-Enclave OS предоставляет POSIX-like C API для пользовательских программ в Ring 3. Целью является source-level совместимость с простыми POSIX/Linux C-приложениями, а не binary compatibility с Linux и не совместимость с Linux syscall ABI. Приложения используют стандартные C/POSIX функции и заголовки, а user_libc транслирует их во внутренние системные вызовы ядра Enclave. Номера системных вызовов, механизм входа и внутренние kernel handlers являются реализационной деталью и не входят в публичный контракт.
-Внутренний ABI ядра называется Enclave syscall ABI, Linux-inspired constants. Linux-номера и константы используются только как справочные и не гарантируют совместимость с Linux. Публичный контракт — это user_libc POSIX-like API, а не raw syscall wrappers.
-Целевой профиль совместимости — Enclave POSIX Lite P2: процессы, файлы, каталоги, файловые дескрипторы, базовая память, минимальный терминал, pipes и redirection. Полный POSIX, включая сигналы, сокеты, потоки, job control и dynamic linking, не является целью.
-Для предотвращения расхождений проводится аудит user_libc, syscall wrappers, tcc_lib_os.c и POSIX-заголовков. Аудит ничего не ломает, фиксирует текущее состояние, после чего Enclave syscall ABI замораживается. tcc_lib_os.c не должен оставаться вторым libc и постепенно консолидируется в user_libc.
-
-## 3.10 ABI Inventory and Stabilization Progress
-
-**Дата аудита:** 23 июля 2026  
-**База:** Alpha 0.4   
-**Режим:** stabilization freeze  
-**Тестирование:** временно недоступно  
-**Метод проверки:** source audit + SSOT cross-check
-
----
-
-### 3.10.1 Легенда статусов
-
-| Статус | Значение |
-|---|---|
-| ✅ | Подтверждено исходным кодом или SSOT |
-| 🟡 | Задокументировано, но требует дополнительной проверки исходника |
-| ⚠️ | Требует аудита, уточнения или архитектурного решения |
-| ❌ | Не реализовано в проверенном файле |
-| 🧊 | Заморожено до Alpha 0.5-rc1 |
-| 🛠 | Требуется исправление |
-| 📋 | Требуется решение / инвентаризация |
-
----
-
-### 3.10.2 ABI Policy Checkpoints
-
-| ID | Пункт политики | Статус | Подтверждение | Комментарий |
-|---|---|---:|---|---|
-| P1 | Public User ABI — это POSIX-like C API, а не Linux binary ABI | 🧊 | SSOT 3.8 | Зафиксировано концептуально |
-| P2 | Public ABI предоставляется `libc.a`, а не только `user_libc.c` | 🟡 | SSOT 8.6.6 | `libc.a = user_libc.o + tcc_lib_os.o + setjmp.o` |
-| P3 | Internal Kernel ABI — внутренняя деталь реализации | ✅ | `syscall.h`, `user_syscalls.h` | Syscall numbers Linux-inspired, но internal |
-| P4 | `waitpid()` status encoding: normal exit = `exit_code`, killed = `-1` | ✅ / ⚠️ | code | Encoding подтверждён, но нет truncation exit_code & 0xFF |
-| P5 | `waitpid()` не Linux-compatible | 🟡 | SSOT Appendix A | Нет `<< 8`, нет WIFEXITED semantics |
-| P6 | `exec()` сохраняет FD table | ✅ | `syscall.c` | `saved_fds[]` + restore |
-| P7 | `exec()` failure до точки замены сохраняет процесс | ⚠️ | `syscall.c` | Есть point-of-no-return после destroy old PD |
-| P8 | `fork()` наследует FD с refcount increment | ✅ | SSOT 6.5 |  `task_fork()` |
-| P9 | `dup()` / `dup2()` увеличивают refcount IRQ-safe | ✅ | `syscall.c` | `irq_save()/irq_restore()` |
-| P10 | `mprotect(PROT_WRITE | PROT_EXEC)` запрещён | ✅ | `syscall.c` | Возвращает `-EPERM` |
-| P11 | `mmap(PROT_WRITE | PROT_EXEC)` запрещён | ✅ | `syscall.c` | Возвращает `-EPERM` |
-| P12 | `mprotect()` поддерживает partial VMA split | ✅ | `syscall.c`, SSOT S1 | `vma_protect_range()` |
-| P13 | `mprotect()` сохраняет CoW state | ✅ | SSOT S1 | vmm_protect_page_in_pd() подтверждён |
-| P14 | Ring 3 не имеет доступа к kernel memory | ✅ / ⚠️ | `syscall.c`, SSOT | PF handler подтверждён, но FB PAGE_USER — hardening risk |
-| P15 | Syscall validates user pointers | ⚠️ | `syscall.c` | `is_user_pointer()` требует math hardening |
-| P16 | Strings copy from user safely | ⚠️ | `syscall.c` | `copy_string_from_user()` требует fault audit |
-| P17 | `FS_SYSTEM` даёт `EACCES` для Ring 3 | ❌ / ⚠️ | `sys_mkdir_handler()` | mkdir OK, но open/create/unlink/readdir/exec неполны |
-| P18 | `sprintf()` безопасен | ⚠️ | `user_libc.c` | Сейчас потенциально unbounded |
-| P19 | `vsnprintf()` полностью C99 compliant | ⚠️ | `user_libc.c` | Return semantics не полностью C99 |
-| P20 | `struct dirent` ABI стабилен | ⚠️ | `user_libc.h`, `user_syscalls.h` | Есть mismatch `struct dirent` vs `dirent_t` |
-| P21 | Unimplemented prototypes не считаются ABI | 📋 | `user_libc.h` | Требуется inventory decision |
-| P22 | Freeze rules приняты | 🧊 | SSOT Day 1 | Новые syscall/drivers запрещены |
 
 ## 4. КАРТА ПАМЯТИ
 
@@ -1077,26 +1003,6 @@ if (pid == 0) {
 waitpid(pid, &status, 0);
 ```
 
-#### 8.6.9 Ограничения и известные проблемы
-
-| # | Ограничение | Причина | Обходной путь |
-|---|---|---|---|
-| 1 | Нет динамической линковки | `CONFIG_TCC_STATIC`, нет ld.so | Только static ELF |
-| 2 | Нет FPU в ядре | `-mno-sse` в CFLAGS ядра | Lazy FPU в Ring 3 (#NM) |
-| 3 | Bump Allocator (free = no-op) | Оптимизация для TCC | Перезапуск процесса |
-| 4 | Нет `#include <...>` из хостовой системы | Fake headers в initrd | Только `user_libc.h` API |
-| 5 | Нет многопоточности | Одно ядро, cooperative scheduling | Не требуется для TCC |
-| 6 | `CONFIG_TCC_MMAP 0` | TCC использует malloc | Утечка при больших файлах |
-| 7 | Нет precompiled headers | Нет кэша | Полная перекомпиляция |
-
-## 🔧 Рекомендации перед коммитом в SSOT
-
-1. **Исправить `__isoc23_strtoll`** — должен вызывать `strtoll`, а не `strtoul`.
-
-2. **Рассмотреть `CONFIG_TCC_MMAP 1`** — при наличии `sys_mmap` это снизит давление на bump allocator и позволит освобождать память через `munmap`.
-
-3. **Защитить `libtcc1.o` от race** — добавить `.NOTPARALLEL` или уникальное имя для объекта в INITRD таргете.
-
 ## 9. ГАРАНТИИ СИСТЕМЫ (SLA)
 
 | # | Гарантия | Механизм |
@@ -1112,7 +1018,7 @@ waitpid(pid, &status, 0);
 | 9 | **POSIX Compliance** | Orphan Nodes, FD inheritance, variadic open |
 | 10 | **Self-Hosting** | TinyCC компилирует программы внутри ОС |
 
-### Математически доказанные гарантии (Post Day 31)
+### Математически доказанные гарантии (Post)
 
 | Тест | Что доказано |
 |---|---|
@@ -1147,74 +1053,10 @@ waitpid(pid, &status, 0);
 
 ## 10. ИЗВЕСТНЫЕ ПРОБЛЕМЫ И ROADMAP
 
-### 10.1 Критические баги (из код-ревью, июль 2026)
-
-| # | ID | Файл | Проблема | Приоритет |
-|---|---|---|---|---|
-| 1 | V1 | paging.c | Ring 0 не может писать в CoW страницы (sys_exec после fork) | ✅ FIXED Day 30 |
-Добавлен `vmm_handle_user_write_fault()`. Ring 0 и Ring 3 write faults теперь 
-проходят через единый VMA-checked CoW resolver. Demand paging выполняется только
-для `!present` faults. W^X и refcount проверяются. | Omni Stress Test: 31/32 passed.
-`vmm_cow_isolation`, `proc_fork_bomb`, `vmm_mprotect_sigsegv`, `vmm_demand_paging` — PASS.
-| 2 | UL2 | user_libc.c | 20+ функций не реализованы (fwrite, fseek, qsort, ...) | 🔴 FATAL |
-Не критичен на данном этапе.
-| 3 | T2 | task.c | sys_close() из Ring 0 | ✅ FIXED Day 31 |
-`vfs_close_fd(task, fd)` — internal kernel API для закрытия FD любой задачи.
-`task_exit()`, `task_kill_current()`, `task_cleanup_children_on_exit()`
-используют `vfs_close_fd()` вместо `sys_close()`. |
-| 4 | K1 | kernel.c | Missing halt после `init_node == NULL` | ✅ FIXED |
-| 5 | UL1/KL1 | user_libc.c/klib.c | `value = -value` для INT_MIN (UB) | ✅ FIXED |
-| 6 | S1 | syscall.c | `sys_mprotect` — частичное обновление VMA | ✅ FIXED No test |
-Добавлена `vma_protect_range()` — VMA splitting при частичном покрытии
-(5 случаев: skip / full / trim-head / trim-tail / split-3).
-`vmm_protect_page_in_pd()` сохраняет PAGE_COW + PWT/PCD/GLOBAL.
-`sys_mprotect_handler` проверяет `vma_intersects()` → -ENOMEM.
-W^X enforcement сохранён. VMA_COW сохраняется при mprotect. |
-| 7 | T1 | task.c | `respawn_init_task` — `temp_task` не инициализирована | ✅ FIXED Day 30 |
-respawn_init_task() полностью переписан. `temp_task` обнуляется через `k_memset()`.
-Stack VMA создаётся как `[USER_STACK_VIRT_TOP - USER_STACK_SIZE,
-USER_STACK_VIRT_TOP)`, `user_esp` находится внутри VMA. `init_task`
-обновляется после respawn. Новый Init получает `pid = 1`, отцепляется от `current_task`, использует `monitor_children = 1`. 
-Добавлен `task_cleanup_children_on_exit()` для безопасной зачистки детей PID 1. | Omni Stress Test: 31/32 passed. Единственный fail — `directory_ops`, не связан с T1.
-При принудительной зачистке детей PID 1 FD-таблица убитых процессов пока не закрывается безопасно, потому что `sys_close()` работает
-только для `current_task`. Это связано с багом T2 и будет исправлено отдельно.
-| 8 | SH1 | shell_user.c | `handle_mkdir` создаёт файл, а не директорию | ✅ FIXED Day 31 |
-Добавлен `sys_mkdir` (syscall 39, Linux i386 ABI). `tmpfs_create` поддерживает
-`S_IFDIR` → FS_DIRECTORY с readdir/finddir/create/unlink callbacks.
-Shell переписан на POSIX `mkdir()`. RBAC: `FS_SYSTEM` на родителе → EACCES.
-ENOTEMPTY: `tmpfs_unlink` отвергает удаление непустых директорий. |
-| 9 | T5 | task.c | `pdir_virt = NULL` до `schedule()` | 🟠 FIXED Notest |
-| 10 | T3/T4 | task.c | `cli/sti` без сохранения EFLAGS в FD inheritance | 🟠 Fixed / 🛠 CODE PATCHED — NOT TESTED |
- T3/T4: добавлены `irq_save()/irq_restore()` в `include/isr.h`; FD inheritance в `task_fork()` переведён на IRQ-safe критическую секцию; open-coded `pushf/popf` паттерны в `task.c` заменены на `irq_save()/irq_restore()`.
-
-timer.h:   + typedef timer_tick_callback_t
-           + timer_set_tick_callback()
-
-timer.c:   - #include "task.h"           ← DIP-3 CLOSED
-           - wake_sleepers()             ← перенесено в task.c
-           - schedule()                  ← заменено на callback
-           + tick_callback()
-
-task.h:    + void task_timer_tick(uint32_t tick);
-
-task.c:    + wake_sleepers()             ← перенесено из timer.c
-           + task_timer_tick()           ← callback для timer
-
-kernel.c:  + timer_set_tick_callback(task_timer_tick)  ← инжекция
-
-isr.c:     - #include "vga.h"            ← DIP-5 CLOSED
-           ~ vga_set_color → k_set_color
-
-
-### 10.3 Roadmap (Day 30+)
-
-| День | Задача | Статус |
-|---|---|---|
-
 | **35** | HAL (Hardware Abstraction Layer) | 📋 Planned |
 Правильный порядок:
 
-1. Зафиксировать POSIX ABI policy.       ✅ уже сделано
+1. Зафиксировать POSIX ABI policy.       критично
 2. Сделать syscall/POSIX audit.          желательно
 3. Начать HAL.                           критично
 4. Сделать RPi bare-metal spike.         полезно
@@ -1291,8 +1133,8 @@ isr.c:     - #include "vga.h"            ← DIP-5 CLOSED
 ---
 
 **Конец документа.**
-**Версия:** Alpha 0.3 | **День:** 29 | **Статус:** Self-Hosting Ready
-**Следующая актуализация:** Day 30 (после исправления топ-10 критических багов)
+**Версия:** Alpha 0.4
+
 
  Roadmap для Raspberry Pi Port — HAL design, ARM boot code, Translation Tables
 ---
