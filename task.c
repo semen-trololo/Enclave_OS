@@ -457,6 +457,8 @@ void schedule(void) {
             
             pmm_free_page(VIRT_TO_PHYS((uint32_t)dead));
             task_count--;
+            serial_printf("[DIAG] Reaper PID %d: pmm_balance=%d heap_balance=%d\n",
+                          dead->pid, pmm_check_balance(), heap_check_balance());
         }
     }
 
@@ -1058,7 +1060,7 @@ int task_fork(struct regs* r) {
     irq_restore(rq_flags);
     
     serial_printf("[TASK] Fork: PID %d -> PID %d (CoW)\n", current_task->pid, child->pid);
-    
+    serial_printf("[DIAG] After fork: pmm_balance=%d\n", pmm_check_balance());
     // Родитель видит PID ребёнка как результат fork()
     return child->pid;
 }

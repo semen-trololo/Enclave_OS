@@ -1038,11 +1038,21 @@ int getpid(void) {
 }
 
 int fork(void) {
-    return sys_fork();
+    int ret = sys_fork();
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
 
 int waitpid(int pid, int* status, int options) {
-    return sys_waitpid(pid, status, options);
+    int ret = sys_waitpid(pid, status, options);
+    if (ret < 0) {
+        errno = -ret;
+        return -1;
+    }
+    return ret;
 }
 
 int exec(const char* path, const char** argv) {

@@ -189,6 +189,9 @@ void kernel_main(void) {
     init_storage();
     init_subsystems();
 
+    serial_printf("[DIAG] Boot complete: pmm_balance=%d heap_balance=%d\n",
+                  pmm_check_balance(), heap_check_balance());
+
     if (fb_is_available()) {        
         fb_set_color(COLOR_LIGHT_GREY, COLOR_BLACK);
         fb_print(" [ OK ] Core systems initialized. Higher Half active.\n");

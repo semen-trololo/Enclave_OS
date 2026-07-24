@@ -257,6 +257,8 @@ static int sys_exec_handler(struct regs* r) {
     
     serial_printf("[SYSCALL] sys_exec: PID %d replaced with '%s' at 0x%x, ESP=0x%x\n", 
                   current_task->pid, current_task->name, entry_point, r->useresp);
+    serial_printf("[DIAG] After exec: pmm_balance=%d heap_balance=%d\n",
+                  pmm_check_balance(), heap_check_balance());
     return 0;
 }
 

@@ -298,10 +298,11 @@ struct stat {
 /* --------------------------------------------------------------------------
  * 11. Time Structures
  * -------------------------------------------------------------------------- */
-typedef struct {
+struct timeval {
     unsigned int tv_sec;
     unsigned int tv_usec;
-} timeval_t;
+};
+typedef struct timeval timeval_t;
 
 struct tm {
     int tm_sec;
@@ -319,15 +320,17 @@ struct tm {
  * 12. System Info Structures
  * -------------------------------------------------------------------------- */
 #define UTSNAME_LENGTH 65
-typedef struct {
+
+struct utsname {
     char sysname[UTSNAME_LENGTH];
     char nodename[UTSNAME_LENGTH];
     char release[UTSNAME_LENGTH];
     char version[UTSNAME_LENGTH];
     char machine[UTSNAME_LENGTH];
-} utsname_t;
+};
+typedef struct utsname utsname_t;
 
-typedef struct {
+struct sysinfo {
     unsigned int uptime;
     unsigned int totalram;
     unsigned int freeram;
@@ -340,7 +343,8 @@ typedef struct {
     unsigned int totalhigh;
     unsigned int freehigh;
     unsigned int mem_unit;
-} sysinfo_t;
+};
+typedef struct sysinfo sysinfo_t;
 
 /* --------------------------------------------------------------------------
  * 13. Function Prototypes: Memory & Strings
@@ -452,9 +456,9 @@ void __run_atexit_handlers(void);
 /* --------------------------------------------------------------------------
  * 17. Function Prototypes: Time & System
  * -------------------------------------------------------------------------- */
-int gettimeofday(timeval_t* tv, void* tz);
-int uname(utsname_t* buf);
-int sysinfo(sysinfo_t* info);
+int gettimeofday(struct timeval* tv, void* tz);
+int uname(struct utsname* buf);
+int sysinfo(struct sysinfo* info);
 unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);
 
@@ -488,6 +492,12 @@ struct tm* localtime(const time_t* timep);
 typedef void (*sighandler_t)(int);
 sighandler_t signal(int signum, sighandler_t handler);
 
+/* Dynamic linking: скрыть от TCC (CONFIG_TCC_STATIC).
+ * TCC определяет собственные static stubs в tcc.h с другими сигнатурами:
+ *   void dlclose(void*)  vs  int dlclose(void*)
+ *   const char *dlerror(void)  vs  char *dlerror(void)
+ */
+#ifndef CONFIG_TCC_STATIC
 #define RTLD_LAZY   0x00001
 #define RTLD_NOW    0x00002
 #define RTLD_GLOBAL 0x00100
@@ -496,12 +506,12 @@ void* dlopen(const char* filename, int flag);
 void* dlsym(void* handle, const char* symbol);
 int dlclose(void* handle);
 char* dlerror(void);
+#endif /* !CONFIG_TCC_STATIC */
 
 typedef int jmp_buf[6];
 int setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int val) __attribute__((noreturn));
 int _setjmp(jmp_buf env);
-
 /* --------------------------------------------------------------------------
  * 19. Function Prototypes: Sorting & Searching
  * -------------------------------------------------------------------------- */

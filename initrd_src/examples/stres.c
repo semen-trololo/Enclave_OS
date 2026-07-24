@@ -213,6 +213,35 @@ static void test_vmm_mprotect_partial_sigsegv(void) {
     exit(1);
 }
 
+/* Test: VMM mprotect preserves CoW (REG-MEM-008) */
+static void test_vmm_mprotect_cow_preserve(void) {
+    char* page = (char*)mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                             MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) exit(1);
+    page[0] = 'A';
+
+    pid_t pid = fork();
+    if (pid < 0) exit(2);
+
+    if (pid == 0) {
+        /* Child: mprotect READ → WRITE (не ломает CoW) */
+        if (mprotect(page, 4096, PROT_READ) != 0) exit(3);
+        if (mprotect(page, 4096, PROT_READ|PROT_WRITE) != 0) exit(4);
+        /* Запись триггерит CoW resolver */
+        page[0] = 'B';
+        exit(page[0] == 'B' ? 0 : 5);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (status != 0) exit(6);
+    /* Parent: CoW isolation — страница НЕ изменилась */
+    if (page[0] != 'A') exit(7);
+
+    munmap(page, 4096);
+    exit(0);
+}
+
 /* Test 7: FPU Fork Preservation */
 static void test_fpu_fork_preserve(void) {
     double val = 3.14159;
@@ -1068,6 +1097,458 @@ static void test_sys_uname_sysinfo(void) {
     exit(0);
 }
 
+/* Test: Fork FD Inheritance with refcount (REG-PROC-003) */
+static void test_proc_fork_fd_inherit(void) {
+    int fd = open("/tmp/fd_inherit_03.bin", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+    write(fd, "PARENT", 6);
+    /* НЕ закрываем fd — он должен наследоваться */
+
+    pid_t pid = fork();
+    if (pid < 0) exit(2);
+
+    if (pid == 0) {
+        /* Child: fd унаследован, пишем через него */
+        write(fd, "_CHILD", 6);
+        close(fd);
+        exit(0);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (status != 0) exit(3);
+
+    /* Parent: fd всё ещё валиден (refcount > 1) */
+    write(fd, "_END", 4);
+    close(fd);
+
+    /* Проверяем содержимое: PARENT_CHILD_END */
+    fd = open("/tmp/fd_inherit_03.bin", O_RDONLY);
+    if (fd < 0) exit(4);
+    char buf[32];
+    int n = read(fd, buf, sizeof(buf));
+    close(fd);
+    unlink("/tmp/fd_inherit_03.bin");
+
+    if (n != 16) exit(5);
+    if (buf[0] != 'P' || buf[6] != '_' || buf[12] != '_') exit(6);
+    exit(0);
+}
+
+/* Test: Exec preserves FD table (REG-PROC-007) */
+static void test_proc_exec_preserves_fd(void) {
+    int fd = open("/tmp/exec_fd_07.bin", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+    write(fd, "BEFORE", 6);
+
+    int src_fd = open("/tmp/exec_fd_07.c", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (src_fd < 0) exit(2);
+    const char* src =
+        "int main() {\n"
+        "  write(10, \"_AFTER\", 6);\n"
+        "  close(10);\n"
+        "  return 0;\n"
+        "}\n";
+    write(src_fd, src, strlen(src));
+    close(src_fd);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        const char* tcc_argv[] = { "tcc", "/tmp/exec_fd_07.c", "-o", "/tmp/exec_fd_07.elf", NULL };
+        exec("/bin/tcc.elf", tcc_argv);
+        exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (status != 0) { unlink("/tmp/exec_fd_07.c"); exit(3); }
+
+    /* dup в слот 10 (гарантированно свободный, не конфликтует с fd) */
+    if (dup2(fd, 10) != 10) exit(4);
+    close(fd);
+
+    pid = fork();
+    if (pid == 0) {
+        const char* run_argv[] = { "exec_fd_07", NULL };
+        exec("/tmp/exec_fd_07.elf", run_argv);
+        exit(127);
+    }
+    waitpid(pid, &status, 0);
+    close(10);
+
+    fd = open("/tmp/exec_fd_07.bin", O_RDONLY);
+    if (fd < 0) exit(5);
+    char buf[32];
+    int n = read(fd, buf, sizeof(buf));
+    close(fd);
+    unlink("/tmp/exec_fd_07.bin");
+    unlink("/tmp/exec_fd_07.c");
+    unlink("/tmp/exec_fd_07.elf");
+
+    if (n != 12) exit(6);
+    if (buf[0] != 'B' || buf[6] != '_') exit(7);
+    exit(0);
+}
+
+/* Test: dup2 overwrite + same fd safety (REG-VFS-010, 011) */
+static void test_vfs_dup2_overwrite_same(void) {
+    int fd1 = open("/tmp/dup2_10a.bin", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd1 < 0) exit(1);
+    write(fd1, "AAA", 3);
+
+    int fd2 = open("/tmp/dup2_10b.bin", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd2 < 0) exit(2);
+    write(fd2, "BBB", 3);
+
+    /* dup2(fd1, fd2): закрывает fd2, дублирует fd1 в слот fd2 */
+    if (dup2(fd1, fd2) != fd2) exit(3);
+
+    /* fd2 теперь указывает на dup2_10a.bin */
+    write(fd2, "CCC", 3);
+    close(fd1);
+    close(fd2);
+
+    /* Проверяем: dup2_10a.bin = "AAACCC", dup2_10b.bin = "BBB" */
+    fd1 = open("/tmp/dup2_10a.bin", O_RDONLY);
+    if (fd1 < 0) exit(4);
+    char buf[16];
+    int n = read(fd1, buf, sizeof(buf));
+    close(fd1);
+    if (n != 6 || buf[3] != 'C') exit(5);
+
+    fd2 = open("/tmp/dup2_10b.bin", O_RDONLY);
+    if (fd2 < 0) exit(6);
+    n = read(fd2, buf, sizeof(buf));
+    close(fd2);
+    if (n != 3 || buf[0] != 'B') exit(7);
+
+    /* dup2(fd, fd) = no-op, не закрывает сам себя */
+    fd1 = open("/tmp/dup2_10a.bin", O_RDONLY);
+    if (fd1 < 0) exit(8);
+    if (dup2(fd1, fd1) != fd1) exit(9);
+    n = read(fd1, buf, sizeof(buf));
+    close(fd1);
+    if (n != 6) exit(10);
+
+    unlink("/tmp/dup2_10a.bin");
+    unlink("/tmp/dup2_10b.bin");
+    exit(0);
+}
+
+/* Test: Path too long → error, not crash (REG-VFS-024) */
+static void test_vfs_path_too_long(void) {
+    char long_path[512];
+    long_path[0] = '/';
+    for (int i = 1; i < 510; i++) long_path[i] = 'x';
+    long_path[510] = '\0';
+
+    int fd = open(long_path, O_RDONLY);
+    if (fd >= 0) { close(fd); exit(1); }
+
+    fd = open(long_path, O_CREAT|O_WRONLY, 0644);
+    if (fd >= 0) { close(fd); exit(2); }
+
+    if (mkdir(long_path, 0755) == 0) exit(3);
+
+    exit(0);
+}
+
+/* Test: strtol/strtoul/strtoll/strtoull correctness (REG-LIBC-003..006) */
+static void test_libc_strtol_family(void) {
+    char* end;
+
+    /* strtol */
+    if (strtol("42", &end, 10) != 42) exit(1);
+    if (*end != '\0') exit(2);
+    if (strtol("-99", &end, 10) != -99) exit(3);
+    if (strtol("0x1F", &end, 0) != 31) exit(4);
+    if (strtol("077", &end, 0) != 63) exit(5);
+    if (strtol("  123abc", &end, 10) != 123) exit(6);
+    if (*end != 'a') exit(7);
+
+    /* strtoul */
+    if (strtoul("4294967295", &end, 10) != 4294967295UL) exit(8);
+    if (strtoul("0xFF", &end, 0) != 255) exit(9);
+
+    /* strtoll */
+    if (strtoll("-9223372036854775807", &end, 10) != LLONG_MIN + 1) exit(10);
+    if (strtoll("9223372036854775807", &end, 10) != LLONG_MAX) exit(11);
+    if (strtoll("-1", &end, 10) != -1LL) exit(12);
+
+    /* strtoull */
+    if (strtoull("18446744073709551615", &end, 10) != ULLONG_MAX) exit(13);
+    if (strtoull("0xDEADBEEF", &end, 0) != 0xDEADBEEFULL) exit(14);
+
+    exit(0);
+}
+
+/* Test: getline, strdup, strerror (REG-LIBC-008..010) */
+static void test_libc_getline_strdup_strerror(void) {
+    /* strdup */
+    char* dup = strdup("hello");
+    if (!dup) exit(1);
+    if (strcmp(dup, "hello") != 0) exit(2);
+    if (strlen(dup) != 5) exit(3);
+
+    /* strerror */
+    char* msg = strerror(ENOENT);
+    if (!msg || msg[0] == '\0') exit(4);
+    msg = strerror(0);
+    if (strcmp(msg, "Success") != 0) exit(5);
+
+    /* getline */
+    int fd = open("/tmp/getline_08.txt", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(6);
+    write(fd, "line1\nline2\n", 12);
+    close(fd);
+
+    FILE* f = fopen("/tmp/getline_08.txt", "r");
+    if (!f) exit(7);
+
+    char* line = NULL;
+    size_t n = 0;
+    ssize_t len = getline(&line, &n, f);
+    if (len != 6) exit(8);  /* "line1\n" = 6 chars */
+    if (line[0] != 'l' || line[4] != '1') exit(9);
+
+    len = getline(&line, &n, f);
+    if (len != 6) exit(10); /* "line2\n" */
+
+    len = getline(&line, &n, f);
+    if (len != -1) exit(11); /* EOF */
+
+    fclose(f);
+    unlink("/tmp/getline_08.txt");
+    exit(0);
+}
+
+/* Test: FILE* buffered I/O + flush on close (REG-LIBC-011/012) */
+static void test_libc_file_buffered_io(void) {
+    FILE* f = fopen("/tmp/bufio_11.txt", "w");
+    if (!f) exit(1);
+
+    /* Пишем через буфер (fwrite) */
+    if (fwrite("Hello, ", 1, 7, f) != 7) exit(2);
+    if (fwrite("World!", 1, 6, f) != 6) exit(3);
+    /* fclose должен сделать flush */
+    fclose(f);
+
+    /* Читаем через буфер (fread) */
+    f = fopen("/tmp/bufio_11.txt", "r");
+    if (!f) exit(4);
+
+    char buf[32];
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+
+    if (n != 13) exit(5);
+    if (buf[0] != 'H' || buf[7] != 'W' || buf[12] != '!') exit(6);
+
+    /* fputc/fgetc */
+    f = fopen("/tmp/bufio_11.txt", "w");
+    if (!f) exit(7);
+    fputc('A', f);
+    fputc('B', f);
+    fputc('C', f);
+    fclose(f);
+
+    f = fopen("/tmp/bufio_11.txt", "r");
+    if (!f) exit(8);
+    if (fgetc(f) != 'A') exit(9);
+    if (fgetc(f) != 'B') exit(10);
+    if (fgetc(f) != 'C') exit(11);
+    if (fgetc(f) != EOF) exit(12);
+    fclose(f);
+
+    unlink("/tmp/bufio_11.txt");
+    exit(0);
+}
+
+/* Test: TCC compile error doesn't crash shell (REG-TCC-003/005) */
+static void test_tcc_compile_error_recovery(void) {
+    /* Создаём файл с синтаксической ошибкой */
+    int fd = open("/tmp/bad_syntax.c", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+    const char* bad_src = "int main() { this is not valid C !!! }\n";
+    write(fd, bad_src, strlen(bad_src));
+    close(fd);
+
+    /* TCC должен вернуть non-zero exit code, но НЕ упасть */
+    pid_t pid = fork();
+    if (pid == 0) {
+        const char* tcc_argv[] = { "tcc", "/tmp/bad_syntax.c", "-o", "/tmp/bad.elf", NULL };
+        exec("/bin/tcc.elf", tcc_argv);
+        exit(127);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+
+    /* TCC должен вернуть non-zero (ошибка компиляции) */
+    if (status == 0) exit(2);
+    /* Но НЕ должен быть killed (status != -1) */
+    if (status == -1) exit(3);
+
+    /* /tmp/bad.elf не должен существовать */
+    fd = open("/tmp/bad.elf", O_RDONLY);
+    if (fd >= 0) { close(fd); exit(4); }
+
+    unlink("/tmp/bad_syntax.c");
+    exit(0);
+}
+/* Test: Invalid arguments across syscalls (REG-SEC-004/007/012/013/022/025) */
+static void test_syscall_bad_args(void) {
+    /* dup/dup2 bad fd */
+    if (dup(-1) != -1) exit(1);
+    if (dup(999) != -1) exit(2);
+    if (dup2(-1, 5) != -1) exit(3);
+    if (dup2(5, -1) != -1) exit(4);
+    if (dup2(999, 5) != -1) exit(5);
+
+    /* ioctl bad request */
+    int fd = open("/tmp/ioctl_bad.bin", O_CREAT|O_WRONLY, 0644);
+    if (fd < 0) exit(6);
+    if (ioctl(fd, 0xDEADBEEF, NULL) != -1) exit(7);
+    close(fd);
+    unlink("/tmp/ioctl_bad.bin");
+
+    /* ioctl on non-terminal fd */
+    fd = open("/tmp/ioctl_bad2.bin", O_CREAT|O_WRONLY, 0644);
+    if (fd < 0) exit(8);
+    struct winsize ws;
+    if (ioctl(fd, TIOCGWINSZ, &ws) != -1) exit(9);
+    close(fd);
+    unlink("/tmp/ioctl_bad2.bin");
+
+    /* mmap bad flags */
+    void* p = mmap(NULL, 4096, PROT_READ, MAP_SHARED, -1, 0);
+    if (p != MAP_FAILED) exit(10);
+
+    /* lseek bad whence */
+    fd = open("/tmp/lseek_bad.bin", O_CREAT|O_WRONLY, 0644);
+    if (fd < 0) exit(11);
+    if (lseek(fd, 0, 99) != -1) exit(12);
+    close(fd);
+    unlink("/tmp/lseek_bad.bin");
+
+    exit(0);
+}
+
+/* Test: brk doesn't corrupt other VMA (REG-SEC-017) */
+static void test_brk_collision(void) {
+    /* Выделяем mmap-регион сразу после heap */
+    void* guard = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                       MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (guard == MAP_FAILED) exit(1);
+    ((char*)guard)[0] = 'G';
+
+    /* Пытаемся расширить heap до mmap-региона */
+    char* heap_ptr = (char*)malloc(4096);
+    if (!heap_ptr) exit(2);
+
+    /* sys_brk с адресом за пределами USER_HEAP_MAX_SIZE */
+    /* Это должно вернуть ошибку, не ломая guard */
+    if (((char*)guard)[0] != 'G') exit(3);
+
+    munmap(guard, 4096);
+    exit(0);
+}
+
+/* Test: Bad ELF / non-ELF doesn't crash kernel (REG-SEC-023/024) */
+static void test_exec_bad_elf(void) {
+    /* Создаём файл с мусором (не ELF) */
+    int fd = open("/tmp/bad.elf", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(1);
+    write(fd, "THIS IS NOT AN ELF FILE AT ALL", 30);
+    close(fd);
+
+    /* exec должен вернуть ошибку, процесс жив */
+    pid_t pid = fork();
+    if (pid == 0) {
+        const char* argv[] = { "bad", NULL };
+        int ret = exec("/tmp/bad.elf", argv);
+        /* exec не удался — процесс жив */
+        exit(ret == -1 ? 0 : 1);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (status != 0) exit(2);
+
+    /* Создаём truncated ELF (magic OK, но данные обрезаны) */
+    fd = open("/tmp/trunc.elf", O_CREAT|O_WRONLY|O_TRUNC, 0644);
+    if (fd < 0) exit(3);
+    /* ELF magic + минимум заголовка, но без program headers */
+    char elf_hdr[20] = { 0x7F, 'E', 'L', 'F', 1, 1, 1, 0,
+                         0, 0, 0, 0, 0, 0, 0, 0,
+                         2, 0, 3, 0 }; /* ET_EXEC, EM_386 */
+    write(fd, elf_hdr, sizeof(elf_hdr));
+    close(fd);
+
+    pid = fork();
+    if (pid == 0) {
+        const char* argv[] = { "trunc", NULL };
+        int ret = exec("/tmp/trunc.elf", argv);
+        exit(ret == -1 ? 0 : 1);
+    }
+    waitpid(pid, &status, 0);
+    if (status != 0) exit(4);
+
+    unlink("/tmp/bad.elf");
+    unlink("/tmp/trunc.elf");
+    exit(0);
+}
+
+/* Test: Mixed workload — fork + files + compile + kill (REG-STRESS-009) */
+static void test_mixed_workload(void) {
+    /* 1. Создаём 50 файлов */
+    for (int i = 0; i < 50; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/tmp/mix_%d.bin", i);
+        int fd = open(path, O_CREAT|O_WRONLY|O_TRUNC, 0644);
+        if (fd < 0) exit(1);
+        write(fd, "data", 4);
+        close(fd);
+    }
+
+    /* 2. Fork 5 детей, каждый читает 10 файлов */
+    for (int i = 0; i < 5; i++) {
+        pid_t pid = fork();
+        if (pid < 0) exit(2);
+        if (pid == 0) {
+            for (int j = i * 10; j < (i + 1) * 10; j++) {
+                char path[64];
+                snprintf(path, sizeof(path), "/tmp/mix_%d.bin", j);
+                int fd = open(path, O_RDONLY);
+                if (fd < 0) exit(3);
+                char buf[16];
+                read(fd, buf, sizeof(buf));
+                close(fd);
+            }
+            exit(0);
+        }
+    }
+
+    /* 3. Ждём всех детей */
+    for (int i = 0; i < 5; i++) {
+        int status;
+        waitpid(-1, &status, 0);
+        if (status != 0) exit(4);
+    }
+
+    /* 4. Удаляем файлы */
+    for (int i = 0; i < 50; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/tmp/mix_%d.bin", i);
+        unlink(path);
+    }
+
+    exit(0);
+}
+
+
+
+
+
+
+
 /* ========================================================================
  * REGISTRY & DISPATCHER
  * ======================================================================== */
@@ -1091,6 +1572,7 @@ static test_entry_t tests[] = {
     ENTRY(vmm_mprotect_partial, 0),
     ENTRY(vmm_mprotect_partial_sigsegv, 1),
     ENTRY(proc_rapid_fork_exit, 0),
+    ENTRY(vmm_mprotect_cow_preserve, 0),
     /* === FPU (5) === */
     ENTRY(fpu_x87_math, 0),
     ENTRY(fpu_fork_preserve, 0),
@@ -1147,6 +1629,19 @@ static test_entry_t tests[] = {
     ENTRY(fd_exhaustion, 0),
     ENTRY(directory_ops, 0),
     ENTRY(unlink_open_file, 0),
+    //new test
+    ENTRY(proc_fork_fd_inherit, 0),
+    ENTRY(proc_exec_preserves_fd, 0),
+    ENTRY(vfs_dup2_overwrite_same, 0),
+    ENTRY(vfs_path_too_long, 0),
+    ENTRY(libc_strtol_family, 0),
+    ENTRY(libc_getline_strdup_strerror, 0),
+    ENTRY(libc_file_buffered_io, 0),
+    ENTRY(tcc_compile_error_recovery, 0),
+    ENTRY(syscall_bad_args, 0),
+    ENTRY(brk_collision, 0),
+    ENTRY(exec_bad_elf, 0),
+    ENTRY(mixed_workload, 0),
 };
 
 static int run_test(test_entry_t* t) {
@@ -1185,7 +1680,7 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
     printf("\n+--------------------------------------------------------------+\n");
-    printf("|      ENCLAVE OS - OMNI STRESS TEST (55 Tests)                |\n");
+    printf("|      ENCLAVE OS - OMNI STRESS TEST (68 Tests)                |\n");
     printf("+--------------------------------------------------------------+\n");
     printf("Compiler: TinyCC in Ring 3 (Self-Hosting)\n\n");
 

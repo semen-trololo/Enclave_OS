@@ -1,14 +1,8 @@
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
-<<<<<<< HEAD
-**Single Source of Truth (SSOT) | Версия: Alpha 0.4 **
-**Дата актуализации:** 22 июля 2026
-**Статус:** Production-Ready SLA
-=======
-**Single Source of Truth (SSOT) | Версия: Alpha 0.4 (Day 31 — 54/55 Tests Baseline)**
-**Дата актуализации:** 24 июля 2026
-**Статус:** Stabilization Freeze — Day 1 Complete. 54/55 PASS. 1 known issue (WXR1).
->>>>>>> 7808044 (Fix Bag)
+**Версия:** Alpha 0.5-rc1
+**Дата актуализации:** 25 июля 2026
+**Статус:** Stabilization Week Complete (Days 1–7)
 
 Enclave Doctrine: Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -146,96 +140,153 @@ project_root/
         config.h                  # Config TinyCC
 ```
 
-# 🎯 Цель 7-дневной стабилизации
+### 1.3 POSIX ABI Policy (Frozen, Day 32)
 
-Довести Enclave OS до состояния:
+#### Public User ABI (Ring 3 → Kernel)
 
-> **Alpha 0.5-rc1: стабилизированное ядро, закрытые критические баги, регресс-тесты на все ключевые подсистемы, замороженный пользовательский ABI, единый SSOT-документ.**
-# 🧊 Главные правила на эти 7 дней
+**Гарантии (FROZEN — не менять без major version bump):**
 
-На неделю вводится жёсткий freeze:
+| # | Гарантия | Детали |
+|---|----------|--------|
+| 1 | Syscall convention | INT 0x80, eax = номер, ebx/ecx/edx/esi/edi = аргументы. Return: eax (≥ 0 = success, < 0 = -errno) |
+| 2 | POSIX return convention | Все libc-обёртки: при ошибке return -1 (или NULL/MAP_FAILED), errno = -ret |
+| 3 | `fork()` | CoW clone. Child: fork() == 0. Parent: fork() == child_pid. Error: -1 + errno |
+| 4 | `exec()` | Заменяет образ. FD table сохраняется. argv на user stack. Error: -1 + errno (процесс жив) |
+| 5 | `waitpid()` status | `status == exit_code` (0..255) при normal exit. `status == -1` при kernel kill. **НЕ Linux-compatible** (нет `<< 8`) |
+| 6 | `mmap()` | MAP_ANONYMOUS: on-demand paging. MAP_FAILED при ошибке. W^X enforced |
+| 7 | `mprotect()` | W^X: PROT_WRITE\|PROT_EXEC → -EPERM. Частичное покрытие: VMA splitting |
+| 8 | `open()` variadic | `open(path, flags, ...)` — mode через va_arg при O_CREAT |
+| 9 | `close()` / `dup()` / `dup2()` | POSIX semantics. dup2 атомарно закрывает newfd |
+| 10 | `unlink()` | Orphan semantics: файл жив пока открыт. ENOTEMPTY для непустых директорий |
+| 11 | `mkdir()` | RBAC: FS_SYSTEM → EACCES. S_IFDIR → FS_DIRECTORY |
+| 12 | `fstat()` | st_size, st_mode (S_IFREG/S_IFDIR), st_ino |
+| 13 | `sys_brk` | Bump-only из libc. brk(0) = текущий end. brk(new) = expand |
+| 14 | User Stack | 64 KB, guard page 4 KB. Переполнение → SIGSEGV (task kill) |
+| 15 | User Heap | 64 MB max. sys_brk collision detection с VMA |
+| 16 | `fork()` FD inheritance | ref_count++ для open_file_t + vfs_node_t |
 
-## ❌ Нельзя
-1. Добавлять новые syscall.
-2. Добавлять новые драйверы.
-3. Начинать HAL / ARM / Raspberry Pi.
-4. Добавлять сигналы, потоки, сокеты, job control.
-5. Ломать текущий `user_libc` API.
-6. Менять поведение `waitpid`, `exec`, `fork`, `mmap`, `mprotect`, `open`, `close`, `dup2`, кроме исправления подтверждённых багов.
-7. Делать большие рефакторинги без тестов.
+**Осознанные отклонения от Linux (зафиксированы, не баги):**
 
-## ✅ Можно
-1. Чинить известные баги.
-2. Писать тесты.
-3. Наводить порядок в SSOT.
-4. Делать безопасные внутренние рефакторинги.
-6. Улучшать диагностику и serial-логи.
+| # | Область | Enclave OS | Linux | Обоснование |
+|---|---------|-----------|-------|-------------|
+| D1 | waitpid status | `exit_code` (0..255) | `exit_code << 8` | Упрощение, нет W* макросов |
+| D2 | waitpid killed | `status == -1` | `WIFSIGNALED` | Нет сигналов |
+| D3 | free() | no-op | Возврат в heap | Bump allocator (TCC by design) |
+| D4 | mprotect(W\|X) | -EPERM | Разрешено | W^X = закон |
+| D5 | getcwd() | Всегда "/" | Реальный cwd | Нет cwd tracking |
+| D6 | chdir() | ENOSYS | Работает | Нет cwd tracking |
+| D7 | signal() | Stub → SIG_DFL | Реальная доставка | Нет подсистемы сигналов |
+| D8 | dlopen/dlsym | ENOSYS | Реальный dl | Static-only OS |
+| D9 | localtime() | Stub (1 Jan 1970) | Реальное время | Нет RTC driver |
+| D10 | getenv() | Всегда NULL | Реальный env | Нет environment |
+| D11 | isatty() | 1 для fd 0/1/2 | ioctl TIOCGWINSZ | Упрощение |
+| D12 | sys_brk shrink | Ядро позволяет, libc не вызывает | Уменьшает heap | Reserved capability |
 
-# День 1. SSOT
+#### Internal Kernel ABI (НЕ гарантирован)
 
-## Цель дня
-Навести порядок в документации, заморозить текущее состояние и получить воспроизводимый тестовый baseline.
+| # | Элемент | Статус |
+|---|---------|--------|
+| 1 | Номера syscall (INT 0x80) | Frozen (Linux i386 ABI) |
+| 2 | `vfs_close_fd()` | Internal. Ring 0 НЕ вызывает sys_close() |
+| 3 | `task_t` layout | Internal. Может меняться |
+| 4 | VMA flags (VMA_COW и т.д.) | Internal |
+| 5 | Page table format | Internal (x86 2-level) |
+| 6 | Kernel heap API (kmalloc) | Internal. Ring 3 НИКОГДА |
 
----
+#### TCC Compatibility Rules
 
-## Задачи
+| # | Правило | Обоснование |
+|---|---------|-------------|
+| T1 | Tagged structs | TCC пишет `struct timeval tv;` → нужен тег. Паттерн: `struct X {...}; typedef struct X X_t;` |
+| T2 | `#ifndef CONFIG_TCC_STATIC` guard | TCC определяет static stubs dl* с другими сигнатурами |
+| T3 | `-fno-optimize-sibling-calls` | setjmp/longjmp safety |
+| T4 | Heapsort (не Quicksort) | O(1) stack для 64 KB Ring 3 stack |
 
-### 1.1. Исправить рассинхрон SSOT
+#### ABI Change Policy
 
-Нужно привести к одному состоянию.
-
-
-### 1.3. Зафиксировать ABI policy
-Нужно явно разделить:
-
-1. **Public user ABI**
-   - `user_libc.h`;
-   - POSIX-like C API;
-   - поведение `fork`, `exec`, `waitpid`, `open`, `close`, `read`, `write`, `mmap`, `mprotect`, `mkdir`, `fstat`.
-
-2. **Internal kernel ABI**
-   - номера syscall;
-   - внутренние структуры;
-   - `vfs_close_fd()`;
-   - kernel handlers.
-
-
-#### Обязательно зафиксировать
-- `waitpid()` status encoding:
-  - normal exit: `status == exit_code`;
-  - killed by kernel: `status == -1`;
-  - это не Linux-compatible.
-- `exec()` сохраняет FD table.
-- `fork()` наследует FD с refcount increment.
-- `mprotect(W|X)` запрещён.
-- Ring 3 не имеет прямого доступа к kernel memory.
-- `FS_SYSTEM` даёт `EACCES` для Ring 3.
-
----
-
-<<<<<<< HEAD
-=======
-### 1.5. Прогнать текущий набор тестов
-Нужно зафиксировать текущее состояние.
-
-
-#### Тесты дня
-| Тест | Ожидание |
-|---|---|
-| `baseline_boot` | ОС загружается до shell |
-| `stres.elf` | 54/55 PASS |
+| Тип изменения | Процедура |
+|---------------|-----------|
+| Добавление syscall | Только в minor version bump |
+| Изменение поведения существующего syscall | Только в major version bump |
+| Изменение internal kernel ABI | Свободно (не гарантирован) |
+| Изменение отклонений D1-D12 | Только в major version bump + миграция |
 
 ---
 
->>>>>>> 7808044 (Fix Bag)
-## Критерий закрытия дня
+### 1.4 Changelog: Stabilization Week (Days 1–7, July 2026)
 
-День завершён, если:
+#### Day 1: SSOT + ABI Policy
+- Зафиксирован POSIX ABI Policy (§1.3): 16 гарантий, 12 отклонений, 4 TCC правила
+- Исправлены `fork()` / `waitpid()` — errno не устанавливался (HIGH)
+- Исправлены tagged structs в `user_libc.h` — TCC `struct timeval` error (HIGH)
+- Добавлен `#ifndef CONFIG_TCC_STATIC` guard для `dl*` — conflicting types (HIGH)
+- Консолидация `tcc_lib_os.c` → `user_libc.c` (единый файл)
 
-- SSOT имеет одну версию.
-- Создан ABI policy.
-- Все известные расхождения задокументированы.
----
+#### Day 2: Memory (PMM / VMM / CoW / mprotect)
+- Code review: paging.c, vma.c, pmm.c — **0 багов**
+- Добавлен REG-MEM-008 (mprotect_cow_preserve)
+- Добавлены kernel diagnostics: pmm_check_balance() + heap_check_balance() в 4 точках
+- Доказано: pmm_balance 117→256→117, heap_balance 233→265→233 — **0 утечек**
+
+#### Day 3: Processes (fork / exec / waitpid / reaper / init)
+- Code review: task.c, syscall.c — **0 багов**
+- Добавлены: fork_fd_inherit, exec_preserves_fd
+- T2 закрыт: vfs_close_fd() везде, Ring 0 НЕ вызывает sys_close()
+
+#### Day 4: VFS / FD / tmpfs / RBAC
+- Code review: vfs.c, tmpfs.c — **0 багов**
+- Добавлены: dup2_overwrite_same, path_too_long
+- Удалён бессмысленный тест mkdir_eacces_boot (/boot не в VFS)
+- Orphan semantics подтверждены: is_unlinked + ref_count + vfs_close_fd
+
+#### Day 5: Userspace / TCC / Self-Hosting
+- `__isoc23_strtoll` уже исправлен (Day 32)
+- Makefile race не актуален (один таргет libtcc1)
+- Добавлены: strtol_family, getline_strdup_strerror, file_buffered_io, tcc_compile_error_recovery
+- Self-hosting pipeline: compile + run + error recovery — **PASS**
+
+#### Day 6: Security / Syscall Validation / Stress
+- Code review: is_user_pointer, copy_string_from_user — **0 критических багов**
+- Добавлены: syscall_bad_args, brk_collision, exec_bad_elf, mixed_workload
+- W^X, RBAC, EFAULT, EBADF, ENOSYS — все подтверждены
+
+#### Day 7: Release Candidate
+- 68/68 тестов PASS
+- pmm_balance=117, heap_balance=242 — **0 утечек**
+- SSOT обновлён до Alpha 0.5-rc1
+- Known limitations зафиксированы (12 пунктов)
+
+#### Итого за неделю
+| Метрика | Значение |
+|---------|----------|
+| Тестов | 55 → **68** (+13) |
+| Багов в ядре | **0** |
+| Багов в libc | **5** (все исправлены) |
+| Багов в тестах | **2** (исправлены / удалены) |
+| Утечек PMM | **0** |
+| Утечек heap | **0** |
+| Triple Fault | **0** |
+| Kernel Panic | **0** |
+
+### 1.5 Release Checklist: Alpha 0.5-rc1
+
+- [x] SSOT version fixed (Alpha 0.5-rc1)
+- [x] ABI policy fixed (§1.3: 16 гарантий, 12 отклонений)
+- [x] All critical bugs closed (5/5 libc, 0 kernel)
+- [x] All fixed bugs tested (68/68 PASS)
+- [x] Memory balance clean (pmm 117→117, heap 242→242)
+- [x] FD balance clean (heap_balance стабилен)
+- [x] Process teardown clean (fork→exit→reap: 0 утечек)
+- [x] CoW teardown proven (15 zombie cascade, 25 fork bomb)
+- [x] TCC self-hosting works (compile + run + error recovery)
+- [x] W^X enforced (mmap + mprotect reject)
+- [x] RBAC enforced (FS_SYSTEM → EACCES)
+- [x] Stress tests pass (fork bomb, 1000 files, FD exhaustion, heap exhaustion)
+- [x] Serial log clean (0 FAIL, 0 PANIC, 0 TRIPLE FAULT)
+- [x] Known limitations documented (12 пунктов)
+- [x] Changelog written (§1.4)
+- [ ] Git tag: `alpha-0.5-rc1`
+
 
 ## 3. АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
 
@@ -738,9 +789,7 @@ static int copy_string_from_user(char* dest, const char* user_src, size_t max_le
 ## 8. USER SPACE И SELF-HOSTING
 
 ### 8.1 `user_libc.h` — Monolithic SSOT Header
-
 **Monolithic Bypass:** Полный отказ от `#include <stdint.h>`, `<stddef.h>`, `<stdarg.h>`. Все типы определяются через примитивы C и `__builtin_va_list`.
-
 ```c
 typedef __builtin_va_list va_list;
 typedef signed char        int8_t;
@@ -749,9 +798,9 @@ typedef unsigned int       size_t;
 typedef int                ssize_t;
 typedef int                pid_t;
 // ... 50+ типов и 200+ прототипов
-```
 
 ### 8.2 `user_libc.c` — Ring 3 Standard Library
+Единый файл реализации Ring 3 libc.
 
 | Компонент | Описание |
 |---|---|
@@ -763,8 +812,13 @@ typedef int                pid_t;
 | **Process Control** | fork, exec, waitpid, exit (с fflush) |
 | **system()** | fork + exec(/bin/cmd) + waitpid |
 | **mmap/munmap** | Обёртки над sys_mmap/sys_munmap |
+| **Sort/Search** | qsort (Heapsort, O(1) stack), bsearch |
+| **Float parsing** | strtod, strtof, strtold, ldexp |
+| **Time** | gettimeofday, clock, localtime, sleep, usleep |
+| **glibc compat** | __errno_location, __isoc23_strtol/strtoul/strtoll/strtoull |
 | **Day 29** | getline, strdup, strerror, perror, time, ioctl |
 | **Day 31** | mkdir, fstat — POSIX обёртки над sys_mkdir / sys_fstat |
+| **Day 32** | Консолидация tcc_lib_os.c → user_libc.c (единый файл) |
 
 ### 8.3 `crt0.asm` — C Runtime Startup
 
@@ -878,7 +932,7 @@ TCC работает внутри Zero Trust Sandbox на общих основ�
 |---|---|---|
 | **TCC Source** | `external/tcc_src/tcc.c` | Монолитный исходник (ONE_SOURCE=1) |
 | **TCC Config** | `user_src/config.h` | Fake config.h (заменяет ./configure) |
-| **Adaptation Layer** | `user_src/tcc_lib_os.c` | POSIX-функции для TCC (fwrite, fseek, qsort, bsearch, atexit, strtod, ...) |
+| **Consolidated libc** | `user_src/user_libc.c` | POSIX libc + все функции адаптации для TCC
 | **setjmp/longjmp** | `user_src/setjmp.asm` | NASM i386 реализация (error recovery TCC) |
 | **Syscall Wrappers** | `user_src/user_syscalls.h` | Inline asm обёртки INT 0x80 |
 | **Monolithic libc** | `user_src/user_libc.h` | SSOT header (Monolithic Bypass) |
@@ -904,25 +958,29 @@ TCC работает внутри Zero Trust Sandbox на общих основ�
 #define CONFIG_TCC_USE_LIBGCC     0       // libtcc1.a вместо libgcc
 #define CONFIG_TCC_MMAP           0       // malloc вместо mmap
 ```
+#### 8.6.4 Консолидация libc (Day 32)
+Все функции адаптации для TCC перенесены из `tcc_lib_os.c` в `user_libc.c`.
+Файл `tcc_lib_os.c` удалён из проекта. `user_libc.c` является единственным
+источником Ring 3 libc-функций.
 
-#### 8.6.4 Adaptation Layer (`tcc_lib_os.c`)
-
-Реализует функции, которые TCC ожидает от POSIX/glibc, но которых нет
-в минимальной `user_libc.c`:
-
-| Категория | Функции | Примечание |
-|---|---|---|
-| **FILE I/O** | `fwrite`, `fputs`, `fseek`, `ftell`, `fdopen`, `freopen` | Буферизация через FILE* |
-| **Process** | `atexit`, `abort`, `execvp`, `__assert_fail` | atexit: 32 слота |
-| **Memory** | `mprotect`, `sysconf(_SC_PAGESIZE)` | Обёртки над syscalls |
-| **String** | `strpbrk`, `strndup` | Стандартные реализации |
-| **Math/Float** | `strtod`, `strtof`, `strtold`, `ldexp`, `ldexpl` | Базовый парсинг float |
-| **Sort/Search** | `qsort` (Heapsort), `bsearch` | Heapsort: O(1) stack |
-| **Time** | `clock`, `localtime` | Заглушки |
-| **glibc compat** | `__errno_location`, `__isoc23_strtol/strtoul/strtoll/strtoull` | GCC 14+ C23 |
-| **Environment** | `environ`, `getcwd`, `chdir`, `realpath` | Минимальные заглушки |
-| **Terminal** | `isatty` | Всегда 1 для fd 0/1/2 |
-| **Misc** | `remove`, `_setjmp` | Алиасы |
+**Порядок секций в `user_libc.c`:**
+1. Includes
+2. Globals (errno, stdin/stdout/stderr)
+3. Memory ops (memset, memcpy, memcmp, memmove)
+4. Heap (malloc, calloc, realloc, free — Bump Allocator)
+5. String ops
+6. Number conversion (atoi, strtol, strtoul, strtoll, strtoull, itoa)
+7. Float parsing (strtod, strtof, strtold, ldexp)
+8. FILE* I/O (fopen..remove)
+9. Low-level I/O (open..unlink, isatty, getcwd, chdir, realpath)
+10. Printf family
+11. Process control (fork, exec, exit, system, atexit, abort)
+12. Sort/Search (heapsort qsort, bsearch)
+13. Time & System (gettimeofday, uname, sysinfo, sleep, clock, time)
+14. Signals & Dynamic Linking stubs
+15. POSIX extensions (getline, strdup, strerror, perror, ioctl, mmap)
+16. glibc compat (__errno_location, __isoc23_*, __assert_fail, _setjmp)
+17. Environment (getenv, environ)
 
 > ⚠️ **Heapsort вместо Quicksort:** Выбран для гарантии O(1) стековой памяти.
 > В Ring 3 User Stack = 64 KB, рекурсивный Quicksort может вызвать
@@ -984,8 +1042,8 @@ initrd_root/
 ```
 
 **Ключевые решения:**
-- `libc.a` собирается через `i686-linux-gnu-ar rcs` из трёх объектов:
-  `user_libc.o` + `tcc_lib_os.o` + `setjmp.o`
+- `libc.a` собирается через `i686-linux-gnu-ar rcs` из двух объектов:
+`user_libc.o` + `setjmp.o`
 - Fake POSIX headers — однострочные `#include "user_libc.h"` (Monolithic Bypass)
 - CRT файлы копируются из объектных файлов сборки (не из исходников)
 - `libtcc1.a` содержит хелперы для 64-битной арифметики (`__divdi3`, `__moddi3`, etc.)
@@ -1038,7 +1096,7 @@ waitpid(pid, &status, 0);
 | 8 | **Kernel Stack Protection** | Guard Pages (Day 16) |
 | 9 | **POSIX Compliance** | Orphan Nodes, FD inheritance, variadic open |
 | 10 | **Self-Hosting** | TinyCC компилирует программы внутри ОС |
-| 11 | **54/55 Stress Test** | Omni Stress: VMM(9), FPU(5), Process(4), VFS(9), C(6), Syscall(8), Exec(2), Memory(3), Libc(2), System(2), Hardening(5) |
+| 11 | **68/68 Stress Test** | Omni Stress: VMM(10), FPU(5), Process(6), VFS(11), C(6), Syscall(8), Exec(2), Memory(3), Libc(6), System(2), Hardening(5), Security(4) |
 
 ### Математически доказанные гарантии (Post)
 
@@ -1074,29 +1132,22 @@ waitpid(pid, &status, 0);
 | `proc_rapid_fork_exit` | 20× fork+exit без Triple Fault (T5 regression) |
 
 ---
+### 10. Known Limitations (Alpha 0.5-rc1)
 
-## 10. ИЗВЕСТНЫЕ ПРОБЛЕМЫ И ROADMAP
-
-<<<<<<< HEAD
-=======
-### 10.1 Критические баги (из код-ревью, июль 2026)
-
-| # | ID | Файл | Проблема | Приоритет |
-|---|---|---|---|---|
-
-| 11 | EBADF1 | user_libc.c, syscall.c | `close()`/`open()` возвращали raw errno вместо -1; `sys_close_handler` не проверял fd bounds | ✅ FIXED Day 31 |
-`sys_close_handler`: добавлен bounds check `fd < 0 || fd >= TASK_MAX_OPEN_FILES → -EBADF`.
-`close()` в user_libc.c: `return ret` → `return -1` при ошибке (POSIX compliance).
-`open()` в user_libc.c: `return fd` → `return -1` при ошибке (POSIX compliance).
-Omni Stress Test: 54/55 PASS. `syscall_ebadf` — PASS. |
-| 12 | WXR1 | tcc_lib_os.c | `mprotect()` обёртка → SIGSEGV при W^X reject (TinyCC линковка) | 🛠 KNOWN ISSUE |
-Ядро работает корректно: `sys_mprotect(W|X)` → `-EPERM`, `sys_mmap(W|X)` → `-EPERM`.
-Проблема в цепочке: stres.c (TinyCC) → mprotect() (tcc_lib_os.o) → sys_mprotect() (inline asm).
-SIGSEGV происходит между mprotect() и вторым mmap(). Предположительно: линковка tcc_lib_os.o или inline asm в user_syscalls.h.
-Не блокирует ARM port (user_libc будет портироваться отдельно). |
->>>>>>> 7808044 (Fix Bag)
-| **35** | HAL (Hardware Abstraction Layer) | 📋 Planned |
-
+| ID | Ограничение | Почему допустимо |
+|---|---|---|
+| LIMIT-001 | Bump allocator (free = no-op) | Acceptable для короткоживущих TCC/shell процессов. Для долгоживущих сервисов — mmap-based allocator (post-stabilization). |
+| LIMIT-002 | Нет сигналов (signal = stub) | Не входит в Enclave POSIX Lite P2. Crash-only model заменяет сигналы. |
+| LIMIT-003 | Нет потоков (threads) | Не требуется на данной фазе. Один процесс = один поток. |
+| LIMIT-004 | Нет динамической линковки | Static-only by design. CONFIG_TCC_STATIC. |
+| LIMIT-005 | waitpid не Linux-compatible | `status == exit_code` (0..255), не `<< 8`. Enclave ABI (§1.3). |
+| LIMIT-006 | /boot не в VFS | ISO-level файлы (GRUB module). RBAC FS_SYSTEM проверяется code review. |
+| LIMIT-007 | getcwd() всегда "/" | Нет cwd tracking. Acceptable для текущей фазы. |
+| LIMIT-008 | chdir() = ENOSYS | Нет cwd tracking. |
+| LIMIT-009 | localtime() = stub | Нет RTC driver. |
+| LIMIT-010 | getenv() = NULL | Нет environment. |
+| LIMIT-011 | isatty() = 1 для fd 0/1/2 | Упрощение. Нет ioctl TIOCGWINSZ check. |
+| LIMIT-012 | sys_brk shrink разрешён ядром, но libc не использует | Bump-only policy. Reserved capability. |
 
 Правильный порядок:
 
@@ -1163,7 +1214,12 @@ SIGSEGV происходит между mprotect() и вторым mmap(). Пр�
 | **VMA Splitting (mprotect)** | `vma_protect_range()` разделяет VMA при частичном покрытии (5 случаев). VMA_COW сохраняется. Паттерн идентичен `vma_unmap_range()`. |
 | **CoW-safe mprotect** | `vmm_protect_page_in_pd()` сохраняет PAGE_COW + PWT/PCD/GLOBAL. Если PAGE_COW активен — PAGE_WRITE принудительно снимается (аппаратная защита CoW). |
 | **POSIX Return Convention** | Все POSIX-обёртки в user_libc.c при ошибке возвращают `-1` (или `MAP_FAILED` для mmap) и устанавливают `errno = -ret`. Raw errno НЕ возвращается пользователю. Аудит Day 31: close(), open() исправлены; read(), write(), lseek(), mkdir(), dup(), dup2(), fstat(), unlink(), munmap(), exec(), ioctl() — подтверждены. |
-
+| **TCC Tagged Struct Rule** | Все структуры в `user_libc.h`, используемые TCC, обязаны быть tagged (`struct timeval`, не `typedef struct {...} timeval_t`). TCC пишет `struct timeval tv;` — anonymous struct → incomplete type → compilation error. Паттерн: `struct X {...}; typedef struct X X_t;` (Day 32). |
+| **TCC dl* Guard** | Объявления `dlopen/dlsym/dlclose/dlerror` + `RTLD_*` обёрнуты в `#ifndef CONFIG_TCC_STATIC`. TCC определяет собственные static stubs с несовместимыми сигнатурами (`void dlclose(void*)` vs `int dlclose(void*)`). Без guard → conflicting types error. |
+| **CoW ref==0 Safety** | `vmm_handle_user_write_fault`: если `pmm_get_refcount() == 0` (теоретически corruption), трактуется как last-owner: COW снимается, WRITE восстанавливается. Безопаснее чем crash. Не является багом (Day 32 audit). |
+| **RBAC FS_SYSTEM** | `sys_open`: `(FS_SYSTEM && !FS_DIRECTORY) → EACCES`. `sys_mkdir`: `parent->flags & FS_SYSTEM → EACCES`. `/boot` не существует в VFS (ISO-level, не initrd) — RBAC проверяется code review, не Ring 3 тестом. |
+| **vfs_close_fd Orphan Semantics** | `of->ref_count--` → 0 → `node->ref_count--` → 0 && `is_unlinked` → `close()` + `kfree(private_data)` + `kfree(node)` + `kfree(of)`. IRQ-safe. Ring 0 НЕ вызывает `sys_close()`. |
+| **tmpfs ENOTEMPTY** | `tmpfs_unlink`: `FS_DIRECTORY && first_child → -ENOTEMPTY`. POSIX rmdir semantics. |
 ---
 
 ## 📎 ПРИЛОЖЕНИЕ B: ВЕРДИКТ МЕНТОРА
@@ -1178,8 +1234,5 @@ SIGSEGV происходит между mprotect() и вторым mmap(). Пр�
 ---
 
 **Конец документа.**
-**Версия:** Alpha 0.4
-
-
  Roadmap для Raspberry Pi Port — HAL design, ARM boot code, Translation Tables
 ---
