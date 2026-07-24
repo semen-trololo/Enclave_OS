@@ -80,6 +80,9 @@ typedef unsigned int       time_t;
 #define UINT_MAX 4294967295U
 #define LONG_MAX 2147483647L
 #define LONG_MIN (-2147483647L - 1L)
+#define LLONG_MAX  9223372036854775807LL
+#define LLONG_MIN  (-9223372036854775807LL - 1LL)
+#define ULLONG_MAX 18446744073709551615ULL
 #define CHAR_BIT 8
 
 /* waitpid options */
@@ -364,10 +367,13 @@ char* strrchr(const char* str, int c);
 char* strstr(const char* haystack, const char* needle);
 char* strndup(const char* s, size_t n);
 char* strpbrk(const char* s, const char* accept);
+char* strdup(const char* s);
 
 int atoi(const char* str);
 long strtol(const char* str, char** endptr, int base);
 unsigned long strtoul(const char* str, char** endptr, int base);
+long long strtoll(const char* str, char** endptr, int base);
+unsigned long long strtoull(const char* str, char** endptr, int base);
 double strtod(const char* nptr, char** endptr);
 float strtof(const char* nptr, char** endptr);
 long double strtold(const char* nptr, char** endptr);
@@ -411,12 +417,10 @@ char* realpath(const char* path, char* resolved_path);
 int dup(int oldfd);
 int dup2(int oldfd, int newfd);
 int fstat(int fd, struct stat* buf);
-// POSIX FUNCTIONS (Day 29 — Enano Text Editor Support)
+
 ssize_t getline(char** lineptr, size_t* n, FILE* stream);
-char* strdup(const char* s);
 char* strerror(int errnum);
 void perror(const char* s);
-time_t time(time_t* tloc);
 int ioctl(int fd, unsigned long request, ...);
 
 /* --------------------------------------------------------------------------
@@ -499,11 +503,10 @@ void longjmp(jmp_buf env, int val) __attribute__((noreturn));
 int _setjmp(jmp_buf env);
 
 /* --------------------------------------------------------------------------
- * 19. Function Prototypes: Sorting, Searching, Error Strings
+ * 19. Function Prototypes: Sorting & Searching
  * -------------------------------------------------------------------------- */
 void qsort(void* base, size_t nmemb, size_t size, int (*cmp)(const void*, const void*));
 void* bsearch(const void* key, const void* base, size_t nmemb, size_t size, int (*cmp)(const void*, const void*));
-char* strerror(int errnum);
 
 /* --------------------------------------------------------------------------
  * 20. Environment & Assertions
@@ -532,6 +535,9 @@ long double ldexpl(long double x, int exp);
 #define _SC_PAGESIZE 30
 long sysconf(int name);
 int mprotect(void* addr, size_t len, int prot);
+
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
+int munmap(void* addr, size_t length);
 
 /* --------------------------------------------------------------------------
  * 23. GCC 14+ / C23 Compliance Stubs (Prototypes)
