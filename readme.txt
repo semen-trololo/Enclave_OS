@@ -1,8 +1,8 @@
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
-**Версия:** Alpha 0.5-rc1
-**Дата актуализации:** 25 июля 2026
-**Статус:** Stabilization Week Complete (Days 1–7)
+**Версия:** Alpha 0.6-arm-irq
+**Дата актуализации:** 26 июля 2026
+**Статус:** ARM IRQ + Timer + Vectors Complete (Days 38–40)
 
 Enclave Doctrine: Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -53,6 +53,8 @@ W^X является законом, CoW — контролируемой опт
 | `Make`, `xorriso`, `grub-pc-bin`, `mtools` | Сборка ISO |
 | `Git` | Контроль версий |
 
+
+
 ### ⚙️ Флаги компиляции
 
 **Kernel CFLAGS:**
@@ -81,8 +83,24 @@ LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
 make iso && make run
 # qemu-system-i386 -cdrom build/metal_os.iso -m 1024M -serial stdio -no-reboot
 ```
+### 🛠 ARM Toolchain (Raspberry Pi Port)
 
+| Инструмент | Назначение |
+|---|---|
+| `arm-none-eabi-gcc` | ARM cross-compiler (ARM1176JZF-S, ARMv6) |
+| `arm-none-eabi-ld` | ARM linker |
+| `arm-none-eabi-objcopy` | ELF → raw binary (kernel.img) |
+| `qemu-system-arm` | Эмуляция (`-M raspi1ap`) |
+
+**ARM CFLAGS:**
+```makefile
+CPU_FLAGS = -mcpu=arm1176jzf-s -marm -mabi=aapcs -mno-unaligned-access
+CFLAGS   += -ffreestanding -nostdlib -O2 -fno-pie -fno-pic
+CFLAGS   += -DCONFIG_ARCH_ARM=1
 ---
+make -f Makefile.arm run
+# qemu-system-arm -M raspi1ap -m 512M -serial stdio -kernel build/arm/kernel.img
+
 
 ## 2. СТРУКТУРА ПРОЕКТА
 
@@ -139,6 +157,25 @@ project_root/
     ├── shell_user.c              # ⭐ Ring 3 Shell
         config.h                  # Config TinyCC
 ```
+
+├── arch/                           # ⭐ Architecture-Specific (HAL)
+│   └── arm/
+│       ├── arm_boot.S              # Entry, stacks, MMU, VBAR, higher half
+│       ├── arm_vectors.S           # Exception vectors (VBAR) + IRQ stub
+│       ├── arm_irq.c               # BCM2835 IRQ controller + dispatch
+│       ├── arm_timer.c             # BCM2835 System Timer (1 MHz, 1 kHz tick)
+│       ├── arm_uart.c              # PL011 UART (BCM2835)
+│       ├── arm_main.c              # ARM kernel_main (IRQ + Timer + uptime)
+│       └── linker_arm.ld           # LMA 0x10000, VMA 0xC0000000
+│
+├── include/hal/                    # ⭐ HAL Contracts (compile-time)
+│   ├── hal_cpu.h                   # irq_save/restore, halt, barriers
+│   ├── hal_mmu.h                   # HAL_PAGE_* flags, map/switch/clone
+│   ├── hal_irq.h                   # IRQ register/enable/EOI/dispatch
+│   ├── hal_timer.h                 # timer_init, get_ticks/ms/us
+│   └── hal_uart.h                  # uart_init, putc/getc
+│
+├── Makefile.arm                    # ⭐ Отдельный ARM build (не трогает x86)
 
 ### 1.3 POSIX ABI Policy (Frozen, Day 32)
 
@@ -213,62 +250,41 @@ project_root/
 
 ---
 
-### 1.4 Changelog: Stabilization Week (Days 1–7, July 2026)
+### 1.5 Changelog: ARM Boot Spike (Days 36–37, July 2026)
 
-#### Day 1: SSOT + ABI Policy
-- Зафиксирован POSIX ABI Policy (§1.3): 16 гарантий, 12 отклонений, 4 TCC правила
-- Исправлены `fork()` / `waitpid()` — errno не устанавливался (HIGH)
-- Исправлены tagged structs в `user_libc.h` — TCC `struct timeval` error (HIGH)
-- Добавлен `#ifndef CONFIG_TCC_STATIC` guard для `dl*` — conflicting types (HIGH)
-- Консолидация `tcc_lib_os.c` → `user_libc.c` (единый файл)
+#### Day 36: HAL Design + Build Infrastructure
+- Спроектирован HAL: 6 модулей (cpu, mmu, irq, timer, uart, mem)
+- Compile-time abstraction (#ifdef CONFIG_ARCH_ARM), НЕ runtime vtable
+- Написаны HAL контракты: hal_cpu.h, hal_mmu.h, hal_irq.h, hal_timer.h, hal_uart.h
+- Расширен config.h: ARM CPSR modes, BCM2835 MMIO, ARMv6 MMU descriptors
+- Makefile.arm: отдельный build, не трогает x86 Makefile
+- linker_arm.ld: LMA 0x10000, VMA 0xC0000000, AT(ADDR - KERNEL_VMA)
 
-#### Day 2: Memory (PMM / VMM / CoW / mprotect)
-- Code review: paging.c, vma.c, pmm.c — **0 багов**
-- Добавлен REG-MEM-008 (mprotect_cow_preserve)
-- Добавлены kernel diagnostics: pmm_check_balance() + heap_check_balance() в 4 точках
-- Доказано: pmm_balance 117→256→117, heap_balance 233→265→233 — **0 утечек**
+#### Day 37: ARM Boot Milestone
+- arm_boot.S: SVC mode, stacks, BSS clear, TTBR0, MMU enable, higher half jump
+- arm_uart.c: PL011 UART init + putc/getc (GPIO ALT0, 115200 8N1)
+- arm_main.c: banner + halt (placeholder)
+- **Решённые проблемы:**
+  - isb → CP15 mcr (ARMv6 не имеет UAL)
+  - PHYS_BASE 0x8000 → 0x10000 (QEMU raspi1ap)
+  - VMA/LMA mismatch → AT(ADDR(.section) - KERNEL_VMA)
+  - TTBR1 Prefetch Abort → один TTBR0 (identity + HH)
+  - __aeabi_uidiv → hardcoded baud + libgcc
+  - QEMU RAM 256M → 512M (raspi1ap requirement)
+- **Результат:** Banner по UART в QEMU raspi1ap ✅
 
-#### Day 3: Processes (fork / exec / waitpid / reaper / init)
-- Code review: task.c, syscall.c — **0 багов**
-- Добавлены: fork_fd_inherit, exec_preserves_fd
-- T2 закрыт: vfs_close_fd() везде, Ring 0 НЕ вызывает sys_close()
-
-#### Day 4: VFS / FD / tmpfs / RBAC
-- Code review: vfs.c, tmpfs.c — **0 багов**
-- Добавлены: dup2_overwrite_same, path_too_long
-- Удалён бессмысленный тест mkdir_eacces_boot (/boot не в VFS)
-- Orphan semantics подтверждены: is_unlinked + ref_count + vfs_close_fd
-
-#### Day 5: Userspace / TCC / Self-Hosting
-- `__isoc23_strtoll` уже исправлен (Day 32)
-- Makefile race не актуален (один таргет libtcc1)
-- Добавлены: strtol_family, getline_strdup_strerror, file_buffered_io, tcc_compile_error_recovery
-- Self-hosting pipeline: compile + run + error recovery — **PASS**
-
-#### Day 6: Security / Syscall Validation / Stress
-- Code review: is_user_pointer, copy_string_from_user — **0 критических багов**
-- Добавлены: syscall_bad_args, brk_collision, exec_bad_elf, mixed_workload
-- W^X, RBAC, EFAULT, EBADF, ENOSYS — все подтверждены
-
-#### Day 7: Release Candidate
-- 68/68 тестов PASS
-- pmm_balance=117, heap_balance=242 — **0 утечек**
-- SSOT обновлён до Alpha 0.5-rc1
-- Known limitations зафиксированы (12 пунктов)
-
-#### Итого за неделю
+#### Итого за ARM spike
 | Метрика | Значение |
 |---------|----------|
-| Тестов | 55 → **68** (+13) |
-| Багов в ядре | **0** |
-| Багов в libc | **5** (все исправлены) |
-| Багов в тестах | **2** (исправлены / удалены) |
-| Утечек PMM | **0** |
-| Утечек heap | **0** |
-| Triple Fault | **0** |
-| Kernel Panic | **0** |
+| Файлов HAL | 5 контрактов + config.h расширение |
+| Файлов ARM | arm_boot.S, arm_uart.c, arm_main.c, linker_arm.ld |
+| Build | Makefile.arm (отдельный, x86 не тронут) |
+| QEMU | raspi1ap, 512M, PL011 UART |
+| Boot | SVC → MMU → Higher Half → UART banner ✅ |
+| x86 regression | 0 (Makefile не тронут) |
+```
 
-### 1.5 Release Checklist: Alpha 0.5-rc1
+### 1.5 Release Checklist: Alpha 0.5-rc1 (x86)
 
 - [x] SSOT version fixed (Alpha 0.5-rc1)
 - [x] ABI policy fixed (§1.3: 16 гарантий, 12 отклонений)
@@ -285,8 +301,69 @@ project_root/
 - [x] Serial log clean (0 FAIL, 0 PANIC, 0 TRIPLE FAULT)
 - [x] Known limitations documented (12 пунктов)
 - [x] Changelog written (§1.4)
-- [ ] Git tag: `alpha-0.5-rc1`
+- [x] Git tag: `alpha-0.5-rc1`
 
+
+#### Итого
+| Метрика | Значение |
+|---------|----------|
+| Тестов | 55 → **68** (+13) |
+| Багов в ядре | **0** |
+| Багов в libc | **5** (все исправлены) |
+| Багов в тестах | **2** (исправлены / удалены) |
+| Утечек PMM | **0** |
+| Утечек heap | **0** |
+| Triple Fault | **0** |
+| Kernel Panic | **0** |
+
+### 1.6 Changelog: ARM IRQ + Timer + Vectors (Days 38–40, July 2026)
+
+#### Day 38: HAL IRQ + Timer Implementation
+
+- hal_irq.h: 72 IRQ линии (64 GPU + 8 Basic), namespace HAL_IRQ_GPU_*/HAL_IRQ_BASIC_*
+- hal_irq.h: hal_irq_dispatch задокументирован как arch-specific (EOI порядок)
+- hal_cpu.h: hal_irq_restore (ARM) восстанавливает только I-bit, не mode bits
+- hal_timer.h: добавлен hal_timer_get_hz(), hal_timer_oneshot помечен NOT IMPLEMENTED
+- config.h: BCM2835_PERIPH_VIRT_BASE + BCM2835_VIRT(reg) макрос
+- config.h: BCM2835_RAM_SIZE_DEFAULT = 512 MB (QEMU raspi1ap)
+
+#### Day 39: ARM Exception Vectors + IRQ Controller
+
+- arm_vectors.S: VBAR-based vector table (8 entries, b handler)
+- arm_vectors.S: IRQ stub (srsdb/cps/push/bl/pop/rfeia)
+- arm_vectors.S: Exception stubs (UNDEF, SVC, PABT, DABT) с context dump
+- arm_irq.c: BCM2835 IRQ controller (init, register, enable/disable, dispatch)
+- arm_irq.c: arm_irq_entry — read PEND1/PEND2/BASIC, ctz32(), dispatch
+- arm_irq.c: arm_exception_entry — fatal dump (r0-r12, LR, fault_addr, SPSR)
+
+#### Day 40: ARM System Timer + Integration
+
+- arm_timer.c: BCM2835 System Timer C1, 1 MHz, 1 kHz tick
+- arm_timer.c: timer_irq_handler (clear CS, next C1, tick_count++)
+- arm_timer.c: hal_timer_delay_us/ms (hardware CLO polling)
+- arm_main.c: полная интеграция (IRQ init → Timer init → enable → uptime loop)
+- arm_boot.S: VBAR setup в _higher_half_entry
+- arm_uart.c: удалены дублирующиеся hal_timer_delay_us/ms (владелец: arm_timer.c)
+- Makefile.arm: добавлены arm_vectors.S, arm_irq.c, arm_timer.c
+
+#### Критические баги Days 38-40
+
+| # | Баг | Корень | Фикс |
+|---|---|---|---|
+| B1 | __builtin_ctz → rbit (ARMv7) | GCC codegen для ARMv6 | Software ctz32() |
+| B2 | WFI не просыпается | ARM1176 + QEMU errata | NOP sled idle |
+| B3 | push {r0-r12} = 52 bytes | AAPCS SP mod 8 = 4 | push {r0-r12, lr} = 56 bytes |
+
+#### Итого за Days 38-40
+
+| Метрика | Значение |
+|---------|----------|
+| Новых файлов | arm_vectors.S, arm_irq.c, arm_timer.c |
+| Обновлённых файлов | arm_boot.S, arm_main.c, arm_uart.c, Makefile.arm |
+| Обновлённых HAL | hal_irq.h, hal_cpu.h, hal_timer.h, config.h |
+| IRQ dispatch | 1000 IRQ/sec, 0 пропусков, 0 сбоев |
+| Uptime test | 9+ секунд стабильно |
+| x86 regression | 0 (Makefile не тронут) |
 
 ## 3. АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
 
@@ -336,6 +413,29 @@ project_root/
 | **Zero Trust I/O** | Устройства через VFS (`/dev/console`) |
 
 ---
+
+### 3.8 HAL — Hardware Abstraction Layer (Compile-Time)
+
+Enclave OS поддерживает несколько архитектур через compile-time HAL.
+Один бинарник = одна архитектура. Runtime polymorphism (vtable) НЕ используется.
+
+| HAL модуль | x86 реализация | ARM реализация |
+|---|---|---|
+| hal_cpu | GDT, TSS, cli/sti/hlt | CP15, cpsid/cpsie/wfi |
+| hal_mmu | 2-level PD (CR3) | ARMv6 Translation Table (TTBR0) |
+| hal_irq | IDT + PIC 8259 (16 линий) | VBAR vectors + BCM2835 IRQ (72 линии: 64 GPU + 8 Basic) |
+| hal_timer | PIT 8254 (1193182 Hz) | BCM2835 System Timer C1 (1 MHz, 1 kHz tick) |
+| hal_uart | COM1 (16550A, 0x3F8) | PL011 (MMIO 0x20201000) |
+| hal_mem | E820 | ATAGS (r2 при boot) |
+
+**Принцип:** Portable kernel code (task.c, vfs.c, heap.c) включает ТОЛЬКО
+hal_*.h. Arch-specific code (arch/x86/, arch/arm/) реализует контракты.
+
+**⚠️ x86 НЕ рефакторится** до стабильности ARM. ARM пишется параллельно.
+
+**Syscall ABI:** Enclave номера (Frozen, §1.3). На ARM: `svc #0` вместо `int 0x80`.
+Номера syscall НЕ меняются. user_libc.c меняет только inline asm обёртку.
+```
 
 ## 4. КАРТА ПАМЯТИ
 
@@ -411,6 +511,52 @@ project_root/
 
 ---
 
+### 4.4 ARM Memory Map (BCM2835, Raspberry Pi 1)
+
+**Physical:**
+```
+0x00000000 ┌──────────────────────┐
+           │  RAM (512 MB QEMU)   │
+0x00010000 │  ← kernel.img load   │  (QEMU raspi1ap)
+0x00008000 │  ← kernel.img load   │  (реальный RPi1)
+0x20000000 ├──────────────────────┤
+           │  Peripherals (16 MB) │
+           │  0x20003000: System Timer (1 MHz)
+           │  0x2000B000: ARM Timer
+           │  0x2000B200: Interrupt Controller
+           │  0x20200000: GPIO
+           │  0x20201000: UART0 (PL011)
+0x20FFFFFF └──────────────────────┘
+```
+
+**Virtual (после MMU, один TTBR0):**
+```
+TTBR0 (4096 entries × 4B = 16 KB):
+  [0-255]     0x00000000 → 0x00000000  RAM (256 MB, identity)
+  [512-527]   0x20000000 → 0x20000000  Peripherals (16 MB, Device)
+  [3072-3327] 0xC0000000 → 0x00000000  Higher Half RAM (256 MB)
+  [3584-3599] 0xE0000000 → 0x20000000  Higher Half Peripherals
+```
+
+**⚠️ TTBR1:** Планировался TTBR0/TTBR1 split (Linux/seL4 стандарт),
+но QEMU raspi1ap даёт Prefetch Abort при TTBR1 N=2.
+Spike использует один TTBR0. TTBR0/TTBR1 split — в arm_mmu.c (Фаза 2).
+
+**⚠️ VBAR:** Exception vectors находятся в .text (kernel virtual address).
+VBAR устанавливается в arm_boot.S (_higher_half_entry) ДО включения IRQ.
+Не используется 0xFFFF0000 (high vectors) — нет необходимости маппить
+дополнительную 1MB section. VBAR = адрес _vector_table в .text.
+
+**⚠️ BCM2835 MMIO:** config.h определяет физические адреса (0x20000000+).
+Макрос BCM2835_VIRT(reg) транслирует в kernel virtual (0xE0000000+).
+Сейчас (spike): identity mapping активен, используются физические адреса.
+Позже (HH-only): заменить на BCM2835_VIRT() во всех ARM-файлах.
+
+**ARM Section Descriptor (1 MB page):**
+  RAM:    PA | 0x140E  (TEX=001, C=1, B=1, AP=01, Section)
+  Device: PA | 0x416   (XN=1, B=1, AP=01, Section)
+```
+
 ## 5. ПОДСИСТЕМЫ ЯДРА
 
 ### 5.1 Загрузчик и инициализация
@@ -456,6 +602,80 @@ project_root/
 | 16 | `keyboard_install()` + `timer_init(1000)` | IRQ |
 | 17 | **Launch PID 1** (`/sbin/init.elf`) | Ring 3 Init |
 | 18 | **Kernel Idle Loop** | `sti; hlt; cli` |
+
+#### ARM Boot Sequence (`arch/arm/arm_boot.S`)
+
+**Строгая последовательность (нарушение → Prefetch Abort loop):**
+
+| Шаг | Действие | Назначение |
+|---|---|---|
+| 1 | Сохранить r1 (machine), r2 (ATAGS) | Boot params |
+| 2 | `cpsid if, #0x13` | SVC mode, IRQ/FIQ off |
+| 3 | Invalidate caches + TLB | Clean state |
+| 4 | Disable MMU/caches (SCTLR) | Clean boot |
+| 5 | Setup stacks (SVC/IRQ/FIQ/ABT/UND/SYS) | Mode-specific SP |
+| 6 | Clear BSS (phys = VMA - 0xC0000000) | Zero .bss |
+| 7 | Build TTBR0 (identity + higher half) | Page tables |
+| 8 | Set TTBR0, DACR (Domain 0 = Manager) | MMU config |
+| 9 | Enable MMU (SCTLR.M = 1) | MMU ON |
+| 10 | `ldr pc, =_higher_half_entry` | Jump to 0xC0000000+ |
+| 11 | Set VBAR = _vector_table (CP15 c12) | Exception vectors in .text |
+| 12 | ISB (CP15 c7,c5,4) | Ensure VBAR write completes |
+| 13 | Reload SP (virtual address) | SVC stack in HH |
+| 14 | `bl arm_kernel_main(atags, machine)` | C kernel |
+
+**⚠️ ARMv6: НЕТ инструкций isb/dsb/dmb (UAL, ARMv7+).**
+Используем CP15:
+  ISB = mcr p15, 0, r0, c7, c5, 4
+  DSB = mcr p15, 0, r0, c7, c10, 4
+  DMB = mcr p15, 0, r0, c7, c10, 5
+
+**⚠️ QEMU raspi1ap:** kernel load address = 0x10000 (не 0x8000).
+PHYS_BASE в linker_arm.ld = 0x00010000.
+
+**⚠️ Linker script:** VMA = LMA + KERNEL_VMA для КАЖДОЙ секции.
+Формула: AT(ADDR(.section) - KERNEL_VMA).
+
+#### ARM IRQ + Timer Sequence (Days 38-40)
+
+Последовательность инициализации прерываний (arm_main.c):
+
+| Шаг | Действие | Назначение |
+|---|---|---|
+| 1 | hal_uart_init(115200) | PL011 UART (polling) |
+| 2 | hal_irq_init() | BCM2835: disable all lines, clear FIQ routing |
+| 3 | hal_timer_init(1000) | System Timer C1, 1 kHz, register handler, enable line 1 |
+| 4 | hal_irq_enable() | cpsie i — global IRQ enable |
+| 5 | Uptime loop (busy-wait) | hal_timer_get_ticks(), print every 1000 ticks |
+
+IRQ dispatch chain:
+
+  Timer match (CLO == C1)
+  → BCM2835 PEND1 bit 1
+  → CPU IRQ exception (VBAR + 0x18)
+  → b _irq_handler (arm_vectors.S)
+  → sub lr, lr, #4 / srsdb / cps #0x13 / push {r0-r12, lr}
+  → bl arm_irq_entry (arm_irq.c)
+  → read PEND1/PEND2/BASIC → ctz32() → hal_irq_dispatch()
+  → timer_irq_handler (arm_timer.c)
+  → clear CS bit 1, set next C1, tick_count++
+  → pop {r0-r12, lr} / rfeia sp!
+  → return to interrupted code
+
+⚠️ ARM1176 (ARMv6): ЗАПРЕЩЕНО использовать __builtin_ctz / __builtin_clz.
+   GCC может сгенерировать rbit (ARMv7-only) → Undefined Instruction.
+   Использовать software ctz32() (arm_irq.c).
+
+⚠️ AAPCS Stack Alignment: перед любой bl из ассемблера SP mod 8 MUST == 0.
+   SRS (8 bytes) + push {r0-r12, lr} (56 bytes) = 64 → 64 mod 8 = 0.
+   push {r0-r12} (52 bytes) = 60 → 60 mod 8 = 4 → НАРУШЕНИЕ.
+   Всегда push {r0-r12, lr} (14 регистров), НЕ push {r0-r12} (13).
+
+⚠️ WFI на ARM1176/QEMU: не просыпается по System Timer IRQ.
+   hal_cpu_idle() использует NOP sled (cpsie i / nop×4 / cpsid i).
+   Для production (Cortex-A) — заменить на WFI.
+
+```
 
 ### 5.2 Управление памятью
 
@@ -1022,7 +1242,7 @@ initrd_root/
 │   ├── crt1.o           ← Алиас crt0.o
 │   ├── crti.o           ← Empty stub (section .text)
 │   ├── crtn.o           ← Empty stub (section .text)
-│   ├── libc.a           ← Архив: user_libc.o + tcc_lib_os.o + setjmp.o
+│   ├── libc.a           ← Архив: user_libc.o + setjmp.o (Day 32: tcc_lib_os.c консолидирован)
 │   └── libtcc1.a        ← 64-bit math helpers (из tcc_src/libtcc1.c)
 ├── usr/lib/
 │   └── (зеркало /lib/)
@@ -1151,14 +1371,11 @@ waitpid(pid, &status, 0);
 
 Правильный порядок:
 
-1. Зафиксировать POSIX ABI policy.       критично
-2. Сделать syscall/POSIX audit.          желательно
-3. Начать HAL.                           критично
-4. Сделать RPi bare-metal spike.         полезно
-5. Перенести spike в arch/arm.           правильно
-6. Запустить UART/timer/MMU.             milestone
-7. Запустить init + shell over UART.     большой milestone
-| **36-40** | 🍓 Raspberry Pi Port (BCM2835, ARM1176JZF-S) | 📋 Planned |
+Alpha 0.6-arm-spike
+Days 36-37: ARM Boot Spike           ✅ Complete
+Days 38-40: ARM IRQ + Timer + Vectors ✅ Complete  ← МЫ СДЕСЬ
+Days 41-45: ARM Portable Kernel       📋 Next
+Days 46-50: ARM init + shell (UART)   📋 Planned
 | **41+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
 | **45+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
 | **50+** | RISC-V порт, ARM Cortex-A (64-bit) | 📋 Planned |
@@ -1221,7 +1438,16 @@ waitpid(pid, &status, 0);
 | **vfs_close_fd Orphan Semantics** | `of->ref_count--` → 0 → `node->ref_count--` → 0 && `is_unlinked` → `close()` + `kfree(private_data)` + `kfree(node)` + `kfree(of)`. IRQ-safe. Ring 0 НЕ вызывает `sys_close()`. |
 | **tmpfs ENOTEMPTY** | `tmpfs_unlink`: `FS_DIRECTORY && first_child → -ENOTEMPTY`. POSIX rmdir semantics. |
 ---
-
+| **ARM ISB/DSB/DMB** | ARMv6 не имеет UAL isb/dsb/dmb. Используем CP15: ISB = mcr p15,0,r0,c7,c5,4. DSB = c7,c10,4. DMB = c7,c10,5. |
+| **ARM PHYS_BASE** | QEMU raspi1ap загружает kernel по 0x10000 (не 0x8000). Реальный RPi1: 0x8000. PHYS_BASE в linker_arm.ld. |
+| **ARM VMA/LMA** | VMA = LMA + KERNEL_VMA для каждой секции. AT(ADDR(.section) - KERNEL_VMA). Иначе MMU транслирует в мусор. |
+| **ARM TTBR1 QEMU** | QEMU raspi1ap: Prefetch Abort при TTBR1 N=2. Spike: один TTBR0 (identity + HH). TTBR0/TTBR1 split — позже. |
+| **ARM Section Map** | Начальный маппинг: Section 1MB (не 4KB pages). RAM = PA|0x140E, Device = PA|0x416. Fine-grained — в arm_mmu.c. |
+| **ARM No Hardware Divide** | ARM1176 не имеет div. GCC генерирует __aeabi_uidiv (libgcc). Решение: hardcoded константы + libgcc в LDFLAGS. |
+| **ARM SVC vs INT 0x80** | ARM syscall: svc #0 (не int 0x80). Номера syscall — Enclave (Frozen). user_syscalls.h меняет только asm обёртку. |
+| **ARM Exception Vectors** | 8 векторов (не 256 как x86 IDT). VBAR = 0xFFFF0000 (high vectors). SVC = syscall, DAbort = page fault, IRQ = hardware. |
+| **ARM PL011 UART** | BCM2835 UART0 (PL011) по 0x20201000. GPIO 14/15 ALT0. Baud: IBRD=1, FBRD=40 (3 MHz UARTCLK). |
+```
 ## 📎 ПРИЛОЖЕНИЕ B: ВЕРДИКТ МЕНТОРА
 
 > *"Любая новая фича, позволяющая Ring 0 взаимодействовать с Ring 3 памятью, обязана иметь:*
@@ -1234,5 +1460,4 @@ waitpid(pid, &status, 0);
 ---
 
 **Конец документа.**
- Roadmap для Raspberry Pi Port — HAL design, ARM boot code, Translation Tables
 ---

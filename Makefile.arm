@@ -1,0 +1,153 @@
+# ============================================================================
+# Makefile.arm — Enclave OS ARM Build (Raspberry Pi 1, BCM2835, ARM1176JZF-S)
+# ============================================================================
+# Отдельный Makefile. НЕ трогает x86 сборку (Makefile).
+#
+# Usage:
+#   make -f Makefile.arm          # Собрать kernel.img
+#   make -f Makefile.arm run      # Запустить в QEMU (raspi1ap)
+#   make -f Makefile.arm debug    # QEMU + GDB server
+#   make -f Makefile.arm clean    # Очистить
+#
+# Требования:
+#   arm-none-eabi-gcc (>= 10.0)
+#   qemu-system-arm (>= 7.0, машина raspi1ap)
+# ============================================================================
+
+# --- Toolchain ---
+ARM_PREFIX  := arm-none-eabi-
+CC          := $(ARM_PREFIX)gcc
+AS          := $(ARM_PREFIX)gcc
+LD          := $(ARM_PREFIX)ld
+OBJCOPY     := $(ARM_PREFIX)objcopy
+OBJDUMP     := $(ARM_PREFIX)objdump
+SIZE        := $(ARM_PREFIX)size
+
+# --- Directories ---
+BUILD_DIR   := build/arm
+ARCH_DIR    := arch/arm
+INCLUDE_DIR := include
+
+# --- Target CPU: ARM1176JZF-S (ARMv6, VFPv2, no NEON) ---
+CPU_FLAGS   := -mcpu=arm1176jzf-s -marm -mabi=aapcs -mno-unaligned-access
+
+# --- Kernel CFLAGS ---
+CFLAGS      := $(CPU_FLAGS)
+CFLAGS      += -std=gnu99 -ffreestanding -nostdlib
+CFLAGS      += -O2 -Wall -Wextra -Werror=implicit-function-declaration
+CFLAGS      += -fno-pie -fno-pic -fno-stack-protector
+CFLAGS      += -fno-builtin -fno-common
+CFLAGS      += -I$(INCLUDE_DIR)
+CFLAGS      += -DCONFIG_ARCH_ARM=1
+CFLAGS      += -g
+
+# --- Assembler flags (.S files через gcc, не as) ---
+ASFLAGS     := $(CPU_FLAGS)
+ASFLAGS     += -ffreestanding -nostdlib
+ASFLAGS     += -I$(INCLUDE_DIR)
+ASFLAGS     += -DCONFIG_ARCH_ARM=1
+ASFLAGS     += -g
+
+# --- Linker ---
+LIBGCC      := $(shell $(CC) $(CPU_FLAGS) -print-libgcc-file-name)
+LDFLAGS     := -T $(ARCH_DIR)/linker_arm.ld
+LDFLAGS     += -nostdlib -no-pie
+LDFLAGS     += --gc-sections
+
+# --- QEMU ---
+QEMU        := qemu-system-arm
+QEMU_MACHINE := raspi1ap
+QEMU_FLAGS  := -M $(QEMU_MACHINE)
+QEMU_FLAGS  += -m 512M
+QEMU_FLAGS  += -serial stdio
+QEMU_FLAGS  += -no-reboot
+QEMU_FLAGS  += -display none
+
+# ============================================================================
+# SOURCE FILES
+# ============================================================================
+
+ASM_SOURCES := \
+	$(ARCH_DIR)/arm_boot.S \
+	$(ARCH_DIR)/arm_vectors.S
+
+C_SOURCES := \
+	$(ARCH_DIR)/arm_uart.c \
+	$(ARCH_DIR)/arm_main.c \
+	$(ARCH_DIR)/arm_irq.c \
+	$(ARCH_DIR)/arm_timer.c
+
+# --- Будущие файлы (раскомментировать по мере написания) ---
+# C_SOURCES += $(ARCH_DIR)/arm_cpu.c
+# C_SOURCES += $(ARCH_DIR)/arm_mmu.c
+# C_SOURCES += $(ARCH_DIR)/arm_mem.c
+
+# ============================================================================
+# OBJECT FILES
+# ============================================================================
+ASM_OBJECTS := $(patsubst $(ARCH_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
+C_OBJECTS   := $(patsubst $(ARCH_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
+OBJECTS     := $(ASM_OBJECTS) $(C_OBJECTS)
+
+# --- Output ---
+KERNEL_ELF  := $(BUILD_DIR)/kernel.elf
+KERNEL_IMG  := $(BUILD_DIR)/kernel.img
+KERNEL_MAP  := $(BUILD_DIR)/kernel.map
+
+# ============================================================================
+# TARGETS
+# ============================================================================
+
+.PHONY: all run debug clean objdump size
+
+all: $(KERNEL_IMG)
+	@echo ""
+	@echo "  ✅ Enclave OS ARM build complete"
+	@echo "  📦 $(KERNEL_IMG)"
+	@$(SIZE) $(KERNEL_ELF)
+	@echo ""
+
+# --- Link ELF ---
+$(KERNEL_ELF): $(OBJECTS) $(ARCH_DIR)/linker_arm.ld
+	@mkdir -p $(BUILD_DIR)
+	$(LD) $(LDFLAGS) -Map=$(KERNEL_MAP) -o $@ $(OBJECTS) $(LIBGCC)
+
+# --- ELF → Raw Binary (kernel.img для RPi GPU / QEMU) ---
+$(KERNEL_IMG): $(KERNEL_ELF)
+	$(OBJCOPY) -O binary $< $@
+
+# --- Compile .S (assembly through gcc preprocessor) ---
+$(BUILD_DIR)/%.o: $(ARCH_DIR)/%.S
+	@mkdir -p $(BUILD_DIR)
+	$(AS) $(ASFLAGS) -c $< -o $@
+
+# --- Compile .c ---
+$(BUILD_DIR)/%.o: $(ARCH_DIR)/%.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# --- Run in QEMU ---
+run: $(KERNEL_IMG)
+	@echo "  🚀 Starting QEMU ($(QEMU_MACHINE))..."
+	@echo "  📡 UART: stdio"
+	@echo ""
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_IMG)
+
+# --- Debug: QEMU + GDB ---
+debug: $(KERNEL_IMG)
+	@echo "  🔧 QEMU waiting for GDB on :1234"
+	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_IMG) -S -gdb tcp::1234
+
+# --- Disassembly ---
+objdump: $(KERNEL_ELF)
+	$(OBJDUMP) -d -S $< > $(BUILD_DIR)/kernel.dis
+	@echo "  📄 $(BUILD_DIR)/kernel.dis"
+
+# --- Section sizes ---
+size: $(KERNEL_ELF)
+	$(SIZE) -A $<
+
+# --- Clean ---
+clean:
+	rm -rf $(BUILD_DIR)
+	@echo "  🧹 ARM build cleaned"

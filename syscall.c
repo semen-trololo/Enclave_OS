@@ -853,8 +853,8 @@ static int sys_uname_handler(struct regs* r) {
     
     k_strncpy(kernel_buf.sysname, "Enclave OS", UTSNAME_LENGTH - 1);
     k_strncpy(kernel_buf.nodename, "localhost", UTSNAME_LENGTH - 1);
-    k_strncpy(kernel_buf.release, "0.3-alpha", UTSNAME_LENGTH - 1);
-    k_strncpy(kernel_buf.version, "Day 30 Build", UTSNAME_LENGTH - 1);
+    k_strncpy(kernel_buf.release, "Alpha 0.5-rc1", UTSNAME_LENGTH - 1);
+    k_strncpy(kernel_buf.version, "Day 32 Build", UTSNAME_LENGTH - 1);
     k_strncpy(kernel_buf.machine, "i686", UTSNAME_LENGTH - 1);
     
     k_memcpy(user_buf, &kernel_buf, sizeof(utsname_t));
