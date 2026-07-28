@@ -1,9 +1,9 @@
 ````markdown
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
-**Версия:** Alpha 0.6-arm-preempt
+**Версия:** Alpha 0.6-arm-fault
 **Дата актуализации:** 28 июля 2026
-**Статус:** ARM User IRQ Preemption Complete + Validation Pass (Day 46)
+**Статус:** ARM User Fault Isolation Complete (Day 47)
 
 **Enclave Doctrine:** Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -559,6 +559,41 @@ make -f Makefile.arm run
 | Kernel crash | 0 |
 | x86 regression | 0 |
 
+### 1.11 Changelog: ARM User Fault Isolation (Day 47, July 2026)
+
+#### Day 47: User Fault Isolation
+
+- `arch/arm/arm_vectors.S`: UNDEF/PABT/DABT stubs разделены на явные user/kernel path
+- `arch/arm/arm_vectors.S`: user fault строит 72-byte frame (`SP_usr`, `LR_usr`, `PC`, `CPSR`)
+- `arch/arm/arm_vectors.S`: kernel fault строит 64-byte frame
+- `arch/arm/arm_irq.c`: добавлены `arm_user_fault_entry()` и `arm_kernel_fault_entry()`
+- `arch/arm/arm_irq.c`: kernel fault остаётся fatal dump + halt
+- `arch/arm/arm_main.c`: добавлен `arm_task_fault_kill()` (task control API, `noreturn`)
+- `arch/arm/arm_main.c`: `schedule()` получил guard против переключения в `sp == 0`
+- `arch/arm/arm_main.c`: добавлены `uart_hex()` и `fault_reason()` для диагностики
+- `include/arm_trap.h`, `config.h`, `arm_context.S`, `arm_syscall.c` не менялись
+
+#### Результат
+
+```text
+User UNDEF / PABT / DABT
+→ fault diagnostic logged (pc, cpsr, sp_usr, lr_usr)
+→ current task marked TASK_FREE
+→ scheduler switches to idle / live task
+→ kernel remains alive
+→ uptime continues
+```
+
+#### Итого за Day 47
+
+| Метрика | Значение |
+|---|---|
+| Новых файлов | 0 |
+| Обновлённых файлов | `arm_vectors.S`, `arm_irq.c`, `arm_main.c` |
+| User fault isolation | ✅ (UNDEF/DABT/PABT) |
+| Kernel fault policy | Fatal (kernel bug = halt) |
+| SVC full user frame | 🔄 Next (`ARM-LIMIT-009`) |
+| x86 regression | 0 |
 ---
 
 ## 2. СТРУКТУРА ПРОЕКТА
@@ -1118,9 +1153,16 @@ user code: svc #0
 > IRQ stub сохраняет полный user trap frame (72 bytes), вызывает scheduler,
 > затем восстанавливает user context через `rfeia`.
 >
-> Fault isolation ещё не реализован:
-> user Data Abort / Prefetch Abort / Undefined Instruction пока fatal dump
-> (см. `ARM-LIMIT-003`).
+> ⚠️ **User Fault Isolation implemented (Day 47).**
+>
+> User Data Abort / Prefetch Abort / Undefined Instruction больше не роняют ядро.
+> Ассемблерные stub'ы определяют прерванный режим через `SPSR & 0x1F`.
+> Если исключение произошло из USR mode, строится 72-byte user fault frame,
+> вызывается `arm_task_fault_kill()`, задача помечается `TASK_FREE`,
+> scheduler переключается на другую задачу. Ядро остаётся живым.
+>
+> Если исключение произошло из SVC/kernel mode, это трактуется как kernel bug
+> и приводит к fatal dump + halt.
 
 ---
 
@@ -1305,6 +1347,7 @@ irq_restore() → восстанавливает EFLAGS
 > ⚠️ **EOI Lock Bypass:** `outb(0x20, 0x20)` отправляется в PIC **ДО** вызова
 > C-обработчика. Иначе `schedule()` переключит задачу, и линия IRQ заблокируется
 > навсегда.
+
 
 ---
 
@@ -1917,7 +1960,7 @@ waitpid(pid, &status, 0);
 |---|---|---|
 | ARM-LIMIT-001 | CLOSED: User tasks run with IRQ enabled (`CPSR = 0x50`) | IRQ stub сохраняет полный user trap frame (72 bytes). Day 46 validation pass. |
 | ARM-LIMIT-002 | User memory mapped as 1 MB sections | Spike mapping. 4 KB pages и real ARM VMM — позже. |
-| ARM-LIMIT-003 | DAbort/PAbort/UNDEF пока fatal dump | Fault isolation и task kill — следующий этап. |
+| ARM-LIMIT-003 | CLOSED: User DAbort/PAbort/UNDEF kill task, kernel alive | User fault isolation implemented (Day 47). Kernel-mode faults remain fatal. |
 | ARM-LIMIT-004 | User image is raw binary, not ELF | ELF loader на ARM будет позже. Сейчас proof-of-concept user mode. |
 | ARM-LIMIT-005 | `sys_write` validates only explicit user regions | Полная VMA-based validation появится вместе с ARM VMM. |
 | ARM-LIMIT-006 | Нет per-process address space на ARM | Один временный user mapping для spike. |
@@ -1935,7 +1978,7 @@ waitpid(pid, &status, 0);
 | **38-40** | 🍓 ARM IRQ + Timer + Vectors | ✅ Complete |
 | **41-42** | 🍓 ARM Context Switch + Scheduler | ✅ Complete |
 | **43-45** | 🍓 ARM SVC + User Mode + Integration | ✅ Complete |
-| **45+** | ARM IRQ Preemption from User Mode + Fault Isolation | ✅ IRQ Preemption Complete + Validation Pass (Day 46); 🔄 Fault Isolation Next |
+| **45+** | ARM IRQ Preemption from User Mode + Fault Isolation | ✅ IRQ Preemption (Day 46); ✅ User Fault Isolation (Day 47) |
 | **46+** | ARM 4 KB Pages + Real ARM VMM | 📋 Planned |
 | **47+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
 | **48+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
@@ -2026,7 +2069,7 @@ waitpid(pid, &status, 0);
 | **ARM Task Control API** | `arm_syscall.c` не имеет прямого доступа к `tasks[]` или `current_task`.<br>Используются `arm_current_pid()`, `arm_task_yield()`, `arm_task_exit()`. |
 | **ARM Immediate Encoding** | `mov Rd, #imm` поддерживает только 8-bit immediate с even rotate.<br>Большие константы через `ldr Rd, =value`. |
 | **ARM User Entry** | `arm_enter_user_first`: set `SP_usr`, set `SPSR = ARM_CPSR_USER (0x50)`, clear `r0-r12`, `movs pc, lr`. |
-
+| **ARM User Fault Isolation** | UNDEF/PABT/DABT из USR mode строят 72-byte user fault frame.<br>`arm_vectors.S` явно определяет прерванный режим через `SPSR & 0x1F`.<br>User fault → `arm_user_fault_entry()` → `arm_task_fault_kill()` → `TASK_FREE` → `schedule()`.<br>Kernel fault → `arm_kernel_fault_entry()` → fatal dump + halt.<br>Fault path никогда не возвращается в упавшую задачу (нет `rfeia`). |
 ---
 
 ## 📎 ПРИЛОЖЕНИЕ B: ВЕРДИКТ МЕНТОРА

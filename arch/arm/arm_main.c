@@ -93,15 +93,28 @@ static void uart_dec(uint32_t val)
     hal_uart_puts(&buf[i]);
 }
 
-// ============================================================================
-// SCHEDULER
-// ============================================================================
-// Called from:
-//   - timer IRQ (preemptive kernel scheduling)
-//   - sys_yield / sys_exit (cooperative user scheduling)
-//
-// Must be called with IRQ disabled.
-// ============================================================================
+static void uart_hex(uint32_t val)
+{
+    char buf[9];
+
+    for (int i = 7; i >= 0; i--) {
+        buf[i] = "0123456789ABCDEF"[val & 0xF];
+        val >>= 4;
+    }
+
+    buf[8] = '\0';
+    hal_uart_puts(buf);
+}
+
+static const char *fault_reason(uint32_t type)
+{
+    switch (type) {
+        case ARM_VECTOR_UNDEF: return "UNDEF";
+        case ARM_VECTOR_PABT:  return "PABT";
+        case ARM_VECTOR_DABT:  return "DABT";
+        default:               return "FAULT";
+    }
+}
 
 void schedule(void)
 {
@@ -139,6 +152,22 @@ void schedule(void)
     if (next == current_task) {
         tasks[next].state = TASK_RUNNING;
         return;
+    }
+
+    // ------------------------------------------------------------------
+    // Day 47 guard: never switch to a task with uninitialized SP.
+    //
+    // idle SP is created dynamically by the first timer IRQ context
+    // switch. If it is still zero while we are trying to switch to it,
+    // something is seriously wrong.
+    // ------------------------------------------------------------------
+    if (tasks[next].sp == 0) {
+        hal_uart_puts("[FATAL] schedule: target sp == 0 pid=");
+        uart_dec((uint32_t)next);
+        hal_uart_puts("\r\n");
+
+        hal_irq_disable();
+        for (;;) hal_halt();
     }
 
     // Switch.
@@ -184,6 +213,72 @@ void arm_task_exit(void)
         tasks[0].state = TASK_READY;
 
     schedule();
+}
+
+// ============================================================================
+// FAULT KILL (Day 47: user fault isolation)
+// ============================================================================
+// Called from arm_user_fault_entry() when a user-mode exception occurs.
+//
+// Policy:
+//   - print diagnostic to UART
+//   - mark current task TASK_FREE
+//   - ensure idle is runnable
+//   - schedule()
+//   - never return
+//
+// PID 0 is immortal. If PID 0 somehow reaches this path, halt.
+// ============================================================================
+
+__attribute__((noreturn))
+void arm_task_fault_kill(uint32_t type,
+                         uint32_t fault_pc,
+                         uint32_t fault_cpsr,
+                         uint32_t sp_usr,
+                         uint32_t lr_usr)
+{
+    hal_irq_disable();
+
+    // Defensive: fault kill must never be applied to idle.
+    if (current_task <= 0 || current_task >= num_tasks) {
+        hal_uart_puts("[FATAL] fault kill with invalid current_task\r\n");
+        for (;;) hal_halt();
+    }
+
+    if (current_task == 0) {
+        hal_uart_puts("[FATAL] fault in PID 0\r\n");
+        for (;;) hal_halt();
+    }
+
+    hal_uart_puts("[FAULT] user ");
+    hal_uart_puts(fault_reason(type));
+    hal_uart_puts(" pid=");
+    uart_dec((uint32_t)current_task);
+    hal_uart_puts(" name=");
+    hal_uart_puts(tasks[current_task].name ? tasks[current_task].name : "?");
+    hal_uart_puts(" pc=0x");
+    uart_hex(fault_pc);
+    hal_uart_puts(" cpsr=0x");
+    uart_hex(fault_cpsr);
+    hal_uart_puts(" sp_usr=0x");
+    uart_hex(sp_usr);
+    hal_uart_puts(" lr_usr=0x");
+    uart_hex(lr_usr);
+    hal_uart_puts("\r\n");
+
+    // Kill current task.
+    tasks[current_task].state = TASK_FREE;
+
+    // Ensure idle is runnable as fallback.
+    if (tasks[0].state != TASK_RUNNING)
+        tasks[0].state = TASK_READY;
+
+    // Switch away. Must be called with IRQ disabled.
+    schedule();
+
+    // Should never reach here.
+    hal_uart_puts("[FATAL] schedule returned after fault kill\r\n");
+    for (;;) hal_halt();
 }
 
 // ============================================================================

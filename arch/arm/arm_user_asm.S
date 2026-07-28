@@ -13,9 +13,10 @@
 @      Raw ARM user test image copied to ARM_USER_CODE_VADDR.
 @
 @ User CPSR:
-@   0xD0 = USR mode | FIQ disabled | IRQ disabled
+@   0x50 = USR mode | FIQ disabled | IRQ enabled
 @
-@ IRQ from user mode is not supported yet, so user runs with I=1.
+@ Day 46: Timer IRQ can preempt user code directly.
+@ Day 47: User fault isolation (UNDEF/PABT/DABT kill task, kernel alive).
 @ ==========================================================================
 
 #include "config.h"
@@ -116,7 +117,8 @@ arm_enter_user_first:
 @   2. invalid syscall -> -ENOSYS
 @   3. sys_yield()
 @   4. sys_write(1, data_buffer, 16)
-@   5. sys_exit(0)
+@   5. UNDEF instruction (Day 47 fault isolation test)
+@   6. sys_exit(0) (dead code after UNDEF)
 @ ==========================================================================
 
 .align 2
@@ -163,7 +165,10 @@ _user_test_start:
     add r0, r0, #48             @ '0' + pid
     mov r1, #10                 @ '\n'
 
-    push {r0, r1}               @ 2-byte buffer on user stack
+    @ Fix: properly store 2 bytes on stack (little-endian)
+    sub sp, sp, #8              @ allocate 8 bytes (keeps 8-byte alignment)
+    strb r0, [sp]               @ byte 0: pid char
+    strb r1, [sp, #1]           @ byte 1: '\n'
 
     mov r0, #1                  @ fd = stdout
     mov r1, sp                  @ buf
@@ -171,7 +176,7 @@ _user_test_start:
     mov r7, #4                  @ SYS_write
     svc #0
 
-    add sp, sp, #8              @ drop temporary buffer
+    add sp, sp, #8              @ restore stack
 
     @ ---------------------------------------------------------------
     @ Busy loop.
@@ -187,10 +192,28 @@ _user_test_start:
     subs r4, r4, #1
     bne 1b
 
-    @ ---------------------------------------------------------------
-    @ sys_exit(0)
-    @ ---------------------------------------------------------------
+    @ =================================================================
+    @ FAULT TEST (Day 47: User Fault Isolation)
+    @ =================================================================
+    @ Trigger UNDEF immediately after the loop.
+    @ The kernel MUST intercept this, print [FAULT], and kill the task.
+    .word 0xE7F001F0            @ Guaranteed UNDEF on ARMv6
 
+    @ =================================================================
+    @ OPTIONAL: Other fault types (uncomment ONE at a time to test)
+    @ =================================================================
+    
+    @ --- DATA ABORT (DABT) ---
+    @ mov r0, #0
+    @ ldr r1, [r0]              @ Read from unmapped NULL page
+
+    @ --- PREFETCH ABORT (PABT) ---
+    @ ldr r0, =0x00400000       @ Unmapped user address
+    @ bx r0                     @ Jump to unmapped page
+
+    @ =================================================================
+    @ DEAD CODE (Execution must NEVER reach here if fault isolation works)
+    @ =================================================================
     mov r0, #0
     mov r7, #1                  @ SYS_exit
     svc #0

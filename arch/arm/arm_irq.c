@@ -13,6 +13,18 @@
 #include "hal/hal_irq.h"
 #include "hal/hal_cpu.h"
 #include "hal/hal_uart.h"
+#include "arm_trap.h"
+
+// ============================================================================
+// TASK FAULT API (arm_main.c)
+// ============================================================================
+
+extern void arm_task_fault_kill(uint32_t type,
+                                uint32_t fault_pc,
+                                uint32_t fault_cpsr,
+                                uint32_t sp_usr,
+                                uint32_t lr_usr)
+                                __attribute__((noreturn));
 
 // ============================================================================
 // SOFTWARE CTZ (Count Trailing Zeros)
@@ -197,75 +209,132 @@ static void hex8(uint32_t val, char* buf)
 }
 
 // ============================================================================
-// ARM EXCEPTION ENTRY (вызывается из arm_vectors.S)
-// ============================================================================
-// [DIAG] Добавлен вывод LR (faulting address) для диагностики.
-//
-// Stack layout при входе (после srsdb + push в arm_vectors.S):
-//
-//   SP → r0
-//        r1
-//        ...
-//        r12
-//        LR_svc (saved by push {r0-r12, lr})
-//        LR_exception (adjusted, from SRS)
-//        SPSR_exception (from SRS)
-//
-// LR_exception = адрес инструкции, вызвавшей исключение.
+// FAULT NAME HELPER
 // ============================================================================
 
-void arm_exception_entry(void* regs, uint32_t type)
+static const char *fault_name(uint32_t type)
 {
-    uint32_t idx = type / 4;
+    switch (type) {
+        case ARM_VECTOR_UNDEF: return "UNDEF";
+        case ARM_VECTOR_PABT:  return "PABT";
+        case ARM_VECTOR_DABT:  return "DABT";
+        default:               return "EXC";
+    }
+}
 
-    if (idx < 8 && exception_handlers[idx]) {
-        exception_handlers[idx](regs, type);
-        return;
+// ============================================================================
+// USER FAULT ENTRY (Day 47: fault isolation)
+// ============================================================================
+// Called from arm_vectors.S when UNDEF/PABT/DABT arrived from USR mode.
+//
+// Frame: struct arm_user_irq_frame (72 bytes)
+//
+// Policy:
+//   - user fault is NOT a kernel bug
+//   - kill current task
+//   - keep kernel alive
+// ============================================================================
+
+__attribute__((noreturn))
+void arm_user_fault_entry(struct arm_user_irq_frame *frame, uint32_t type)
+{
+    char buf[9];
+
+    if (!frame) {
+        hal_uart_puts("\r\n[FATAL] user fault with NULL frame\r\n");
+        hal_irq_disable();
+        for (;;) hal_halt();
     }
 
-    // No handler — fatal
-    char buf[9];
-    uint32_t* r = (uint32_t*)regs;
+    // Sanity: vector code must have already detected USR mode.
+    if ((frame->cpsr & 0x1F) != ARM_MODE_USR) {
+        hal_uart_puts("\r\n[FATAL] user fault frame has non-user CPSR=0x");
+        hex8(frame->cpsr, buf);
+        hal_uart_puts(buf);
+        hal_uart_puts("\r\n");
 
-    hal_uart_puts("\r\n[FATAL] Unhandled exception: 0x");
+        hal_irq_disable();
+        for (;;) hal_halt();
+    }
+
+    arm_task_fault_kill(type,
+                        frame->pc,
+                        frame->cpsr,
+                        frame->sp_usr,
+                        frame->lr_usr);
+
+    // Should never reach here.
+    hal_uart_puts("[FATAL] arm_task_fault_kill returned\r\n");
+    hal_irq_disable();
+    for (;;) hal_halt();
+}
+
+// ============================================================================
+// KERNEL FAULT ENTRY (Day 47: fault isolation)
+// ============================================================================
+// Called from arm_vectors.S when UNDEF/PABT/DABT arrived from SVC/kernel mode.
+//
+// Frame: struct arm_trap_frame (64 bytes)
+//
+// Policy:
+//   - kernel fault is a kernel bug
+//   - fatal dump + halt
+// ============================================================================
+
+__attribute__((noreturn))
+void arm_kernel_fault_entry(struct arm_trap_frame *frame, uint32_t type)
+{
+    char buf[9];
+
+    hal_irq_disable();
+
+    hal_uart_puts("\r\n[FATAL] Kernel ");
+    hal_uart_puts(fault_name(type));
+    hal_uart_puts(" exception: 0x");
     hex8(type, buf);
     hal_uart_puts(buf);
     hal_uart_puts("\r\n");
 
-    if (regs) {
-        // r[0..12] = saved r0-r12
-        hal_uart_puts("  r0=0x");  hex8(r[0], buf);  hal_uart_puts(buf);
-        hal_uart_puts("  r1=0x");  hex8(r[1], buf);  hal_uart_puts(buf);
-        hal_uart_puts("  r2=0x");  hex8(r[2], buf);  hal_uart_puts(buf);
-        hal_uart_puts("\r\n");
-        hal_uart_puts("  r3=0x");  hex8(r[3], buf);  hal_uart_puts(buf);
-        hal_uart_puts("  r4=0x");  hex8(r[4], buf);  hal_uart_puts(buf);
-        hal_uart_puts("  r5=0x");  hex8(r[5], buf);  hal_uart_puts(buf);
-        hal_uart_puts("\r\n");
-        hal_uart_puts("  r6=0x");  hex8(r[6], buf);  hal_uart_puts(buf);
-        hal_uart_puts("  r7=0x");  hex8(r[7], buf);  hal_uart_puts(buf);
-        hal_uart_puts("  r8=0x");  hex8(r[8], buf);  hal_uart_puts(buf);
-        hal_uart_puts("\r\n");
-        hal_uart_puts("  r9=0x");  hex8(r[9], buf);  hal_uart_puts(buf);
-        hal_uart_puts("  r10=0x"); hex8(r[10], buf); hal_uart_puts(buf);
-        hal_uart_puts("  r11=0x"); hex8(r[11], buf); hal_uart_puts(buf);
-        hal_uart_puts("\r\n");
-        hal_uart_puts("  r12=0x"); hex8(r[12], buf); hal_uart_puts(buf);
+    // Optional registered low-level handler.
+    // If it returns, we still treat kernel fault as fatal.
+    uint32_t idx = type / 4;
+    if (idx < 8 && exception_handlers[idx]) {
+        exception_handlers[idx]((void *)frame, type);
+    }
 
-        // r[13] = LR_svc (from push {r0-r12, lr})
-        // r[14] = LR_exception (adjusted return address, from SRS)
-        // r[15] = SPSR_exception (from SRS)
-        hal_uart_puts("  lr_svc=0x"); hex8(r[13], buf); hal_uart_puts(buf);
+    if (frame) {
+        hal_uart_puts("  r0=0x");  hex8(frame->r0, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  r1=0x");  hex8(frame->r1, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  r2=0x");  hex8(frame->r2, buf);  hal_uart_puts(buf);
         hal_uart_puts("\r\n");
-        hal_uart_puts("  fault_addr=0x"); hex8(r[14], buf); hal_uart_puts(buf);
-        hal_uart_puts("  spsr=0x"); hex8(r[15], buf); hal_uart_puts(buf);
+
+        hal_uart_puts("  r3=0x");  hex8(frame->r3, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  r4=0x");  hex8(frame->r4, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  r5=0x");  hex8(frame->r5, buf);  hal_uart_puts(buf);
         hal_uart_puts("\r\n");
+
+        hal_uart_puts("  r6=0x");  hex8(frame->r6, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  r7=0x");  hex8(frame->r7, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  r8=0x");  hex8(frame->r8, buf);  hal_uart_puts(buf);
+        hal_uart_puts("\r\n");
+
+        hal_uart_puts("  r9=0x");  hex8(frame->r9, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  r10=0x"); hex8(frame->r10, buf); hal_uart_puts(buf);
+        hal_uart_puts("  r11=0x"); hex8(frame->r11, buf); hal_uart_puts(buf);
+        hal_uart_puts("\r\n");
+
+        hal_uart_puts("  r12=0x"); hex8(frame->r12, buf); hal_uart_puts(buf);
+        hal_uart_puts("  lr=0x");  hex8(frame->lr, buf);  hal_uart_puts(buf);
+        hal_uart_puts("\r\n");
+
+        hal_uart_puts("  pc=0x");  hex8(frame->pc, buf);  hal_uart_puts(buf);
+        hal_uart_puts("  cpsr=0x"); hex8(frame->cpsr, buf); hal_uart_puts(buf);
+        hal_uart_puts("\r\n");
+    } else {
+        hal_uart_puts("  frame=NULL\r\n");
     }
 
     hal_uart_puts("[FATAL] System halted.\r\n");
 
-    hal_irq_disable();
-    for (;;) {
-        hal_halt();
-    }
+    for (;;) hal_halt();
 }

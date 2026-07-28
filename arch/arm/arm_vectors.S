@@ -46,21 +46,60 @@ _reset_handler:
     b 1b
 
 @ ==========================================================================
-@ UNDEFINED INSTRUCTION
+@ UNDEFINED INSTRUCTION (Day 47: fault isolation, explicit user/kernel path)
 @ ==========================================================================
 
 _undef_handler:
-    sub lr, lr, #4
-    srsdb sp!, #0x13
-    cps #0x13
-    push {r0-r12, lr}
+    sub lr, lr, #4              @ UNDEF return adjustment
+    srsdb sp!, #0x13            @ Push {LR_und, SPSR_und} to SVC stack
+    cps #0x13                   @ Ensure SVC mode
 
+    @ ------------------------------------------------------------------
+    @ Determine interrupted mode.
+    @ After srsdb: [SP+0]=PC, [SP+4]=SPSR
+    @ ------------------------------------------------------------------
+
+    push {r0, r1}
+    ldr r0, [sp, #12]           @ saved SPSR
+    and r0, r0, #0x1F
+    cmp r0, #0x10               @ ARM_MODE_USR
+    pop {r0, r1}
+
+    beq _undef_from_user
+
+_undef_from_kernel:
+    push {r0-r12, lr}           @ 64-byte kernel frame
     mov r0, sp
-    mov r1, #0x04
-    bl arm_exception_entry
+    mov r1, #0x04               @ ARM_VECTOR_UNDEF
+    bl arm_kernel_fault_entry
 
-    pop {r0-r12, lr}
-    rfeia sp!
+    @ Should never return.
+1:
+    mcr p15, 0, r0, c7, c0, 4
+    b 1b
+
+_undef_from_user:
+    sub sp, sp, #64             @ allocate user frame body
+    stmia sp, {r0-r12}          @ save r0-r12 at offsets 0..48
+
+    cps #0x1F                   @ SYS mode (shares user bank)
+    mov r0, sp                  @ r0 = SP_usr
+    mov r1, lr                  @ r1 = LR_usr
+    cps #0x13                   @ back to SVC
+
+    str r0, [sp, #52]           @ frame->sp_usr
+    str r1, [sp, #56]           @ frame->lr_usr
+    mov r0, #0
+    str r0, [sp, #60]           @ frame->pad
+
+    mov r0, sp                  @ r0 = user frame pointer
+    mov r1, #0x04               @ ARM_VECTOR_UNDEF
+    bl arm_user_fault_entry
+
+    @ Should never return.
+1:
+    mcr p15, 0, r0, c7, c0, 4
+    b 1b
 
 @ ==========================================================================
 @ SVC — SYSTEM CALL ENTRY
@@ -90,38 +129,102 @@ _svc_handler:
     rfeia sp!                   @ Return to interrupted mode
 
 @ ==========================================================================
-@ PREFETCH ABORT
+@ PREFETCH ABORT (Day 47: fault isolation, explicit user/kernel path)
 @ ==========================================================================
 
 _pabt_handler:
-    sub lr, lr, #4
+    sub lr, lr, #4              @ PABT return adjustment
     srsdb sp!, #0x13
     cps #0x13
+
+    push {r0, r1}
+    ldr r0, [sp, #12]
+    and r0, r0, #0x1F
+    cmp r0, #0x10
+    pop {r0, r1}
+
+    beq _pabt_from_user
+
+_pabt_from_kernel:
     push {r0-r12, lr}
+    mov r0, sp
+    mov r1, #0x0C               @ ARM_VECTOR_PABT
+    bl arm_kernel_fault_entry
+
+1:
+    mcr p15, 0, r0, c7, c0, 4
+    b 1b
+
+_pabt_from_user:
+    sub sp, sp, #64
+    stmia sp, {r0-r12}
+
+    cps #0x1F
+    mov r0, sp
+    mov r1, lr
+    cps #0x13
+
+    str r0, [sp, #52]
+    str r1, [sp, #56]
+    mov r0, #0
+    str r0, [sp, #60]
 
     mov r0, sp
-    mov r1, #0x0C
-    bl arm_exception_entry
+    mov r1, #0x0C               @ ARM_VECTOR_PABT
+    bl arm_user_fault_entry
 
-    pop {r0-r12, lr}
-    rfeia sp!
+1:
+    mcr p15, 0, r0, c7, c0, 4
+    b 1b
 
 @ ==========================================================================
-@ DATA ABORT
+@ DATA ABORT (Day 47: fault isolation, explicit user/kernel path)
 @ ==========================================================================
 
 _dabt_handler:
-    sub lr, lr, #8
+    sub lr, lr, #8              @ DABT return adjustment
     srsdb sp!, #0x13
     cps #0x13
+
+    push {r0, r1}
+    ldr r0, [sp, #12]
+    and r0, r0, #0x1F
+    cmp r0, #0x10
+    pop {r0, r1}
+
+    beq _dabt_from_user
+
+_dabt_from_kernel:
     push {r0-r12, lr}
+    mov r0, sp
+    mov r1, #0x10               @ ARM_VECTOR_DABT
+    bl arm_kernel_fault_entry
+
+1:
+    mcr p15, 0, r0, c7, c0, 4
+    b 1b
+
+_dabt_from_user:
+    sub sp, sp, #64
+    stmia sp, {r0-r12}
+
+    cps #0x1F
+    mov r0, sp
+    mov r1, lr
+    cps #0x13
+
+    str r0, [sp, #52]
+    str r1, [sp, #56]
+    mov r0, #0
+    str r0, [sp, #60]
 
     mov r0, sp
-    mov r1, #0x10
-    bl arm_exception_entry
+    mov r1, #0x10               @ ARM_VECTOR_DABT
+    bl arm_user_fault_entry
 
-    pop {r0-r12, lr}
-    rfeia sp!
+1:
+    mcr p15, 0, r0, c7, c0, 4
+    b 1b
 
 @ ==========================================================================
 @ RESERVED
