@@ -26,11 +26,6 @@
 #include "hal/hal_cpu.h"
 
 // ============================================================================
-// DIAGNOSTIC COUNTER (extern в arm_main.c)
-// ============================================================================
-volatile uint32_t diag_timer_handler_count = 0;
-
-// ============================================================================
 // MMIO ACCESS
 // ============================================================================
 
@@ -72,8 +67,6 @@ static uint32_t timer_interval_us = 0;   // Microseconds per tick
 
 static void timer_irq_handler(void* regs, uint32_t line)
 {
-    diag_timer_handler_count++;    // ← DIAG: count timer handler calls
-    
     (void)regs;
     (void)line;
 
@@ -88,7 +81,7 @@ static void timer_irq_handler(void* regs, uint32_t line)
     tick_count++;
 
     // 4. Scheduler integration (когда task.c будет портирован)
-    // hal_timer_tick();
+    hal_timer_tick();
 }
 
 // ============================================================================
@@ -154,16 +147,23 @@ uint64_t hal_timer_get_us(void)
 // ============================================================================
 // HAL TIMER TICK (Scheduler Integration)
 // ============================================================================
-// Вызывается из timer_irq_handler. Когда task.c будет портирован,
-// здесь будет: if (++quantum >= QUANTUM) schedule();
+// Вызывается из timer_irq_handler (IRQ context, IRQ disabled).
+// Quantum: 10 тиков = 10 мс. По истечении — schedule().
 // ============================================================================
+
+#define QUANTUM_TICKS 10
+
+extern void schedule(void);
+
+static uint32_t quantum_counter = 0;
 
 void hal_timer_tick(void)
 {
-    // Placeholder: tick уже инкрементирован в timer_irq_handler.
-    // Когда scheduler готов:
-    //   current_task->quantum--;
-    //   if (current_task->quantum <= 0) schedule();
+    quantum_counter++;
+    if (quantum_counter >= QUANTUM_TICKS) {
+        quantum_counter = 0;
+        schedule();
+    }
 }
 
 // ============================================================================

@@ -330,6 +330,80 @@
 #define ARM_KERNEL_PHYS_BASE    0x00010000  /* QEMU raspi1ap */
 
 // ============================================================================
+// ARM USER MODE SPIKE (Days 43-45: SVC + User Mode + Integration)
+// ============================================================================
+// Temporary coarse 1 MB section mappings, but W^X is enforced:
+//
+//   User code:
+//     VA 0x00100000 -> PA 0x00200000
+//     User RO, kernel RW, executable
+//
+//   User data + stack:
+//     VA 0x00200000 -> PA 0x00300000
+//     User RW, kernel RW, XN
+//
+// This is a spike mapping. Later: 4 KB pages + real ARM VMM.
+// ============================================================================
+
+#define ARM_USER_CODE_VADDR         0x00100000
+#define ARM_USER_CODE_PADDR         0x00200000
+#define ARM_USER_CODE_SIZE          0x00100000
+
+#define ARM_USER_DATA_VADDR         0x00200000
+#define ARM_USER_DATA_PADDR         0x00300000
+#define ARM_USER_DATA_SIZE          0x00100000
+
+// User stacks live inside the user data section.
+#define ARM_USER_STACK_A_TOP        (ARM_USER_DATA_VADDR + 0x80000)
+#define ARM_USER_STACK_B_TOP        (ARM_USER_DATA_VADDR + 0xC0000)
+
+// ----------------------------------------------------------------------------
+// ARMv6 short descriptor section flags
+// ----------------------------------------------------------------------------
+//
+// Base normal memory section used by boot RAM:
+//   0x140E = Section | TEX=001 | C=1 | B=1 | AP=01
+//
+// User code section:
+//   Section | TEX=001 | C=1 | B=1 | AP=10 | XN=0
+//   AP=10: privileged RW, user RO
+//   Value: 0x180E
+//
+// User data section:
+//   Section | TEX=001 | C=1 | B=1 | AP=11 | XN=1
+//   AP=11: privileged RW, user RW
+//   Value: 0x1C1E
+//
+// W^X:
+//   code = R/X, no W for user
+//   data = R/W, XN
+// ----------------------------------------------------------------------------
+
+#define ARM_SECTION_USER_RX         0x180E
+#define ARM_SECTION_USER_RWXN       0x1C1E
+
+// ----------------------------------------------------------------------------
+// CPSR helpers
+// ----------------------------------------------------------------------------
+//
+// ARM_CPSR_USER:
+//   USR mode | FIQ disabled | IRQ enabled
+//   Reserved for future true preemptive user mode (Day 45+).
+//
+// ARM_CPSR_USER_COOP:
+//   USR mode | FIQ disabled | IRQ disabled
+//   Used for current user-mode spike without IRQ-from-user trap support.
+//
+// ARM_CPSR_SVC_IRQ_DISABLED:
+//   SVC mode | IRQ disabled
+//   Used as forged CPSR for first-time user task trampoline.
+// ----------------------------------------------------------------------------
+
+#define ARM_CPSR_USER               (ARM_MODE_USR | ARM_CPSR_FIQ_DISABLE)
+#define ARM_CPSR_USER_COOP          (ARM_MODE_USR | ARM_CPSR_FIQ_DISABLE | ARM_CPSR_IRQ_DISABLE)
+#define ARM_CPSR_SVC_IRQ_DISABLED   (ARM_MODE_SVC | ARM_CPSR_IRQ_DISABLE)
+
+// ============================================================================
 // [M4] RPi1 RAM size (default, overridden by ATAGS)
 // ============================================================================
 // QEMU raspi1ap запускается с -m 512M.
@@ -337,6 +411,8 @@
 // ATAG_MEM от start.elf перекрывает этот дефолт при boot.
 // ============================================================================
 #define BCM2835_RAM_SIZE_DEFAULT (512 * 1024 * 1024)  // 512 MB (QEMU raspi1ap)
+
+
 
 #endif // CONFIG_ARCH_ARM
 

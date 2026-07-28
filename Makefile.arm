@@ -69,13 +69,17 @@ QEMU_FLAGS  += -display none
 
 ASM_SOURCES := \
 	$(ARCH_DIR)/arm_boot.S \
-	$(ARCH_DIR)/arm_vectors.S
+	$(ARCH_DIR)/arm_vectors.S \
+	$(ARCH_DIR)/arm_context.S \
+	$(ARCH_DIR)/arm_user_asm.S
 
 C_SOURCES := \
 	$(ARCH_DIR)/arm_uart.c \
 	$(ARCH_DIR)/arm_main.c \
 	$(ARCH_DIR)/arm_irq.c \
-	$(ARCH_DIR)/arm_timer.c
+	$(ARCH_DIR)/arm_timer.c \
+	$(ARCH_DIR)/arm_syscall.c \
+	$(ARCH_DIR)/arm_user.c
 
 # --- Будущие файлы (раскомментировать по мере написания) ---
 # C_SOURCES += $(ARCH_DIR)/arm_cpu.c

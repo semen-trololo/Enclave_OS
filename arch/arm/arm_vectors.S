@@ -1,11 +1,19 @@
 @ ==========================================================================
-@ arm_vectors.S — ARM Exception Vectors (v3: AAPCS-aligned IRQ handler)
+@ arm_vectors.S — ARM Exception Vectors
 @ ==========================================================================
-@ v3 FIX: push {r0-r12} → push {r0-r12, lr}
-@   13 regs = 52 bytes → SP mod 8 = 4 (MISALIGNED, AAPCS violation)
-@   14 regs = 56 bytes → SP mod 8 = 0 (ALIGNED ✅)
+@ v4: SVC is now a real syscall entry.
 @
-@ Без alignment GCC генерирует strd/ldrd с misaligned SP → corruption.
+@ SVC/IRQ frame:
+@   srsdb sp!, #0x13        ; push {LR_mode, SPSR_mode}
+@   cps   #0x13
+@   push  {r0-r12, lr}
+@
+@   8 bytes SRS + 56 bytes PUSH = 64 bytes
+@   64 mod 8 = 0, AAPCS aligned.
+@
+@ rfeia sp! reads:
+@   PC   <- saved LR
+@   CPSR <- saved SPSR
 @ ==========================================================================
 
 .section .text
@@ -15,6 +23,7 @@
 @ ==========================================================================
 @ VECTOR TABLE
 @ ==========================================================================
+
 .global _vector_table
 _vector_table:
     b _reset_handler              @ 0x00
@@ -29,111 +38,252 @@ _vector_table:
 @ ==========================================================================
 @ RESET
 @ ==========================================================================
+
 _reset_handler:
     cpsid if
-1:  mcr p15, 0, r0, c7, c0, 4
+1:
+    mcr p15, 0, r0, c7, c0, 4
     b 1b
 
 @ ==========================================================================
 @ UNDEFINED INSTRUCTION
 @ ==========================================================================
+
 _undef_handler:
     sub lr, lr, #4
     srsdb sp!, #0x13
     cps #0x13
-    push {r0-r12, lr}            @ 14 regs = 56 bytes, aligned ✅
+    push {r0-r12, lr}
+
     mov r0, sp
     mov r1, #0x04
     bl arm_exception_entry
+
     pop {r0-r12, lr}
     rfeia sp!
 
 @ ==========================================================================
-@ SVC (Syscall)
+@ SVC — SYSTEM CALL ENTRY
 @ ==========================================================================
+@ Syscall ABI:
+@   r7    = syscall number
+@   r0-r6 = arguments
+@   r0    = return value
+@
+@ C dispatcher:
+@   void arm_syscall_entry(struct arm_trap_frame *frame);
+@
+@ The dispatcher may call schedule() through sys_yield / sys_exit.
+@ If the task is switched away, this stack frame remains on the task's
+@ kernel stack and is restored when the task is scheduled back.
+@ ==========================================================================
+
 _svc_handler:
-    srsdb sp!, #0x13
-    cps #0x13
-    push {r0-r12, lr}            @ 14 regs, aligned ✅
-    mov r0, sp
-    mov r1, #0x08
-    bl arm_exception_entry
+    srsdb sp!, #0x13            @ Push {LR_svc, SPSR_svc}
+    cps #0x13                   @ Ensure SVC mode
+    push {r0-r12, lr}           @ 14 regs = 56 bytes, total 64
+
+    mov r0, sp                  @ r0 = struct arm_trap_frame *
+    bl arm_syscall_entry
+
     pop {r0-r12, lr}
-    rfeia sp!
+    rfeia sp!                   @ Return to interrupted mode
 
 @ ==========================================================================
 @ PREFETCH ABORT
 @ ==========================================================================
+
 _pabt_handler:
     sub lr, lr, #4
     srsdb sp!, #0x13
     cps #0x13
-    push {r0-r12, lr}            @ 14 regs, aligned ✅
+    push {r0-r12, lr}
+
     mov r0, sp
     mov r1, #0x0C
     bl arm_exception_entry
+
     pop {r0-r12, lr}
     rfeia sp!
 
 @ ==========================================================================
-@ DATA ABORT (Page Fault)
+@ DATA ABORT
 @ ==========================================================================
+
 _dabt_handler:
     sub lr, lr, #8
     srsdb sp!, #0x13
     cps #0x13
-    push {r0-r12, lr}            @ 14 regs, aligned ✅
+    push {r0-r12, lr}
+
     mov r0, sp
     mov r1, #0x10
     bl arm_exception_entry
+
     pop {r0-r12, lr}
     rfeia sp!
 
 @ ==========================================================================
 @ RESERVED
 @ ==========================================================================
+
 _reserved_handler:
     cpsid if
-1:  mcr p15, 0, r0, c7, c0, 4
+1:
+    mcr p15, 0, r0, c7, c0, 4
     b 1b
 
 @ ==========================================================================
-@ IRQ HANDLER (Hardware Interrupt)
+@ IRQ HANDLER (Day 46: user-mode preemption)
 @ ==========================================================================
-@ [v3 FIX] push {r0-r12, lr} вместо push {r0-r12}.
-@   SRS:   8 bytes  (LR_irq + SPSR_irq)
-@   PUSH:  56 bytes (14 regs: r0-r12 + lr_svc)
-@   Total: 64 bytes → 64 mod 8 = 0 ✅
+@ Supports two interrupted contexts:
 @
-@ Stack layout (SVC stack, full descending):
+@ 1. IRQ from SVC/kernel mode:
 @
-@   SP → r0
-@        r1
-@        ...
-@        r12
-@        lr_svc              ← alignment padding (не используется rfeia)
-@        LR_irq (adjusted)   ← from SRS
-@        SPSR_irq            ← from SRS
+@      offset  0: r0
+@      offset  4: r1
+@      offset  8: r2
+@      offset 12: r3
+@      offset 16: r4
+@      offset 20: r5
+@      offset 24: r6
+@      offset 28: r7
+@      offset 32: r8
+@      offset 36: r9
+@      offset 40: r10
+@      offset 44: r11
+@      offset 48: r12
+@      offset 52: lr_svc
+@      offset 56: pc
+@      offset 60: cpsr
 @
-@ rfeia sp! читает {PC, CPSR} = {LR_irq, SPSR_irq} после pop.
+@    Total: 64 bytes, 8-byte aligned.
+@
+@ 2. IRQ from USR/user mode:
+@
+@      offset  0: r0
+@      offset  4: r1
+@      offset  8: r2
+@      offset 12: r3
+@      offset 16: r4
+@      offset 20: r5
+@      offset 24: r6
+@      offset 28: r7
+@      offset 32: r8
+@      offset 36: r9
+@      offset 40: r10
+@      offset 44: r11
+@      offset 48: r12
+@      offset 52: sp_usr
+@      offset 56: lr_usr
+@      offset 60: padding
+@      offset 64: pc
+@      offset 68: cpsr
+@
+@    Total: 72 bytes, 8-byte aligned.
+@
+@ AAPCS:
+@   Both frame sizes are multiples of 8.
 @ ==========================================================================
+
 .global _irq_handler
 _irq_handler:
-    sub lr, lr, #4              @ Adjust: return address = LR_irq - 4
-    srsdb sp!, #0x13            @ Push {LR_irq, SPSR_irq} → SVC stack
+    sub lr, lr, #4              @ IRQ return adjustment
+    srsdb sp!, #0x13            @ Push {LR_irq, SPSR_irq} to SVC stack
     cps #0x13                   @ Switch to SVC mode
-    push {r0-r12, lr}           @ 14 regs = 56 bytes → SP mod 8 = 0 ✅
 
-    mov r0, sp                  @ r0 = context pointer (8-byte aligned)
-    bl arm_irq_entry            @ C dispatcher
+    @ ------------------------------------------------------------------
+    @ Determine interrupted mode without destroying user registers.
+    @
+    @ After srsdb:
+    @   SP     -> saved LR_irq / PC
+    @   SP + 4 -> saved SPSR_irq / interrupted CPSR
+    @
+    @ Temporarily push r0/r1 so we can use them.
+    @ ------------------------------------------------------------------
 
-    pop {r0-r12, lr}            @ Restore (lr = lr_svc, не используется)
-    rfeia sp!                   @ Pop {PC, CPSR} = {LR_irq, SPSR_irq}
+    push {r0, r1}
+    ldr r0, [sp, #12]           @ saved SPSR_irq
+    and r0, r0, #0x1F           @ CPSR mode bits
+    cmp r0, #0x10               @ ARM_MODE_USR
+    pop {r0, r1}
+
+    beq _irq_from_user
+
+_irq_from_kernel:
+    @ ------------------------------------------------------------------
+    @ Kernel/SVC IRQ path.
+    @ This is the original Days 38-45 path.
+    @ ------------------------------------------------------------------
+
+    push {r0-r12, lr}           @ 14 regs = 56 bytes, total 64
+
+    mov r0, sp                  @ r0 = kernel frame pointer
+    bl arm_irq_entry
+
+    pop {r0-r12, lr}
+    rfeia sp!                   @ Return to kernel/SVC mode
+
+_irq_from_user:
+    @ ------------------------------------------------------------------
+    @ User IRQ path.
+    @
+    @ Current SVC SP points to saved PC/CPSR block from srsdb:
+    @
+    @   [SP + 0] = PC
+    @   [SP + 4] = CPSR
+    @
+    @ Allocate 64 bytes below it.
+    @ Total user frame = 72 bytes.
+    @ ------------------------------------------------------------------
+
+    sub sp, sp, #64
+
+    @ Save r0-r12 at offsets 0..48.
+    stmia sp, {r0-r12}
+
+    @ ------------------------------------------------------------------
+    @ Save SP_usr and LR_usr.
+    @
+    @ r0/r1 are already saved on the frame and may be used as temps.
+    @ SYS mode shares the user register bank, so:
+    @   SP in SYS = SP_usr
+    @   LR in SYS = LR_usr
+    @ ------------------------------------------------------------------
+
+    cps #0x1F                   @ SYS mode
+    mov r0, sp                  @ r0 = SP_usr
+    mov r1, lr                  @ r1 = LR_usr
+    cps #0x13                   @ back to SVC mode
+
+    str r0, [sp, #52]           @ frame->sp_usr
+    str r1, [sp, #56]           @ frame->lr_usr
+
+    mov r0, sp                  @ r0 = user frame pointer
+    bl arm_irq_entry
+
+    @ ------------------------------------------------------------------
+    @ Restore user context.
+    @ ------------------------------------------------------------------
+
+    mov r0, sp                  @ frame base
+    ldr r1, [r0, #52]           @ saved SP_usr
+
+    cps #0x1F
+    mov sp, r1                  @ restore SP_usr
+    cps #0x13
+
+    mov sp, r0                  @ SVC SP = frame base
+    ldmia sp, {r0-r12, lr}^     @ restore user r0-r12 and LR_usr
+    add sp, sp, #64             @ point to saved PC/CPSR
+    rfeia sp!                   @ return to USR mode
 
 @ ==========================================================================
-@ FIQ (not used)
+@ FIQ
 @ ==========================================================================
+
 _fiq_handler:
     cpsid f
-1:  mcr p15, 0, r0, c7, c0, 4
+1:
+    mcr p15, 0, r0, c7, c0, 4
     b 1b

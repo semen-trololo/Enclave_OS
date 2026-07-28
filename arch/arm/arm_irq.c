@@ -15,11 +15,6 @@
 #include "hal/hal_uart.h"
 
 // ============================================================================
-// DIAGNOSTIC COUNTERS (extern в arm_main.c)
-// ============================================================================
-volatile uint32_t diag_irq_entry_count = 0;
-
-// ============================================================================
 // SOFTWARE CTZ (Count Trailing Zeros)
 // ============================================================================
 // Замена __builtin_ctz. Гарантированно НЕ генерирует rbit/clz.
@@ -149,8 +144,6 @@ void hal_irq_dispatch(uint32_t line, void* regs)
 
 void arm_irq_entry(void* regs)
 {
-    diag_irq_entry_count++;    // ← DIAG: count IRQ entries
-    
     uint32_t pend1 = mmio_read(BCM2835_IRQ_PEND1);
     uint32_t pend2 = mmio_read(BCM2835_IRQ_PEND2);
     uint32_t basic = mmio_read(BCM2835_IRQ_BASIC) & 0xFF;
