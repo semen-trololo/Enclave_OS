@@ -157,8 +157,13 @@ extern void schedule(void);
 
 static uint32_t quantum_counter = 0;
 
+extern void arm_task_check_wakeup(uint64_t current_tick);
+
 void hal_timer_tick(void)
 {
+    // Check for sleeping tasks that should wake up.
+    arm_task_check_wakeup(tick_count);
+
     quantum_counter++;
     if (quantum_counter >= QUANTUM_TICKS) {
         quantum_counter = 0;

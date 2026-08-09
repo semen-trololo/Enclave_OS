@@ -41,11 +41,14 @@ extern void arm_user_trampoline(void);
 #define TASK_READY      1
 #define TASK_RUNNING    2
 
+#define TASK_SLEEPING   3
+
 typedef struct {
-    uint32_t    sp;         // Saved kernel stack pointer
-    int         pid;        // Task PID
-    const char *name;       // Debug name
-    int         state;      // TASK_FREE / TASK_READY / TASK_RUNNING
+    uint32_t    sp;             // Saved kernel stack pointer
+    int         pid;            // Task PID
+    const char *name;           // Debug name
+    int         state;          // TASK_FREE / TASK_READY / TASK_RUNNING / TASK_SLEEPING
+    uint64_t    wakeup_tick;    // Absolute tick for TASK_SLEEPING
 } arm_task_t;
 
 // ============================================================================
@@ -109,10 +112,11 @@ static void uart_hex(uint32_t val)
 static const char *fault_reason(uint32_t type)
 {
     switch (type) {
-        case ARM_VECTOR_UNDEF: return "UNDEF";
-        case ARM_VECTOR_PABT:  return "PABT";
-        case ARM_VECTOR_DABT:  return "DABT";
-        default:               return "FAULT";
+        case 0x04: return "UNDEF";
+        case 0x08: return "SVC";
+        case 0x0C: return "PABT";
+        case 0x10: return "DABT";
+        default:   return "FAULT";
     }
 }
 
@@ -120,13 +124,17 @@ void schedule(void)
 {
     int next = -1;
 
-    // Current task becomes READY only if it is still alive.
+    // Current task becomes READY only if it is still alive and not sleeping.
     if (tasks[current_task].state == TASK_RUNNING)
         tasks[current_task].state = TASK_READY;
 
     // Round-robin search.
     for (int i = 0; i < num_tasks; i++) {
         int candidate = (current_task + 1 + i) % num_tasks;
+
+        // Skip sleeping tasks.
+        if (tasks[candidate].state == TASK_SLEEPING)
+            continue;
 
         if (tasks[candidate].state == TASK_READY) {
             next = candidate;
@@ -137,7 +145,7 @@ void schedule(void)
     // No READY task found.
     if (next == -1) {
         // If a non-idle task died, force idle as fallback.
-        if (current_task != 0 && tasks[0].state != TASK_FREE) {
+        if (current_task != 0 && tasks[0].state != TASK_FREE && tasks[0].state != TASK_SLEEPING) {
             tasks[0].state = TASK_READY;
             next = 0;
         } else if (tasks[current_task].state == TASK_READY) {
@@ -215,6 +223,39 @@ void arm_task_exit(void)
     schedule();
 }
 
+// ============================================================================
+// TASK SLEEP API (Day 49: Blocking Syscalls)
+// ============================================================================
+
+extern uint64_t hal_timer_get_ticks(void);
+
+void arm_task_set_sleep(uint32_t ms)
+{
+    if (ms == 0)
+        return;
+
+    // Overflow protection: reject absurdly large sleep times.
+    if (ms > 0x7FFFFFFF) {
+        hal_uart_puts("[WARN] sys_sleep: ms too large, rejecting\r\n");
+        return;
+    }
+
+    uint64_t current = hal_timer_get_ticks();
+    tasks[current_task].wakeup_tick = current + (uint64_t)ms;
+    tasks[current_task].state = TASK_SLEEPING;
+
+    // Yield CPU. Scheduler will skip TASK_SLEEPING tasks.
+    schedule();
+}
+
+void arm_task_check_wakeup(uint64_t current_tick)
+{
+    for (int i = 0; i < num_tasks; i++) {
+        if (tasks[i].state == TASK_SLEEPING && current_tick >= tasks[i].wakeup_tick) {
+            tasks[i].state = TASK_READY;
+        }
+    }
+}
 // ============================================================================
 // FAULT KILL (Day 47: user fault isolation)
 // ============================================================================
@@ -466,6 +507,6 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     // ------------------------------------------------------------------
 
     for (;;) {
-        __asm__ volatile ("mov r0, r0" ::: "memory");
+        __asm__ volatile ("cpsie i; mov r0, r0" ::: "memory");
     }
 }

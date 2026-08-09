@@ -1,10 +1,16 @@
 @ ==========================================================================
-@ arm_vectors.S — ARM Exception Vectors
+@ arm_vectors.S — ARM Exception Vectors (Day 50: IRQ Hardened)
 @ ==========================================================================
-@ v4: SVC is now a real syscall entry.
+@ v5: SVC/IRQ/Fault handlers hardened with immediate IRQ disable.
+@
+@ Day 50 changes:
+@   - SVC handler: cpsid i immediately after srsdb (ARM-LIMIT-010 fix)
+@   - UNDEF/PABT/DABT handlers: cpsid i immediately after srsdb
+@   - IRQ handler: no change (IRQ automatically disabled on entry)
 @
 @ SVC/IRQ frame:
 @   srsdb sp!, #0x13        ; push {LR_mode, SPSR_mode}
+@   cpsid i                  ; Day 50: disable IRQ immediately
 @   cps   #0x13
 @   push  {r0-r12, lr}
 @
@@ -46,12 +52,13 @@ _reset_handler:
     b 1b
 
 @ ==========================================================================
-@ UNDEFINED INSTRUCTION (Day 47: fault isolation, explicit user/kernel path)
+@ UNDEFINED INSTRUCTION (Day 50: IRQ Hardened)
 @ ==========================================================================
 
 _undef_handler:
     sub lr, lr, #4              @ UNDEF return adjustment
     srsdb sp!, #0x13            @ Push {LR_und, SPSR_und} to SVC stack
+    cpsid i                     @ Day 50: Disable IRQ (ARM-LIMIT-010 fix)
     cps #0x13                   @ Ensure SVC mode
 
     @ ------------------------------------------------------------------
@@ -102,7 +109,7 @@ _undef_from_user:
     b 1b
 
 @ ==========================================================================
-@ SVC — SYSTEM CALL ENTRY
+@ SVC — SYSTEM CALL ENTRY (Day 50: IRQ Hardened)
 @ ==========================================================================
 @ Syscall ABI:
 @   r7    = syscall number
@@ -110,31 +117,90 @@ _undef_from_user:
 @   r0    = return value
 @
 @ C dispatcher:
-@   void arm_syscall_entry(struct arm_trap_frame *frame);
+@   void arm_syscall_entry(arm_user_frame_t *frame);
 @
-@ The dispatcher may call schedule() through sys_yield / sys_exit.
-@ If the task is switched away, this stack frame remains on the task's
-@ kernel stack and is restored when the task is scheduled back.
+@ Day 50: cpsid i immediately after srsdb to make syscall path atomic.
+@ This prevents timer IRQ from preempting syscall handler.
+@ Idle loop explicitly enables IRQ to ensure timer tick continues.
 @ ==========================================================================
 
 _svc_handler:
+    @ SVC does not require LR adjustment (unlike IRQ/Abort).
     srsdb sp!, #0x13            @ Push {LR_svc, SPSR_svc}
+    cpsid i                     @ Day 50: Disable IRQ (ARM-LIMIT-010 fix)
     cps #0x13                   @ Ensure SVC mode
-    push {r0-r12, lr}           @ 14 regs = 56 bytes, total 64
 
-    mov r0, sp                  @ r0 = struct arm_trap_frame *
+    @ ------------------------------------------------------------------
+    @ Zero Trust: verify SVC came from User Mode.
+    @ A kernel-mode SVC is a fatal kernel bug.
+    @ ------------------------------------------------------------------
+    push {r0, r1}
+    ldr r0, [sp, #12]           @ saved SPSR_svc
+    and r0, r0, #0x1F
+    cmp r0, #0x10               @ ARM_MODE_USR
+    pop {r0, r1}
+
+    beq _svc_from_user
+
+_svc_from_kernel:
+    @ Fatal kernel bug: SVC from kernel mode.
+    push {r0-r12, lr}           @ 64-byte kernel frame
+    mov r0, sp
+    mov r1, #0x08               @ ARM_VECTOR_SVC
+    bl arm_kernel_fault_entry
+
+1:
+    mcr p15, 0, r0, c7, c0, 4
+    b 1b
+
+_svc_from_user:
+    @ ------------------------------------------------------------------
+    @ User SVC path.
+    @ Allocate 64 bytes below the 8-byte SRS block.
+    @ Total user frame = 72 bytes.
+    @ ------------------------------------------------------------------
+    sub sp, sp, #64
+
+    @ Save r0-r12 at offsets 0..48.
+    stmia sp, {r0-r12}
+
+    @ Save SP_usr and LR_usr via SYS mode.
+    cps #0x1F                   @ SYS mode (shares USR bank)
+    mov r0, sp                  @ r0 = SP_usr
+    mov r1, lr                  @ r1 = LR_usr
+    cps #0x13                   @ back to SVC mode
+
+    str r0, [sp, #52]           @ frame->sp_usr
+    str r1, [sp, #56]           @ frame->lr_usr
+    mov r0, #0
+    str r0, [sp, #60]           @ frame->pad
+
+    mov r0, sp                  @ r0 = user frame pointer
     bl arm_syscall_entry
 
-    pop {r0-r12, lr}
-    rfeia sp!                   @ Return to interrupted mode
+    @ ------------------------------------------------------------------
+    @ Restore user context.
+    @ ------------------------------------------------------------------
+    mov r0, sp                  @ frame base
+    ldr r1, [r0, #52]           @ saved SP_usr
+
+    cps #0x1F
+    mov sp, r1                  @ restore SP_usr
+    cps #0x13
+
+    mov sp, r0                  @ SVC SP = frame base
+    ldmia sp, {r0-r12, lr}^     @ restore user r0-r12 and LR_usr
+    add sp, sp, #64             @ point to saved PC/CPSR
+    rfeia sp!                   @ return to USR mode
 
 @ ==========================================================================
-@ PREFETCH ABORT (Day 47: fault isolation, explicit user/kernel path)
+@ PREFETCH ABORT (Day 50: IRQ Hardened)
 @ ==========================================================================
 
 _pabt_handler:
     sub lr, lr, #4              @ PABT return adjustment
     srsdb sp!, #0x13
+    cpsid i                     @ Day 50: Disable IRQ (ARM-LIMIT-010 fix)
     cps #0x13
 
     push {r0, r1}
@@ -178,12 +244,13 @@ _pabt_from_user:
     b 1b
 
 @ ==========================================================================
-@ DATA ABORT (Day 47: fault isolation, explicit user/kernel path)
+@ DATA ABORT (Day 50: IRQ Hardened)
 @ ==========================================================================
 
 _dabt_handler:
     sub lr, lr, #8              @ DABT return adjustment
     srsdb sp!, #0x13
+    cpsid i                     @ Day 50: Disable IRQ (ARM-LIMIT-010 fix)
     cps #0x13
 
     push {r0, r1}
@@ -287,6 +354,9 @@ _reserved_handler:
 @
 @ AAPCS:
 @   Both frame sizes are multiples of 8.
+@
+@ Note: IRQ handler does NOT need cpsid i because IRQ exception
+@ automatically disables IRQ on entry (CPSR.I = 1).
 @ ==========================================================================
 
 .global _irq_handler

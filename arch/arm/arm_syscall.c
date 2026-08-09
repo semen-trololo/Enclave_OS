@@ -41,6 +41,7 @@
 #define SYS_write       4
 #define SYS_getpid      122
 #define SYS_yield       158
+#define SYS_sleep       230
 
 // ============================================================================
 // TASK INTERFACE (arm_main.c)
@@ -49,6 +50,7 @@
 extern int  arm_current_pid(void);
 extern void arm_task_yield(void);
 extern void arm_task_exit(void);
+extern void arm_task_set_sleep(uint32_t ms);
 
 // ============================================================================
 // HELPERS
@@ -163,11 +165,24 @@ static int32_t sys_yield_handler(void)
     return 0;
 }
 
+static int32_t sys_sleep_handler(uint32_t ms)
+{
+    hal_uart_puts("[SYS] sleep(ms=");
+    uart_u32(ms);
+    hal_uart_puts(")\r\n");
+
+    if (ms > 0x7FFFFFFF)
+        return -EINVAL;
+
+    arm_task_set_sleep(ms);
+    return 0;
+}
+
 // ============================================================================
 // SYSCALL ENTRY
 // ============================================================================
 
-void arm_syscall_entry(struct arm_trap_frame *frame)
+void arm_syscall_entry(arm_user_frame_t *frame)
 {
     uint32_t num = frame->r7;
     int32_t ret;
@@ -187,6 +202,10 @@ void arm_syscall_entry(struct arm_trap_frame *frame)
 
         case SYS_yield:
             ret = sys_yield_handler();
+            break;
+
+        case SYS_sleep:
+            ret = sys_sleep_handler(frame->r0);
             break;
 
         default:

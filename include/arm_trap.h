@@ -90,12 +90,14 @@ struct arm_trap_frame {
 };
 
 // ----------------------------------------------------------------------------
-// User IRQ trap frame.
+// Unified User trap frame (Day 48).
 // Used by:
 //   - IRQ from USR mode
+//   - Faults (UNDEF/PABT/DABT) from USR mode
+//   - SVC (syscalls) from USR mode
 //
 // This frame is NOT interchangeable with struct arm_trap_frame.
-// C code must not cast user IRQ frame to struct arm_trap_frame.
+// C code must not cast user frame to struct arm_trap_frame.
 // ----------------------------------------------------------------------------
 
 struct arm_user_irq_frame {
@@ -166,5 +168,8 @@ struct arm_user_irq_frame {
 #define ARM_UTF_PC          64
 #define ARM_UTF_CPSR        68
 #define ARM_UTF_SIZE        72
+
+// Unified user frame typedef for C code clarity.
+typedef struct arm_user_irq_frame arm_user_frame_t;
 
 #endif // ARM_TRAP_H

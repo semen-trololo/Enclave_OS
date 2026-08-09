@@ -1,9 +1,9 @@
 ````markdown
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
-**Версия:** Alpha 0.6-arm-fault
-**Дата актуализации:** 28 июля 2026
-**Статус:** ARM User Fault Isolation Complete (Day 47)
+**Версия:** Alpha 0.6-arm-svc
+**Дата актуализации:** 09 августа 2026
+**Статус:** ARM Blocking Syscalls Complete (Day 49)
 
 **Enclave Doctrine:** Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -595,6 +595,62 @@ User UNDEF / PABT / DABT
 | SVC full user frame | 🔄 Next (`ARM-LIMIT-009`) |
 | x86 regression | 0 |
 ---
+
+### 1.12 Changelog: ARM SVC Full User Frame (Day 48, August 2026)
+#### Day 48: SVC Full User Frame (ARM-LIMIT-009 Closed)
+- `arch/arm/arm_vectors.S`: `_svc_handler` переписан для построения полного 72-byte user frame (`SP_usr`, `LR_usr`).
+- `arch/arm/arm_vectors.S`: добавлена проверка `Zero Trust`: SVC из kernel mode теперь фатален (`arm_kernel_fault_entry`).
+- `include/arm_trap.h`: добавлен `arm_user_frame_t` (единый тип для user IRQ/Fault/SVC).
+- `arch/arm/arm_syscall.c`: `arm_syscall_entry` принимает `arm_user_frame_t*`.
+- Архитектурное улучшение: trap path для SVC, IRQ и Faults из user mode теперь полностью унифицирован.
+
+#### Результат
+```text
+User SVC (svc #0)
+→ builds 72-byte unified user frame (r0-r12, SP_usr, LR_usr, PC, CPSR)
+→ C dispatcher validates and executes
+→ restores full user context via SYS mode + rfeia
+→ Kernel-mode SVC treated as fatal kernel bug (Zero Trust)
+→ Blocking syscalls (future sleep/waitpid) now architecturally safe
+
+### 1.13 Changelog: ARM Blocking Syscalls (Day 49, August 2026)
+#### Day 49: sys_sleep Implementation
+- `arch/arm/arm_main.c`: добавлено состояние `TASK_SLEEPING` и поле `wakeup_tick`.
+- `arch/arm/arm_main.c`: `arm_task_set_sleep(ms)` вычисляет абсолютный wakeup tick и вызывает `schedule()`.
+- `arch/arm/arm_main.c`: `arm_task_check_wakeup(tick)` переводит проснувшиеся задачи в `TASK_READY`.
+- `arch/arm/arm_main.c`: `schedule()` пропускает `TASK_SLEEPING` задачи.
+- `arch/arm/arm_timer.c`: `hal_timer_tick()` вызывает `arm_task_check_wakeup()` перед `schedule()`.
+- `arch/arm/arm_syscall.c`: добавлен `SYS_sleep (230)` и `sys_sleep_handler()`.
+- `arch/arm/arm_user_asm.S`: тестовый image вызывает `sys_sleep(500)` для проверки blocking.
+
+#### Результат
+```text
+User code calls sys_sleep(500)
+→ arm_task_set_sleep() sets wakeup_tick = current + 500
+→ task state = TASK_SLEEPING
+→ schedule() skips sleeping task
+→ scheduler runs other tasks
+→ timer tick increments
+→ arm_task_check_wakeup() detects tick >= wakeup_tick
+→ task state = TASK_READY
+→ scheduler resumes sleeping task
+→ sys_sleep returns 0
+
+### 1.14 Changelog: ARM SVC IRQ Hardening (Day 50, August 2026)
+#### Day 50: ARM-LIMIT-010 Closed
+- `arch/arm/arm_vectors.S`: `_svc_handler` добавляет `cpsid i` сразу после `srsdb`.
+- `arch/arm/arm_vectors.S`: `_undef_handler`, `_pabt_handler`, `_dabt_handler` добавляют `cpsid i` сразу после `srsdb`.
+- `arch/arm/arm_main.c`: idle loop явно включает IRQ через `cpsie i` перед каждой итерацией.
+
+#### Результат
+```text
+User SVC/Fault entry
+→ srsdb saves {LR, SPSR}
+→ cpsid i disables IRQ (atomic syscall/fault path)
+→ C handler executes without timer IRQ preemption
+→ schedule() may switch tasks
+→ rfeia restores user CPSR from SPSR (IRQ re-enabled)
+→ Idle loop explicitly enables IRQ to ensure timer tick continues
 
 ## 2. СТРУКТУРА ПРОЕКТА
 
@@ -1966,7 +2022,7 @@ waitpid(pid, &status, 0);
 | ARM-LIMIT-006 | Нет per-process address space на ARM | Один временный user mapping для spike. |
 | ARM-LIMIT-007 | Linker может предупреждать о RWX LOAD segment | Это warning уровня ELF segments, не runtime W^X user memory. Требует cleanup `linker_arm.ld`. |
 | ARM-LIMIT-008 | Нет PMM на ARM | Физические user region зарезервированы вручную. PMM — позже. |
-| ARM-LIMIT-009 | SVC handler не сохраняет `SP_usr` / `LR_usr` | Безопасно для текущих non-blocking syscalls. Scheduling syscalls (`sys_yield`, future sleep/wait) с user stack требуют full SVC user frame. Fix planned before production user-space. |
+| ARM-LIMIT-009 | CLOSED: SVC full user frame + blocking syscalls | Day 48: 72-byte frame. Day 49: `sys_sleep` работает через scheduler. |
 
 ---
 
@@ -1979,10 +2035,12 @@ waitpid(pid, &status, 0);
 | **41-42** | 🍓 ARM Context Switch + Scheduler | ✅ Complete |
 | **43-45** | 🍓 ARM SVC + User Mode + Integration | ✅ Complete |
 | **45+** | ARM IRQ Preemption from User Mode + Fault Isolation | ✅ IRQ Preemption (Day 46); ✅ User Fault Isolation (Day 47) |
-| **46+** | ARM 4 KB Pages + Real ARM VMM | 📋 Planned |
-| **47+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
-| **48+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
-| **50+** | RISC-V порт, ARM Cortex-A (64-bit) | 📋 Planned |
+| **48** | ARM SVC Full User Frame | ✅ Complete (Day 48) |
+| **49** | ARM Blocking Syscalls (`sys_sleep`) | ✅ Complete (Day 49) |
+| **50+** | ARM 4 KB Pages + Real ARM VMM | 📋 Planned |
+| **57+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
+| **58+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
+| **60+** | RISC-V порт, ARM Cortex-A (64-bit) | 📋 Planned |
 
 ---
 
@@ -2058,7 +2116,6 @@ waitpid(pid, &status, 0);
 | **ARM Exception Vectors** | 8 векторов (не 256 как x86 IDT).<br>VBAR = адрес `_vector_table` в `.text` (не `0xFFFF0000`).<br>`b handler` (не `ldr pc` — нет literal pool).<br>SVC = syscall, DAbort = page fault, IRQ = hardware. |
 | **ARM PL011 UART** | BCM2835 UART0 (PL011) по `0x20201000`.<br>GPIO 14/15 ALT0.<br>Baud: IBRD=1, FBRD=40 (3 MHz UARTCLK). |
 | **ARM hal_timer_delay** | `hal_timer_delay_us/ms` реализованы в `arm_timer.c` (BCM2835 CLO polling, 1 MHz).<br>Hardware counter тикает с power-on, работает ДО `hal_timer_init()`.<br>Calibrated loop (Day 37 stub) удалён из `arm_uart.c` — hardware timer точнее. |
-| **ARM SVC SP_usr Limitation** | SVC frame не сохраняет `SP_usr` / `LR_usr`.<br>Это безопасно для текущих non-blocking syscalls, но требует full user frame для scheduling syscalls, использующих user stack (см. `ARM-LIMIT-009`). |
 | **ARM Syscall ABI** | `svc #0`; `r7` = syscall number; `r0-r6` = args; `r0` = return.<br>Номера syscall совпадают с x86 Enclave ABI. |
 | **ARM Preemptive User CPSR** | `0x50 = USR | FIQ disabled | IRQ enabled`.<br>Используется для user tasks начиная с Day 46. |
 | **ARM User IRQ Trap Frame** | IRQ from USR mode сохраняет 72-byte frame: `r0-r12`, `SP_usr`, `LR_usr`, padding, `PC`, `CPSR`.<br>IRQ from SVC mode сохраняет 64-byte kernel frame.<br>Mode detection: `SPSR_irq & 0x1F == ARM_MODE_USR`. |
@@ -2070,6 +2127,8 @@ waitpid(pid, &status, 0);
 | **ARM Immediate Encoding** | `mov Rd, #imm` поддерживает только 8-bit immediate с even rotate.<br>Большие константы через `ldr Rd, =value`. |
 | **ARM User Entry** | `arm_enter_user_first`: set `SP_usr`, set `SPSR = ARM_CPSR_USER (0x50)`, clear `r0-r12`, `movs pc, lr`. |
 | **ARM User Fault Isolation** | UNDEF/PABT/DABT из USR mode строят 72-byte user fault frame.<br>`arm_vectors.S` явно определяет прерванный режим через `SPSR & 0x1F`.<br>User fault → `arm_user_fault_entry()` → `arm_task_fault_kill()` → `TASK_FREE` → `schedule()`.<br>Kernel fault → `arm_kernel_fault_entry()` → fatal dump + halt.<br>Fault path никогда не возвращается в упавшую задачу (нет `rfeia`). |
+| **ARM SVC Full User Frame** | SVC из USR mode строит полный 72-byte user frame (`r0-r12`, `SP_usr`, `LR_usr`, `PC`, `CPSR`).<br>Trap path унифицирован с user IRQ и user Fault.<br>SVC из SVC/kernel mode трактуется как kernel bug и вызывает fatal halt (Zero Trust). |
+| **ARM Blocking Syscalls** | `sys_sleep(ms)` реализован через `TASK_SLEEPING` состояние.<br>Wakeup check в `hal_timer_tick()` переводит задачи в `TASK_READY` при достижении `wakeup_tick`.<br>Scheduler пропускает sleeping задачи.<br>Overflow protection: `ms > 0x7FFFFFFF` rejected. |
 ---
 
 ## 📎 ПРИЛОЖЕНИЕ B: ВЕРДИКТ МЕНТОРА

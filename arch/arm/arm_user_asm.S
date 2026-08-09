@@ -17,6 +17,7 @@
 @
 @ Day 46: Timer IRQ can preempt user code directly.
 @ Day 47: User fault isolation (UNDEF/PABT/DABT kill task, kernel alive).
+@ Day 49: Blocking syscall test (sys_sleep).
 @ ==========================================================================
 
 #include "config.h"
@@ -113,10 +114,10 @@ arm_enter_user_first:
 @   r0    = return value
 @
 @ Test sequence:
-@   1. sys_write(1, data_buffer, 16)
-@   2. invalid syscall -> -ENOSYS
-@   3. sys_yield()
-@   4. sys_write(1, data_buffer, 16)
+@   1. invalid syscall -> -ENOSYS
+@   2. sys_getpid() + sys_write() (print PID)
+@   3. sys_sleep(500) (Day 49: blocking syscall test)
+@   4. Busy loop (preemption window)
 @   5. UNDEF instruction (Day 47 fault isolation test)
 @   6. sys_exit(0) (dead code after UNDEF)
 @ ==========================================================================
@@ -134,13 +135,6 @@ _user_test_start:
 
     mov r4, #3
     ldr r6, =1000000
-
-    @ ---------------------------------------------------------------
-    @ invalid syscall once
-    @ ---------------------------------------------------------------
-
-    mov r7, #99
-    svc #0
 
 1:
 
@@ -165,7 +159,6 @@ _user_test_start:
     add r0, r0, #48             @ '0' + pid
     mov r1, #10                 @ '\n'
 
-    @ Fix: properly store 2 bytes on stack (little-endian)
     sub sp, sp, #8              @ allocate 8 bytes (keeps 8-byte alignment)
     strb r0, [sp]               @ byte 0: pid char
     strb r1, [sp, #1]           @ byte 1: '\n'
@@ -177,6 +170,17 @@ _user_test_start:
     svc #0
 
     add sp, sp, #8              @ restore stack
+
+    @ ---------------------------------------------------------------
+    @ Day 49: Test sys_sleep(500ms)
+    @
+    @ This task will sleep, scheduler switches to other task.
+    @ After 500ms, timer tick wakes this task, scheduler resumes it.
+    @ ---------------------------------------------------------------
+
+    mov r0, #500                @ ms = 500
+    mov r7, #230                @ SYS_sleep
+    svc #0
 
     @ ---------------------------------------------------------------
     @ Busy loop.
@@ -198,18 +202,6 @@ _user_test_start:
     @ Trigger UNDEF immediately after the loop.
     @ The kernel MUST intercept this, print [FAULT], and kill the task.
     .word 0xE7F001F0            @ Guaranteed UNDEF on ARMv6
-
-    @ =================================================================
-    @ OPTIONAL: Other fault types (uncomment ONE at a time to test)
-    @ =================================================================
-    
-    @ --- DATA ABORT (DABT) ---
-    @ mov r0, #0
-    @ ldr r1, [r0]              @ Read from unmapped NULL page
-
-    @ --- PREFETCH ABORT (PABT) ---
-    @ ldr r0, =0x00400000       @ Unmapped user address
-    @ bx r0                     @ Jump to unmapped page
 
     @ =================================================================
     @ DEAD CODE (Execution must NEVER reach here if fault isolation works)
