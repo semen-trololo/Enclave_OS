@@ -23,6 +23,9 @@
 #include "hal/hal_irq.h"
 #include "hal/hal_timer.h"
 #include "arm_pmm.h"
+#include "arm_vmm.h"
+#include "hal/hal_mmu.h"
+
 
 // ============================================================================
 // EXTERNAL MODULES
@@ -421,6 +424,12 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     arm_pmm_reserve_range(ARM_USER_DATA_PADDR, ARM_USER_DATA_SIZE);
 
     arm_pmm_check_balance();
+
+    // ------------------------------------------------------------------
+    // 1.6 VMM (Day 52: ARM Virtual Memory Manager)
+    // ------------------------------------------------------------------
+    hal_mmu_init();
+    
     hal_uart_puts("  Enclave OS — ARM Port\r\n");
     hal_uart_puts("  BCM2835 / ARM1176JZF-S / ARMv6\r\n");
     hal_uart_puts("  Alpha 0.6-arm-user\r\n");
