@@ -64,6 +64,9 @@ static void arm_map_user_sections(void)
     uint32_t code_index = ARM_USER_CODE_VADDR >> 20;
     uint32_t data_index = ARM_USER_DATA_VADDR >> 20;
 
+    // Day 51B: User regions уже зарезервированы в PMM при boot.
+    // Используем hardcoded PA из config.h (spike mode).
+    // Позже (Day 52+): заменить на arm_pmm_alloc_page() для 4 KB pages.
     tt[code_index] = ARM_USER_CODE_PADDR | ARM_SECTION_USER_RX;
     tt[data_index] = ARM_USER_DATA_PADDR | ARM_SECTION_USER_RWXN;
 
