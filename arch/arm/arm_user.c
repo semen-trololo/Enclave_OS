@@ -1,16 +1,18 @@
 // ============================================================================
-// arm_user.c — ARM User Mode Setup (Days 43-45)
+// arm_user.c — ARM User Mode Setup (Day 52: 4KB Pages + Per-Process Isolation)
 // ============================================================================
 // Responsibilities:
-//   - map temporary user code/data sections
-//   - enforce W^X at section level
-//   - copy raw user test image into user code region
-//   - prepare user data region
+//   - allocate fresh L1 address space via VMM
+//   - allocate 4KB physical pages for code and data via PMM
+//   - map pages with strict W^X permissions
+//   - copy raw user test image into isolated code region
 // ============================================================================
 
 #include <stdint.h>
 #include "config.h"
 #include "hal/hal_uart.h"
+#include "hal/hal_mmu.h"
+#include "arm_pmm.h"
 
 // ============================================================================
 // USER TEST IMAGE (defined in arm_user_asm.S)
@@ -20,107 +22,53 @@ extern uint32_t _user_test_start[];
 extern uint32_t _user_test_end[];
 
 // ============================================================================
-// TLB INVALIDATION
+// CREATE ISOLATED ADDRESS SPACE
+// ============================================================================
+// Allocates L1 table, 4KB code page, 4KB data page.
+// Returns PHYSICAL address of L1 table (to be stored in task->ttbr0_phys).
+// Returns 0 on OOM.
 // ============================================================================
 
-static void arm_tlb_invalidate_all(void)
+uint32_t arm_user_create_space_and_load_image(void)
 {
-    uint32_t zero = 0;
+    // 1. Allocate fresh L1 table (copies kernel entries automatically)
+    uint32_t *l1_virt = hal_mmu_create_space();
+    if (!l1_virt) {
+        hal_uart_puts("[USER] OOM: no L1 space\r\n");
+        return 0;
+    }
 
-    // DSB
-    __asm__ volatile ("mcr p15, 0, %0, c7, c10, 4" :: "r"(zero) : "memory");
+    // 2. Allocate physical 4KB pages
+    uint32_t code_pa = arm_pmm_alloc_page();
+    uint32_t data_pa = arm_pmm_alloc_page();
 
-    // Invalidate entire unified TLB
-    __asm__ volatile ("mcr p15, 0, %0, c8, c7, 0" :: "r"(zero) : "memory");
+    if (!code_pa || !data_pa) {
+        hal_uart_puts("[USER] OOM: no physical pages\r\n");
+        // Note: L1 table leaked here, proper teardown needed in production
+        return 0;
+    }
 
-    // DSB
-    __asm__ volatile ("mcr p15, 0, %0, c7, c10, 4" :: "r"(zero) : "memory");
+    // 3. Map pages with strict W^X permissions
+    hal_mmu_map_page_in_space(l1_virt, ARM_USER_CODE_VA_4K, code_pa, HAL_PAGE_USER_CODE);
+    hal_mmu_map_page_in_space(l1_virt, ARM_USER_DATA_VA_4K, data_pa, HAL_PAGE_USER_DATA);
 
-    // ISB
-    __asm__ volatile ("mcr p15, 0, %0, c7, c5, 4" :: "r"(zero) : "memory");
-}
-
-// ============================================================================
-// MAP USER SECTIONS
-// ============================================================================
-// Spike mapping:
-//
-//   VA 0x00100000 -> PA 0x00200000, user RX
-//   VA 0x00200000 -> PA 0x00300000, user RW + XN
-//
-// We read TTBR0 base from CP15 and patch first-level section descriptors.
-// This avoids dependency on boot page table symbol name.
-// ============================================================================
-
-static void arm_map_user_sections(void)
-{
-    uint32_t ttbr0;
-
-    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
-
-    // TTBR0 base is bits [31:14].
-    volatile uint32_t *tt = (volatile uint32_t *)(ttbr0 & 0xFFFFC000u);
-
-    uint32_t code_index = ARM_USER_CODE_VADDR >> 20;
-    uint32_t data_index = ARM_USER_DATA_VADDR >> 20;
-
-    // Day 51B: User regions уже зарезервированы в PMM при boot.
-    // Используем hardcoded PA из config.h (spike mode).
-    // Позже (Day 52+): заменить на arm_pmm_alloc_page() для 4 KB pages.
-    tt[code_index] = ARM_USER_CODE_PADDR | ARM_SECTION_USER_RX;
-    tt[data_index] = ARM_USER_DATA_PADDR | ARM_SECTION_USER_RWXN;
-
-    arm_tlb_invalidate_all();
-
-    hal_uart_puts("[MMU] User sections mapped:\r\n");
-    hal_uart_puts("      code: VA 0x00100000 -> PA 0x00200000 (RX)\r\n");
-    hal_uart_puts("      data: VA 0x00200000 -> PA 0x00300000 (RW, XN)\r\n");
-}
-
-// ============================================================================
-// COPY USER CODE
-// ============================================================================
-
-static void arm_copy_user_code(void)
-{
-    volatile uint32_t *dst = (volatile uint32_t *)ARM_USER_CODE_VADDR;
+    // 4. Copy user test image
+    // Identity mapping is torn down, so we MUST use PHYS_TO_VIRT for destination.
     uint32_t *src = _user_test_start;
-
+    volatile uint32_t *dst = (volatile uint32_t *)PHYS_TO_VIRT(code_pa);
     while (src < _user_test_end) {
         *dst++ = *src++;
     }
 
-    hal_uart_puts("[USER] Test image copied to VA 0x00100000\r\n");
-}
-
-// ============================================================================
-// PREPARE USER DATA
-// ============================================================================
-
-static void arm_prepare_user_data(void)
-{
+    // 5. Prepare user data region
+    volatile char *data_virt = (volatile char *)PHYS_TO_VIRT(data_pa);
     static const char msg[] = "Hello ARM user\r\n";
-
-    volatile char *dst = (volatile char *)ARM_USER_DATA_VADDR;
-
-    // Message length is 16 bytes:
-    //   "Hello ARM user\r\n"
-    //
-    // Do not copy terminating NUL into the 16-byte test buffer.
     for (int i = 0; i < 16; i++) {
-        dst[i] = msg[i];
+        data_virt[i] = msg[i];
     }
 
-    hal_uart_puts("[USER] Data region prepared at VA 0x00200000\r\n");
-}
+    hal_uart_puts("[USER] Isolated 4KB address space created\r\n");
 
-// ============================================================================
-// PUBLIC INIT
-// ============================================================================
-
-void arm_user_setup(void)
-{
-    arm_map_user_sections();
-    arm_copy_user_code();
-    arm_prepare_user_data();
+    // Return physical address of L1 table for TTBR0
+    return VIRT_TO_PHYS((uint32_t)l1_virt);
 }

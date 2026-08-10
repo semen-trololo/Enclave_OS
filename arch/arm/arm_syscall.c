@@ -77,12 +77,10 @@ static void uart_u32(uint32_t value)
 }
 
 // ============================================================================
-// ZERO TRUST VALIDATION
+// ZERO TRUST VALIDATION (VMM-Aware)
 // ============================================================================
-// Spike policy:
-//   For sys_write we only accept buffers inside explicitly mapped user
-//   regions. This is stricter than generic < KERNEL_SPACE_START and keeps
-//   the kernel from proxying arbitrary kernel-readable memory.
+// С появлением per-process 4KB страниц жестко заданные регионы устарели.
+// Политика: разрешен любой адрес в нижних 3 GB, жесткий запрет на Kernel Space.
 // ============================================================================
 
 static int is_user_buffer(uint32_t addr, uint32_t len)
@@ -94,26 +92,15 @@ static int is_user_buffer(uint32_t addr, uint32_t len)
 
     end = addr + len;
 
-    // Overflow.
+    // Overflow protection.
     if (end < addr)
         return 0;
 
-    // Hard kernel boundary.
+    // Hard kernel boundary. Zero Trust: user cannot touch >= 0xC0000000.
     if (addr >= KERNEL_SPACE_START)
         return 0;
 
-    // User data region.
-    if (addr >= ARM_USER_DATA_VADDR &&
-        end <= ARM_USER_DATA_VADDR + ARM_USER_DATA_SIZE)
-        return 1;
-
-    // User code region is also readable.
-    // Useful if user code embeds read-only strings.
-    if (addr >= ARM_USER_CODE_VADDR &&
-        end <= ARM_USER_CODE_VADDR + ARM_USER_CODE_SIZE)
-        return 1;
-
-    return 0;
+    return 1;
 }
 
 // ============================================================================

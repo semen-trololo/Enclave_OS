@@ -31,4 +31,12 @@ void arm_vmm_init(void);
 // Получить физический адрес boot TTBR0 (для отладки).
 uint32_t arm_vmm_get_boot_ttbr0(void);
 
+// ============================================================================
+// ZERO TRUST: IDENTITY TEARDOWN
+// ============================================================================
+// Удаляет identity mapping (нижние 512 MB) из boot TTBR0.
+// Вызывается один раз в arm_kernel_main() после перехода в Higher Half.
+// Ядро больше не имеет прямого маппинга в нижнюю память.
+void arm_vmm_teardown_identity(void);
+
 #endif // ARM_VMM_H

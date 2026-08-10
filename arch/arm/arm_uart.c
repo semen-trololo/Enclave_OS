@@ -5,12 +5,17 @@
 //
 // PL011 UART0:
 //   Physical: 0x20201000
-//   Virtual:  0x20201000 (identity map в .boot, позже 0xE0201000 в TTBR1)
+//   Virtual:  BCM2835_VIRT(0x20201000) = 0xE0201000 (Higher Half Peripherals)
 //   GPIO: pins 14 (TXD), 15 (RXD) → ALT0
 //   Baud: 115200, 8N1, FIFO enabled
 //   UARTCLK: 3 MHz (core_freq=250 в config.txt)
 //
 // ⚠️ Все MMIO через volatile uint32_t* + dsb barrier.
+// ⚠️ Day 52 Zero Trust fix:
+//    Все MMIO-адреса ОБЯЗАНЫ использовать BCM2835_VIRT() для трансляции
+//    физических адресов в Higher-Half виртуальные адреса (0xE0000000+).
+//    Это гарантирует, что UART доступен из любого address space,
+//    включая user L1 tables (entries 3584-3599 копируются из boot TTBR0).
 // ⚠️ hal_timer_delay_us() реализована в arm_timer.c (BCM2835 CLO).
 //    Работает ДО hal_timer_init(): hardware counter тикает с power-on.
 // ============================================================================
@@ -22,12 +27,17 @@
 #include "hal/hal_timer.h"
 
 // ============================================================================
-// MMIO ACCESS (volatile + barrier)
+// MMIO ACCESS (volatile + barrier + BCM2835_VIRT translation)
+// ============================================================================
+// Day 52 Zero Trust fix:
+// Физические адреса периферии (0x20000000+) не замаплены в user L1 tables.
+// Все обращения ДОЛЖНЫ идти через Higher-Half Direct Map (0xE0000000+),
+// который автоматически присутствует во всех address spaces.
 // ============================================================================
 
-#define MMIO_READ(addr)     (*(volatile uint32_t*)(addr))
+#define MMIO_READ(addr)     (*(volatile uint32_t *)BCM2835_VIRT(addr))
 #define MMIO_WRITE(addr, v) do { \
-    (*(volatile uint32_t*)(addr)) = (v); \
+    (*(volatile uint32_t *)BCM2835_VIRT(addr)) = (v); \
     hal_dsb(); \
 } while(0)
 

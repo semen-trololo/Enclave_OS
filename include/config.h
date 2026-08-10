@@ -330,28 +330,22 @@
 #define ARM_KERNEL_PHYS_BASE    0x00010000  /* QEMU raspi1ap */
 
 // ============================================================================
-// ARM USER MODE SPIKE (Days 43-45: SVC + User Mode + Integration)
+// ARM USER MODE 4KB PAGE SPIKE (Day 52+ Per-Process Isolation)
 // ============================================================================
-// Temporary coarse 1 MB section mappings, but W^X is enforced:
+// Каждая задача получает собственный L1 address space и собственные физические
+// 4KB страницы. Коллизии виртуальных адресов невозможны.
 //
-//   User code:
-//     VA 0x00100000 -> PA 0x00200000
-//     User RO, kernel RW, executable
-//
-//   User data + stack:
-//     VA 0x00200000 -> PA 0x00300000
-//     User RW, kernel RW, XN
-//
-// This is a spike mapping. Later: 4 KB pages + real ARM VMM.
+// Code: 1 страница (4 KB)
+// Data: 1 страница (4 KB), используется для данных и стека.
 // ============================================================================
 
-#define ARM_USER_CODE_VADDR         0x00100000
-#define ARM_USER_CODE_PADDR         0x00200000
-#define ARM_USER_CODE_SIZE          0x00100000
+#define ARM_USER_CODE_VA_4K     0x00001000  // 4 KB (избегаем NULL page)
+#define ARM_USER_DATA_VA_4K     0x00002000  // 8 KB
+#define ARM_USER_STACK_VA_4K    0x00003000  // 12 KB (вершина стека внутри data page)
 
-#define ARM_USER_DATA_VADDR         0x00200000
-#define ARM_USER_DATA_PADDR         0x00300000
-#define ARM_USER_DATA_SIZE          0x00100000
+// Размеры для совместимости (если где-то нужны)
+#define ARM_USER_CODE_SIZE_4K   0x1000
+#define ARM_USER_DATA_SIZE_4K   0x1000
 
 // User stacks live inside the user data section.
 #define ARM_USER_STACK_A_TOP        (ARM_USER_DATA_VADDR + 0x80000)

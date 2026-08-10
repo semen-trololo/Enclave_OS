@@ -1,43 +1,71 @@
-````markdown
-# 📘 Enclave Operating System — Полная Архитектурная Документация
+# 📘 Enclave Operating System — Архитектурная Документация
 
-**Версия:** Alpha 0.6-arm-vmm
-**Дата актуализации:** 10 августа 2026
-**Статус:** ARM VMM Foundation Complete (Day 52) — Next: User Task Migration to 4 KB Pages
+**Версия:** Alpha 0.6-arm-vmm  
+**Дата актуализации:** 11 августа 2026   
+**Доктрина Enclave:** Zero Trust, Бессмертное Ядро, Crash-Only Userspace
 
-**Enclave Doctrine:** Zero Trust, Immortal Kernel, Crash-Only Userspace.
+Enclave OS — это минималистичная higher-half операционная система, построенная вокруг идеи **изолированных пользовательских анклавов**. Ядро является бессмертным доверенным контуром, который не доверяет ни одному приложению.
 
-Enclave OS — это минималистичная x86 higher-half operating system, построенная вокруг
-идеи изолированных пользовательских анклавов. Ядро является бессмертным доверенным
-контуром, который не доверяет ни одному приложению.
+Все программы исполняются в Ring 3 (x86) / USR mode (ARM) и получают доступ к ресурсам только через проверяемые системные вызовы. Память рассматривается как набор явных разрешений, W^X является законом, CoW — контролируемой оптимизацией, а crash приложения — нормальным событием, которое не должно влиять на живучесть системы.
 
-Все программы исполняются в Ring 3 и получают доступ к ресурсам только через
-проверяемые системные вызовы. Память рассматривается как набор явных разрешений,
-W^X является законом, CoW — контролируемой оптимизацией,
-а crash приложения — нормальным событием, которое не должно влиять на живучесть
-системы. Enclave использует POSIX-подобные интерфейсы не ради клонирования Linux,
-а ради практичного self-hosting и запуска привычных программных паттернов внутри
-строгой zero-trust архитектуры.
+Enclave использует POSIX-подобные интерфейсы не ради клонирования Linux, а ради практичного self-hosting и запуска привычных программных паттернов внутри строгой zero-trust архитектуры.
+
+---
+## 1. Доктрина Enclave
+
+### 1.1 Фундаментальные Принципы
+
+| Принцип | Описание |
+|---|---|
+| **Бессмертное Ядро (Immortal Kernel)** | Ядро является бессмертным доверенным контуром, который не может быть уничтожен пользовательскими процессами |
+| **Нулевое Доверие (Zero Trust)** | Ядро не доверяет ни одному приложению, все данные от пользователя проверяются |
+| **Crash-Only Userspace** | Падение приложения является нормальным событием, ядро продолжает работать |
+| **W^X Принуждение** | Память рассматривается как набор явных разрешений: Write XOR Execute, одновременная запись и исполнение запрещены |
+| **Явная Изоляция** | Все программы исполняются в Ring 3 (x86) / USR mode (ARM) |
+| **Проверяемый Доступ** | Доступ к ресурсам только через валидируемые системные вызовы |
+| **Контролируемый CoW** | Copy-on-Write является контролируемой оптимизацией, не правом пользователя |
+| **Прагматичный POSIX** | POSIX-подобные интерфейсы используются для self-hosting, а не для клонирования Linux |
+
+### 1.2 Архитектурный Контракт
+
+- Ядро никогда не падает из-за действий пользователя
+- Ошибка пользователя убивает задачу, ядро продолжает работу
+- Ошибка ядра — это фатальный баг ядра (halt/panic)
+- Весь доступ к ресурсам через VFS/системные вызовы
+- Права доступа к памяти явные и принудительно соблюдаются
+
+**Это не игрушка. Это реальная операционная система с доказанными гарантиями безопасности и стабильности.**
+
+### 1.3 Визия: "Бессмертная Крепость"
+
+| Принцип | Реализация |
+|---|---|
+| **"Let it crash"** (Erlang/OTP) | PID 1 перезапускает упавшие сервисы < 100 мс |
+| **Crash-Only Software** | Сервисы не хранят состояние в RAM |
+| **Immutable Kernel** | Код ядра Read-Only после инициализации |
+| **Zero Trust I/O** | Устройства через VFS (`/dev/console`) |
 
 ---
 
-## 📑 СОДЕРЖАНИЕ
+## 2. Статус Проекта
 
-1. [Среда разработки](#1-среда-разработки)
-2. [Структура проекта](#2-структура-проекта)
-3. [Архитектурные принципы](#3-архитектурные-принципы)
-4. [Карта памяти](#4-карта-памяти)
-5. [Подсистемы ядра](#5-подсистемы-ядра)
-6. [Многозадачность и процессная модель](#6-многозадачность-и-процессная-модель)
-7. [Системные вызовы](#7-системные-вызовы)
-8. [User Space и Self-Hosting](#8-user-space-и-self-hosting)
-9. [Гарантии системы (SLA)](#9-гарантии-системы-sla)
-10. [Известные проблемы и Roadmap](#10-известные-проблемы-и-roadmap)
-11. [Приложения](#-приложение-a-критические-архитектурные-нюансы)
+### АКТИВНАЯ РАЗРАБОТКА: ARM Порт
+- **Целевое железо:** Raspberry Pi 1 / QEMU `raspi1ap`
+- **Процессор:** ARM1176JZF-S, архитектура ARMv6
+- **Статус:** Фундамент завершён, активная работа над запуском на реальном железе
+- **Фокус:** 4 KB страницы, per-process VMM, ELF загрузчик
+
+### ЗАМОРОЖЕН: x86 Релиз
+- **Версия:** Alpha 0.5-rc1
+- **Статус:** Полностью функциональная, self-hosting работает
+- **Политика:** Никаких новых возможностей, только критические исправления безопасности
+- **Назначение:** Эталонная реализация, базовая линия документации
 
 ---
 
-## 1. СРЕДА РАЗРАБОТКИ
+## 3. Среда Разработки
+
+### 3.1 Общие Сведения
 
 | Параметр | Значение |
 |---|---|
@@ -51,7 +79,7 @@ W^X является законом, CoW — контролируемой опт
 | **Эмуляция x86** | QEMU (`qemu-system-i386`) |
 | **Эмуляция ARM** | QEMU (`qemu-system-arm -M raspi1ap`) |
 
-### 🛠 x86 Toolchain
+### 3.2 x86 Toolchain
 
 | Инструмент | Назначение |
 |---|---|
@@ -61,10 +89,7 @@ W^X является законом, CoW — контролируемой опт
 | `make`, `xorriso`, `grub-pc-bin`, `mtools` | Сборка ISO |
 | `git` | Контроль версий |
 
-### ⚙️ x86 Флаги компиляции
-
-**Kernel CFLAGS:**
-
+**Флаги компиляции ядра:**
 ```makefile
 CFLAGS  = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Iinclude
 CFLAGS += -fno-pie -fno-pic -fno-stack-protector
@@ -72,30 +97,31 @@ CFLAGS += -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
 CFLAGS += -mincoming-stack-boundary=2 -g
 ```
 
-**User Space CFLAGS:**
-
+**Флаги компиляции пользовательского пространства:**
 ```makefile
-USER_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra
+USER_CFLAGS  = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra
 USER_CFLAGS += -fno-optimize-sibling-calls
+USER_CFLAGS += -fno-pie -fno-pic -fno-stack-protector
 ```
 
-**LDFLAGS:**
-
+**Флаги линковки:**
 ```makefile
-LDFLAGS = -T linker.ld -nostdlib -no-pie -lgcc
+KERNEL_LDFLAGS = -T linker.ld -nostdlib -no-pie
+LDLIBS         = -lgcc
+
+USER_LDFLAGS = -nostdlib -static -no-pie -T user_src/user_linker.ld
+USER_LDLIBS  = -lgcc
 ```
 
-**Принцип "Голая ОС":** ядро не использует FPU/SSE напрямую. Математика с плавающей
-точкой доступна только в Ring 3 через Lazy FPU Switching (`#NM`, `fxsave/fxrstor`).
+**Принцип "Голая ОС":** ядро не использует FPU/SSE напрямую. Математика с плавающей точкой доступна только в Ring 3 через Lazy FPU Switching (`#NM`, `fxsave/fxrstor`).
 
 **Запуск x86:**
-
 ```bash
 make iso && make run
-# qemu-system-i386 -cdrom build/metal_os.iso -m 1024M -serial stdio -no-reboot
+# qemu-system-i386 -cdrom build/enclave_os.iso -m 1024M -serial stdio -no-reboot
 ```
 
-### 🛠 ARM Toolchain (Raspberry Pi Port)
+### 3.3 ARM Toolchain (Raspberry Pi Port)
 
 | Инструмент | Назначение |
 |---|---|
@@ -104,1676 +130,698 @@ make iso && make run
 | `arm-none-eabi-objcopy` | ELF → raw binary (`kernel.img`) |
 | `qemu-system-arm` | Эмуляция (`-M raspi1ap`) |
 
-**ARM CFLAGS:**
-
+**Флаги компиляции ARM:**
 ```makefile
-CPU_FLAGS = -mcpu=arm1176jzf-s -marm -mabi=aapcs -mno-unaligned-access
-CFLAGS   += -ffreestanding -nostdlib -O2 -fno-pie -fno-pic
-CFLAGS   += -DCONFIG_ARCH_ARM=1
+CPU_FLAGS   = -mcpu=arm1176jzf-s -marm -mabi=aapcs -mno-unaligned-access
+CFLAGS      = $(CPU_FLAGS) -std=gnu99 -ffreestanding -nostdlib
+CFLAGS     += -O2 -Wall -Wextra -Werror=implicit-function-declaration
+CFLAGS     += -fno-pie -fno-pic -fno-stack-protector
+CFLAGS     += -fno-builtin -fno-common -Iinclude -DCONFIG_ARCH_ARM=1 -g
+```
+
+**Флаги линковки ARM:**
+```makefile
+LIBGCC  = $(shell $(CC) $(CPU_FLAGS) -print-libgcc-file-name)
+LDFLAGS = -T arch/arm/linker_arm.ld -nostdlib -no-pie --gc-sections
 ```
 
 **Запуск ARM:**
-
 ```bash
 make -f Makefile.arm run
 # qemu-system-arm -M raspi1ap -m 512M -serial stdio -kernel build/arm/kernel.img
 ```
 
----
+### 3.4 Флаги Компиляции TinyCC
 
-### 1.3 POSIX ABI Policy (Frozen, Day 32)
-
-#### Public User ABI (Ring 3 → Kernel)
-
-**Гарантии (FROZEN — не менять без major version bump):**
-
-| # | Гарантия | Детали |
-|---|---|---|
-| 1 | Syscall convention | x86: `INT 0x80`, `eax` = номер, `ebx/ecx/edx/esi/edi` = аргументы. ARM: `svc #0`, `r7` = номер, `r0-r6` = аргументы. Return: `eax`/`r0` (`>= 0` success, `< 0` = `-errno`) |
-| 2 | POSIX return convention | Все libc-обёртки: при ошибке `return -1` (или `NULL`/`MAP_FAILED`), `errno = -ret` |
-| 3 | `fork()` | CoW clone. Child: `fork() == 0`. Parent: `fork() == child_pid`. Error: `-1 + errno` |
-| 4 | `exec()` | Заменяет образ. FD table сохраняется. `argv` на user stack. Error: `-1 + errno` (процесс жив) |
-| 5 | `waitpid()` status | `status == exit_code` (0..255) при normal exit. `status == -1` при kernel kill. **НЕ Linux-compatible** (нет `<< 8`) |
-| 6 | `mmap()` | `MAP_ANONYMOUS`: on-demand paging. `MAP_FAILED` при ошибке. W^X enforced |
-| 7 | `mprotect()` | W^X: `PROT_WRITE|PROT_EXEC` → `-EPERM`. Частичное покрытие: VMA splitting |
-| 8 | `open()` variadic | `open(path, flags, ...)` — mode через `va_arg` при `O_CREAT` |
-| 9 | `close()` / `dup()` / `dup2()` | POSIX semantics. `dup2` атомарно закрывает `newfd` |
-| 10 | `unlink()` | Orphan semantics: файл жив пока открыт. `ENOTEMPTY` для непустых директорий |
-| 11 | `mkdir()` | RBAC: `FS_SYSTEM` → `EACCES`. `S_IFDIR` → `FS_DIRECTORY` |
-| 12 | `fstat()` | `st_size`, `st_mode` (`S_IFREG`/`S_IFDIR`), `st_ino` |
-| 13 | `sys_brk` | Bump-only из libc. `brk(0)` = текущий end. `brk(new)` = expand |
-| 14 | User Stack | 64 KB, guard page 4 KB. Переполнение → `SIGSEGV` (task kill) |
-| 15 | User Heap | 64 MB max. `sys_brk` collision detection с VMA |
-| 16 | `fork()` FD inheritance | `ref_count++` для `open_file_t` + `vfs_node_t` |
-
-**Осознанные отклонения от Linux (зафиксированы, не баги):**
-
-| # | Область | Enclave OS | Linux | Обоснование |
-|---|---|---|---|---|
-| D1 | waitpid status | `exit_code` (0..255) | `exit_code << 8` | Упрощение, нет `W*` макросов |
-| D2 | waitpid killed | `status == -1` | `WIFSIGNALED` | Нет сигналов |
-| D3 | `free()` | no-op | Возврат в heap | Bump allocator (TCC by design) |
-| D4 | `mprotect(W|X)` | `-EPERM` | Разрешено | W^X = закон |
-| D5 | `getcwd()` | Всегда `"/"` | Реальный cwd | Нет cwd tracking |
-| D6 | `chdir()` | `ENOSYS` | Работает | Нет cwd tracking |
-| D7 | `signal()` | Stub → `SIG_DFL` | Реальная доставка | Нет подсистемы сигналов |
-| D8 | `dlopen/dlsym` | `ENOSYS` | Реальный dl | Static-only OS |
-| D9 | `localtime()` | Stub (1 Jan 1970) | Реальное время | Нет RTC driver |
-| D10 | `getenv()` | Всегда `NULL` | Реальный env | Нет environment |
-| D11 | `isatty()` | `1` для fd 0/1/2 | `ioctl TIOCGWINSZ` | Упрощение |
-| D12 | `sys_brk` shrink | Ядро позволяет, libc не вызывает | Уменьшает heap | Reserved capability |
-
-#### Internal Kernel ABI (НЕ гарантирован)
-
-| # | Элемент | Статус |
-|---|---|---|
-| 1 | Номера syscall | Frozen (Linux i386 ABI). Transport: x86 `INT 0x80`, ARM `svc #0` |
-| 2 | `vfs_close_fd()` | Internal. Ring 0 НЕ вызывает `sys_close()` |
-| 3 | `task_t` layout | Internal. Может меняться |
-| 4 | VMA flags (`VMA_COW` и т.д.) | Internal |
-| 5 | Page table format | Internal (x86 2-level, ARMv6 short descriptor) |
-| 6 | Kernel heap API (`kmalloc`) | Internal. Ring 3 НИКОГДА |
-
-#### TCC Compatibility Rules
-
-| # | Правило | Обоснование |
-|---|---|---|
-| T1 | Tagged structs | TCC пишет `struct timeval tv;` → нужен тег. Паттерн: `struct X {...}; typedef struct X X_t;` |
-| T2 | `#ifndef CONFIG_TCC_STATIC` guard | TCC определяет static stubs `dl*` с другими сигнатурами |
-| T3 | `-fno-optimize-sibling-calls` | `setjmp/longjmp` safety |
-| T4 | Heapsort (не Quicksort) | O(1) stack для 64 KB Ring 3 stack |
-
-#### ABI Change Policy
-
-| Тип изменения | Процедура |
-|---|---|
-| Добавление syscall | Только в minor version bump |
-| Изменение поведения существующего syscall | Только в major version bump |
-| Изменение internal kernel ABI | Свободно (не гарантирован) |
-| Изменение отклонений D1-D12 | Только в major version bump + миграция |
-
----
-
-### 1.4 Release Checklist: Alpha 0.5-rc1 (x86)
-
-- [x] SSOT version fixed (Alpha 0.5-rc1)
-- [x] ABI policy fixed (§1.3: 16 гарантий, 12 отклонений)
-- [x] All critical bugs closed (5/5 libc, 0 kernel)
-- [x] All fixed bugs tested (68/68 PASS)
-- [x] Memory balance clean (pmm 117→117, heap 242→242)
-- [x] FD balance clean (`heap_balance` стабилен)
-- [x] Process teardown clean (`fork→exit→reap`: 0 утечек)
-- [x] CoW teardown proven (15 zombie cascade, 25 fork bomb)
-- [x] TCC self-hosting works (compile + run + error recovery)
-- [x] W^X enforced (`mmap` + `mprotect` reject)
-- [x] RBAC enforced (`FS_SYSTEM` → `EACCES`)
-- [x] Stress tests pass (fork bomb, 1000 files, FD exhaustion, heap exhaustion)
-- [x] Serial log clean (0 FAIL, 0 PANIC, 0 TRIPLE FAULT)
-- [x] Known limitations documented (12 пунктов)
-- [x] Changelog written
-- [x] Git tag: `alpha-0.5-rc1`
-
-#### Итого
-
-| Метрика | Значение |
-|---|---|
-| Тестов | 55 → **68** (+13) |
-| Багов в ядре | **0** |
-| Багов в libc | **5** (все исправлены) |
-| Багов в тестах | **2** (исправлены / удалены) |
-| Утечек PMM | **0** |
-| Утечек heap | **0** |
-| Triple Fault | **0** |
-| Kernel Panic | **0** |
-
----
-
-### 1.5 ARM Hardware Testing Notes
-
-#### Сводная таблица
-
-```text
-#  Файл              Проблема                    QEMU   RPi1    Критичность
-─  ────              ────────                    ────   ────    ───────────
-1  linker_arm.ld     PHYS_BASE 0x10000           ✅     💥      КРИТИЧНО
-2  arm_uart.c        baud без core_freq=250      ✅     💥      КРИТИЧНО
-3  config.h          RAM default 512 MB          ✅     ⚠️*     ВАЖНО (*когда будет PMM)
-4  arm_boot.S        маппинг 256 MB              ✅     ✅      OK для spike
-5  hal_cpu.h         WFI → busy-wait             ✅     ⚠️      Субоптимально
-6  arm_boot.S        caches off                  ✅     ⚠️      Субоптимально
-7  arm_boot.S        branch pred off             ✅     ⚠️      Субоптимально
-8  arm_main.c        machine type не парсится    ✅     ⚠️*     ВАЖНО (*для PMM)
+```makefile
+TCC_CFLAGS  = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra
+TCC_CFLAGS += -fno-optimize-sibling-calls
+TCC_CFLAGS += -fno-pie -fno-pic -fno-stack-protector
+TCC_CFLAGS += -DCONFIG_TCC_STATIC -DONE_SOURCE=1
+TCC_CFLAGS += -Iuser_src -I$(TOOLCHAIN_INC)
 ```
 
-#### Минимальный чеклист для первого запуска на железе
-
-```text
-1. linker_arm.ld: PHYS_BASE = 0x8000 (или параметризация)
-2. SD карта: config.txt с core_freq=250, enable_uart=1
-3. SD карта: kernel.img (не kernel7.img)
-4. SD карта: bootcode.bin, start.elf, fixup.dat (firmware)
-5. UART: 3.3V переходник, TX↔RX cross, GND
-6. Хост: picocom -b 115200 /dev/ttyUSB0
-```
-
-Пункты 1-2 — без них **не запустится**.  
-Пункты 3-6 — без них не увидим вывод.
-
-#### Что НЕ нужно менять
-
-```text
-✅ arm_vectors.S (VBAR, b handler, SRS/RFE) — работает на hardware
-✅ arm_irq.c (BCM2835 IRQ controller) — identical hardware
-✅ arm_timer.c (BCM2835 System Timer) — identical hardware
-✅ arm_context.S (context switch) — pure CPU, no hardware dependency
-✅ ctz32() — software, no hardware dependency
-✅ AAPCS alignment — pure ABI, no hardware dependency
-✅ CPSR save/restore — pure CPU
-✅ MMIO volatile + DSB — работает на hardware (даже важнее чем в QEMU)
-```
+| Флаг | Назначение |
+|---|---|
+| `-DONE_SOURCE=1` | Монолитная компиляция (все `.c` в одном `tcc.c`) |
+| `-DCONFIG_TCC_STATIC` | Отключает `dlopen/dlsym` |
+| `-fno-optimize-sibling-calls` | Запрет tail-call optimization (`setjmp` safety) |
+| `-I$(TOOLCHAIN_INC)` | Доступ к fake POSIX headers при компиляции |
 
 ---
 
-### 1.6 Changelog: ARM Boot Spike (Days 36–37, July 2026)
-
-#### Day 36: HAL Design + Build Infrastructure
-
-- Спроектирован HAL: 6 модулей (`cpu`, `mmu`, `irq`, `timer`, `uart`, `mem`)
-- Compile-time abstraction (`#ifdef CONFIG_ARCH_ARM`), НЕ runtime vtable
-- Написаны HAL контракты: `hal_cpu.h`, `hal_mmu.h`, `hal_irq.h`, `hal_timer.h`, `hal_uart.h`
-- Расширен `config.h`: ARM CPSR modes, BCM2835 MMIO, ARMv6 MMU descriptors
-- `Makefile.arm`: отдельный build, не трогает x86 Makefile
-- `linker_arm.ld`: LMA `0x10000`, VMA `0xC0000000`, `AT(ADDR - KERNEL_VMA)`
-
-#### Day 37: ARM Boot Milestone
-
-- `arm_boot.S`: SVC mode, stacks, BSS clear, TTBR0, MMU enable, higher half jump
-- `arm_uart.c`: PL011 UART init + `putc/getc` (GPIO ALT0, 115200 8N1)
-- `arm_main.c`: banner + halt (placeholder)
-
-**Решённые проблемы:**
-
-- `isb` → CP15 `mcr` (ARMv6 не имеет UAL)
-- `PHYS_BASE 0x8000 → 0x10000` (QEMU raspi1ap)
-- VMA/LMA mismatch → `AT(ADDR(.section) - KERNEL_VMA)`
-- TTBR1 Prefetch Abort → один TTBR0 (identity + HH)
-- `__aeabi_uidiv` → hardcoded baud + libgcc
-- QEMU RAM `256M → 512M` (raspi1ap requirement)
-
-**Результат:** Banner по UART в QEMU raspi1ap ✅
-
-#### Итого за ARM Boot Spike
-
-| Метрика | Значение |
-|---|---|
-| Файлов HAL | 5 контрактов + `config.h` расширение |
-| Файлов ARM | `arm_boot.S`, `arm_uart.c`, `arm_main.c`, `linker_arm.ld` |
-| Build | `Makefile.arm` (отдельный, x86 не тронут) |
-| QEMU | `raspi1ap`, 512M, PL011 UART |
-| Boot | SVC → MMU → Higher Half → UART banner ✅ |
-| x86 regression | 0 (Makefile не тронут) |
-
----
-
-### 1.7 Changelog: ARM IRQ + Timer + Vectors (Days 38–40, July 2026)
-
-#### Day 38: HAL IRQ + Timer Implementation
-
-- `hal_irq.h`: 72 IRQ линии (64 GPU + 8 Basic), namespace `HAL_IRQ_GPU_*` / `HAL_IRQ_BASIC_*`
-- `hal_irq.h`: `hal_irq_dispatch` задокументирован как arch-specific (EOI порядок)
-- `hal_cpu.h`: `hal_irq_restore` (ARM) восстанавливает только I-bit, не mode bits
-- `hal_timer.h`: добавлен `hal_timer_get_hz()`, `hal_timer_oneshot` помечен NOT IMPLEMENTED
-- `config.h`: `BCM2835_PERIPH_VIRT_BASE` + `BCM2835_VIRT(reg)` макрос
-- `config.h`: `BCM2835_RAM_SIZE_DEFAULT = 512 MB` (QEMU raspi1ap)
-
-#### Day 39: ARM Exception Vectors + IRQ Controller
-
-- `arm_vectors.S`: VBAR-based vector table (8 entries, `b handler`)
-- `arm_vectors.S`: IRQ stub (`srsdb/cps/push/bl/pop/rfeia`)
-- `arm_vectors.S`: Exception stubs (UNDEF, SVC, PABT, DABT) с context dump
-- `arm_irq.c`: BCM2835 IRQ controller (init, register, enable/disable, dispatch)
-- `arm_irq.c`: `arm_irq_entry` — read PEND1/PEND2/BASIC, `ctz32()`, dispatch
-- `arm_irq.c`: `arm_exception_entry` — fatal dump (`r0-r12`, `LR`, `fault_addr`, `SPSR`)
-
-#### Day 40: ARM System Timer + Integration
-
-- `arm_timer.c`: BCM2835 System Timer C1, 1 MHz, 1 kHz tick
-- `arm_timer.c`: `timer_irq_handler` (clear CS, next C1, `tick_count++`)
-- `arm_timer.c`: `hal_timer_delay_us/ms` (hardware CLO polling)
-- `arm_main.c`: полная интеграция (IRQ init → Timer init → enable → uptime loop)
-- `arm_boot.S`: VBAR setup в `_higher_half_entry`
-- `arm_uart.c`: удалены дублирующиеся `hal_timer_delay_us/ms` (владелец: `arm_timer.c`)
-- `Makefile.arm`: добавлены `arm_vectors.S`, `arm_irq.c`, `arm_timer.c`
-
-#### Критические баги Days 38-40
-
-| # | Баг | Корень | Фикс |
-|---|---|---|---|
-| B1 | `__builtin_ctz` → `rbit` (ARMv7) | GCC codegen для ARMv6 | Software `ctz32()` |
-| B2 | WFI не просыпается | ARM1176 + QEMU errata | NOP sled idle |
-| B3 | `push {r0-r12}` = 52 bytes | AAPCS SP mod 8 = 4 | `push {r0-r12, lr}` = 56 bytes |
-
-#### Итого за Days 38-40
-
-| Метрика | Значение |
-|---|---|
-| Новых файлов | `arm_vectors.S`, `arm_irq.c`, `arm_timer.c` |
-| Обновлённых файлов | `arm_boot.S`, `arm_main.c`, `arm_uart.c`, `Makefile.arm` |
-| Обновлённых HAL | `hal_irq.h`, `hal_cpu.h`, `hal_timer.h`, `config.h` |
-| IRQ dispatch | 1000 IRQ/sec, 0 пропусков, 0 сбоев |
-| Uptime test | 9+ секунд стабильно |
-| x86 regression | 0 (Makefile не тронут) |
-
----
-
-### 1.8 Changelog: ARM Context Switch + Scheduler (Days 41–42, July 2026)
-
-#### Day 41: ARM Context Switch
-
-- `arm_context.S`: `context_switch` (`r4-r11` + CPSR + LR, SP switch)
-- `arm_main.c`: 3 задачи (idle + task_a + task_b), preemptive round-robin
-- Forged stack: 10 regs, 8-byte aligned, CPSR=`0x13` (SVC, I=0)
-
-#### Day 42: Preemptive Scheduler Integration
-
-- `arm_timer.c`: `hal_timer_tick()` → `quantum_counter` → `schedule()`
-- Quantum: 10 ticks (10 ms)
-- `schedule()`: round-robin, `arm_context_switch()`
-
-#### Критический баг Days 41-42
-
-| # | Баг | Корень | Фикс |
-|---|---|---|---|
-| B4 | CPSR не сохраняется в `context_switch` | Новая задача наследует I=1 из IRQ handler | `mrs/msr cpsr_c` + forged CPSR=`0x13` |
-
-#### Итого за Days 41-42
-
-| Метрика | Значение |
-|---|---|
-| Новых файлов | `arm_context.S` |
-| Задач | 3 (idle, task_a, task_b) |
-| Quantum | 10 ms |
-| Uptime test | 51 секунда, 0 сбоев |
-| Context switches | ~5100 (3 задачи × 100 Hz × 51s / 3) |
-
----
-
-### 1.9 Changelog: ARM SVC + User Mode (Days 43–45, July 2026)
-
-#### Day 43: ARM SVC Syscall Entry
-
-- `arm_vectors.S`: SVC vector переключён с fatal dump на syscall entry
-- `arm_vectors.S`: SVC frame = `srsdb` + `push {r0-r12, lr}` = 64 bytes
-- `include/arm_trap.h`: общий ARM trap frame layout
-- `arch/arm/arm_syscall.c`: SVC syscall dispatcher
-- ARM syscall ABI:
-  - `r7` = syscall number
-  - `r0-r6` = arguments
-  - `r0` = return value
-- Реализованы:
-  - `sys_exit`
-  - `sys_write`
-  - `sys_getpid`
-  - `sys_yield`
-- Invalid syscall → `-ENOSYS`
-- Zero Trust:
-  - validation syscall number
-  - validation fd
-  - validation user buffer range
-  - rejection of kernel pointers
-
-#### Day 44: ARM User Mode Entry
-
-- `arch/arm/arm_user_asm.S`: `arm_user_trampoline`
-- `arch/arm/arm_user_asm.S`: `arm_enter_user_first`
-- `arch/arm/arm_user_asm.S`: raw user test image `_user_test_start/_user_test_end`
-- `arch/arm/arm_user.c`: user memory setup
-- `config.h`: W^X section descriptors:
-  - `ARM_SECTION_USER_RX = 0x180E`
-  - `ARM_SECTION_USER_RWXN = 0x1C1E`
-- User code mapping:
-  - VA `0x00100000` → PA `0x00200000`
-  - user RO, executable
-- User data mapping:
-  - VA `0x00200000` → PA `0x00300000`
-  - user RW, XN
-- User CPSR cooperative:
-  - `0xD0 = USR | FIQ disabled | IRQ disabled`
-
-#### Day 45: Cooperative Scheduler Integration
-
-- `arm_main.c`: user task creation through scheduler
-- `arm_main.c`: `TASK_FREE`-aware `schedule()`
-- `arm_main.c`: task control API:
-  - `arm_current_pid()`
-  - `arm_task_yield()`
-  - `arm_task_exit()`
-- `arm_syscall.c` больше не имеет прямого доступа к `current_task` или `tasks[]`
-- `sys_yield` интегрирован с round-robin scheduler
-- `sys_exit` интегрирован с task teardown
-- PID 0 immortal guard:
-  - `arm_task_exit()` игнорирует попытку убить idle
-
-#### Критические баги Days 43-45
-
-| # | Баг | Корень | Фикс |
-|---|---|---|---|
-| B5 | `invalid constant (3e7)` | `mov r7, #999` не кодируется ARM immediate | Заменено на `mov r7, #99` |
-| B6 | `hal_irq_enable` implicit declaration | Не включён `hal/hal_cpu.h` | Добавлен include |
-| B7 | `undefined reference to current_task` | `current_task` static, прямой extern из syscall | Введён task control API |
-| B8 | `ARM_SECTION_USER_RX` redefined | Два user-memory блока в `config.h` | Оставлен единый SSOT блок |
-| B9 | Potential zombie task | `schedule()` мог вернуть `TASK_FREE` в `TASK_READY` | `schedule()` проверяет состояние |
-
-#### Результат
+## 4. Структура Проекта
 
 ```text
-User code executes in USR mode
-svc #0 syscall transport works
-sys_write prints from user buffer
-invalid syscall returns -ENOSYS
-sys_yield switches tasks
-sys_exit kills user task
-kernel remains alive
-idle remains immortal
-x86 regression: 0
-```
-### 1.10 Changelog: ARM User IRQ Preemption (Day 46, July 2026)
-
-#### Day 46: IRQ Preemption from User Mode
-
-- `include/arm_trap.h`: добавлен `struct arm_user_irq_frame`
-- `include/arm_trap.h`: добавлены offsets для user IRQ frame
-- `arch/arm/arm_vectors.S`: IRQ stub разделён на два пути:
-  - IRQ from SVC/kernel mode
-  - IRQ from USR/user mode
-- `arch/arm/arm_user_asm.S`: user CPSR изменён с `0xD0` на `ARM_CPSR_USER`
-- `arch/arm/arm_main.c`: `hal_irq_enable()` перенесён до idle loop
-- `arch/arm/arm_main.c`: ручной cooperative `schedule()` loop удалён
-
-#### User CPSR
-
-До Day 46:
-
-```text
-0xD0 = USR mode | FIQ disabled | IRQ disabled
-
-Kernel IRQ frame
-IRQ from SVC/kernel mode сохраняет прежний 64-byte frame:
-
-offset  0: r0
-offset  4: r1
-offset  8: r2
-offset 12: r3
-offset 16: r4
-offset 20: r5
-offset 24: r6
-offset 28: r7
-offset 32: r8
-offset 36: r9
-offset 40: r10
-offset 44: r11
-offset 48: r12
-offset 52: lr_svc
-offset 56: pc
-offset 60: cpsr
-
-User IRQ frame
-IRQ from USR mode сохраняет расширенный 72-byte frame:
-
-offset  0: r0
-offset  4: r1
-offset  8: r2
-offset 12: r3
-offset 16: r4
-offset 20: r5
-offset 24: r6
-offset 28: r7
-offset 32: r8
-offset 36: r9
-offset 40: r10
-offset 44: r11
-offset 48: r12
-offset 52: sp_usr
-offset 56: lr_usr
-offset 60: padding
-offset 64: pc
-offset 68: cpsr
-
-#### QEMU smoke test
-
-```bash
-make -f Makefile.arm clean
-make -f Makefile.arm run
-```
-
-#### Итого за Days 43-45
-
-| Метрика | Значение |
-|---|---|
-| Новых файлов | `arm_syscall.c`, `arm_user.c`, `arm_user_asm.S`, `arm_trap.h` |
-| Обновлённых файлов | `arm_vectors.S`, `arm_main.c`, `config.h`, `Makefile.arm` |
-| User mode | USR, cooperative |
-| Syscalls | `exit`, `write`, `getpid`, `yield` |
-| W^X | section-level enforced |
-| User tasks | 2 (`user_a`, `user_b`) |
-| Kernel crash | 0 |
-| x86 regression | 0 |
-
-### 1.11 Changelog: ARM User Fault Isolation (Day 47, July 2026)
-
-#### Day 47: User Fault Isolation
-
-- `arch/arm/arm_vectors.S`: UNDEF/PABT/DABT stubs разделены на явные user/kernel path
-- `arch/arm/arm_vectors.S`: user fault строит 72-byte frame (`SP_usr`, `LR_usr`, `PC`, `CPSR`)
-- `arch/arm/arm_vectors.S`: kernel fault строит 64-byte frame
-- `arch/arm/arm_irq.c`: добавлены `arm_user_fault_entry()` и `arm_kernel_fault_entry()`
-- `arch/arm/arm_irq.c`: kernel fault остаётся fatal dump + halt
-- `arch/arm/arm_main.c`: добавлен `arm_task_fault_kill()` (task control API, `noreturn`)
-- `arch/arm/arm_main.c`: `schedule()` получил guard против переключения в `sp == 0`
-- `arch/arm/arm_main.c`: добавлены `uart_hex()` и `fault_reason()` для диагностики
-- `include/arm_trap.h`, `config.h`, `arm_context.S`, `arm_syscall.c` не менялись
-
-#### Результат
-
-```text
-User UNDEF / PABT / DABT
-→ fault diagnostic logged (pc, cpsr, sp_usr, lr_usr)
-→ current task marked TASK_FREE
-→ scheduler switches to idle / live task
-→ kernel remains alive
-→ uptime continues
-```
-
-#### Итого за Day 47
-
-| Метрика | Значение |
-|---|---|
-| Новых файлов | 0 |
-| Обновлённых файлов | `arm_vectors.S`, `arm_irq.c`, `arm_main.c` |
-| User fault isolation | ✅ (UNDEF/DABT/PABT) |
-| Kernel fault policy | Fatal (kernel bug = halt) |
-| SVC full user frame | 🔄 Next (`ARM-LIMIT-009`) |
-| x86 regression | 0 |
----
-
-### 1.12 Changelog: ARM SVC Full User Frame (Day 48, August 2026)
-#### Day 48: SVC Full User Frame (ARM-LIMIT-009 Closed)
-- `arch/arm/arm_vectors.S`: `_svc_handler` переписан для построения полного 72-byte user frame (`SP_usr`, `LR_usr`).
-- `arch/arm/arm_vectors.S`: добавлена проверка `Zero Trust`: SVC из kernel mode теперь фатален (`arm_kernel_fault_entry`).
-- `include/arm_trap.h`: добавлен `arm_user_frame_t` (единый тип для user IRQ/Fault/SVC).
-- `arch/arm/arm_syscall.c`: `arm_syscall_entry` принимает `arm_user_frame_t*`.
-- Архитектурное улучшение: trap path для SVC, IRQ и Faults из user mode теперь полностью унифицирован.
-
-#### Результат
-```text
-User SVC (svc #0)
-→ builds 72-byte unified user frame (r0-r12, SP_usr, LR_usr, PC, CPSR)
-→ C dispatcher validates and executes
-→ restores full user context via SYS mode + rfeia
-→ Kernel-mode SVC treated as fatal kernel bug (Zero Trust)
-→ Blocking syscalls (future sleep/waitpid) now architecturally safe
-
-### 1.13 Changelog: ARM Blocking Syscalls (Day 49, August 2026)
-#### Day 49: sys_sleep Implementation
-- `arch/arm/arm_main.c`: добавлено состояние `TASK_SLEEPING` и поле `wakeup_tick`.
-- `arch/arm/arm_main.c`: `arm_task_set_sleep(ms)` вычисляет абсолютный wakeup tick и вызывает `schedule()`.
-- `arch/arm/arm_main.c`: `arm_task_check_wakeup(tick)` переводит проснувшиеся задачи в `TASK_READY`.
-- `arch/arm/arm_main.c`: `schedule()` пропускает `TASK_SLEEPING` задачи.
-- `arch/arm/arm_timer.c`: `hal_timer_tick()` вызывает `arm_task_check_wakeup()` перед `schedule()`.
-- `arch/arm/arm_syscall.c`: добавлен `SYS_sleep (230)` и `sys_sleep_handler()`.
-- `arch/arm/arm_user_asm.S`: тестовый image вызывает `sys_sleep(500)` для проверки blocking.
-
-#### Результат
-```text
-User code calls sys_sleep(500)
-→ arm_task_set_sleep() sets wakeup_tick = current + 500
-→ task state = TASK_SLEEPING
-→ schedule() skips sleeping task
-→ scheduler runs other tasks
-→ timer tick increments
-→ arm_task_check_wakeup() detects tick >= wakeup_tick
-→ task state = TASK_READY
-→ scheduler resumes sleeping task
-→ sys_sleep returns 0
-
-### 1.14 Changelog: ARM SVC IRQ Hardening (Day 50, August 2026)
-#### Day 50: ARM-LIMIT-010 Closed
-- `arch/arm/arm_vectors.S`: `_svc_handler` добавляет `cpsid i` сразу после `srsdb`.
-- `arch/arm/arm_vectors.S`: `_undef_handler`, `_pabt_handler`, `_dabt_handler` добавляют `cpsid i` сразу после `srsdb`.
-- `arch/arm/arm_main.c`: idle loop явно включает IRQ через `cpsie i` перед каждой итерацией.
-
-#### Результат
-```text
-User SVC/Fault entry
-→ srsdb saves {LR, SPSR}
-→ cpsid i disables IRQ (atomic syscall/fault path)
-→ C handler executes without timer IRQ preemption
-→ schedule() may switch tasks
-→ rfeia restores user CPSR from SPSR (IRQ re-enabled)
-→ Idle loop explicitly enables IRQ to ensure timer tick continues
-
-
-### 1.15 Changelog: ARM PMM Foundation (Day 51B, August 2026)
-
-#### Day 51B: ARM Physical Memory Manager
-
-- `include/arm_pmm.h`: новый HAL-контракт для ARM PMM
-- `arch/arm/arm_pmm.c`: bitmap-based page allocator
-- ATAGS parsing: `ATAG_MEM` для RAM discovery
-- Safe-by-default: bitmap = `0xFF` (всё занято при init)
-- O(1) allocation через software `ctz32()` (ARMv6 safe)
-- IRQ-safe: `hal_irq_save/restore` вокруг bitmap ops
-- Accounting: `pmm_allocs`, `pmm_frees`, `pmm_check_balance()`
-- Reservation API: `arm_pmm_reserve_range(start, size)`
-- Интеграция в `arm_main.c`: PMM init **ДО** `arm_user_setup()`
-- Резервирование: lower 64 KB, kernel image, user spike regions
-
-#### Результат
-
-```text
-[PMM] Initializing ARM Physical Memory Manager...
-[PMM] ATAG_MEM: size=512 MB, start=0x00000000
-[PMM] Total pages: 131072, free pages: 130816
-[PMM] Reserved 0x00000000 - 0x00010000
-[PMM] Reserved 0x00010000 - 0x00020000
-[PMM] Reserved 0x00200000 - 0x00400000
-[PMM] Accounting: allocs=0, frees=0, free_pages=130560
-[PMM] Balance OK
-
-
-## 2. СТРУКТУРА ПРОЕКТА
-
-```text
-project_root/
-├── isodir/                         # Корневая директория ISO (x86)
-│   └── boot/
-│       ├── grub/grub.cfg           # Multiboot конфигурация
-│       ├── kernel.bin              # Ядро
-│       └── initrd.tar              # RAM-диск (TAR UStar)
+Metal/
 │
-├── include/                        # Заголовочные файлы ядра
-│   ├── config.h                    # ⭐ SSOT границ памяти
-│   ├── arm_trap.h                  # ⭐ ARM trap frame layout (SVC/kernel IRQ + user IRQ)
-│   ├── gdt.h, idt.h, isr.h, pic.h, tss.h
-│   ├── pmm.h, paging.h, heap.h, vma.h, elf.h
+├── 📁 include/                          # Заголовочные файлы ядра (SSOT константы)
+│   ├── config.h                         # ⭐ Границы памяти, архитектуры, режимы CPU
+│   ├── arm_trap.h                       # ⭐ ARM trap frame layout (SVC/IRQ/Fault)
+│   ├── arm_ppm.h                        # ⭐ ARM Physical Memory Manager HAL контракт
+│   ├── arm_vmm.h                        # ⭐ ARM Virtual Memory Manager HAL контракт
+│   ├── gdt.h, idt.h, isr.h, pic.h, tss.h # x86 дескрипторы и прерывания
+│   ├── pmm.h, paging.h, heap.h, vma.h   # Управление памятью
 │   ├── task.h, vfs.h, initrd.h, tmpfs.h, devfs.h
-│   ├── ata.h, fat32.h              # Storage (Day 8.2)
+│   ├── ata.h, fat32.h                   # Storage (ATA PIO + FAT32)
 │   ├── vga.h, framebuffer.h, keyboard.h, timer.h, serial.h
 │   ├── klib.h, syscall.h, multiboot.h, port_io.h
-│   ├── kerrno.h                    # POSIX errno codes
-│   ├── univga_font.h               # PSF1 шрифт с кириллицей
+│   ├── kerrno.h                         # POSIX errno codes
+│   ├── univga_font.h                    # PSF1 шрифт с кириллицей
 │   │
-│   └── hal/                        # ⭐ HAL Contracts (compile-time)
-│       ├── hal_cpu.h               # irq_save/restore, halt, barriers
-│       ├── hal_mmu.h               # HAL_PAGE_* flags, map/switch/clone
-│       ├── hal_irq.h               # IRQ register/enable/EOI/dispatch
-│       ├── hal_timer.h             # timer_init, get_ticks/ms/us
-│       └── hal_uart.h              # uart_init, putc/getc
+│   └── 📁 hal/                          # ⭐ HAL контракты (compile-time)
+│       ├── hal_cpu.h                    # irq_save/restore, halt, barriers
+│       ├── hal_mmu.h                    # HAL_PAGE_* flags, map/switch/clone
+│       ├── hal_irq.h                    # IRQ register/enable/EOI/dispatch
+│       ├── hal_timer.h                  # timer_init, get_ticks/ms/us
+│       └── hal_uart.h                   # uart_init, putc/getc
 │
-├── arch/                           # ⭐ Architecture-Specific (HAL)
-│   └── arm/
-│       ├── arm_boot.S              # Entry, stacks, MMU, VBAR, higher half
-│       ├── arm_vectors.S           # Exception vectors (VBAR), SVC syscall entry, user/kernel IRQ stubs
-│       ├── arm_context.S           # ARM context switch (r4-r12/CPSR/LR)
-│       ├── arm_irq.c               # BCM2835 IRQ controller + dispatch
-│       ├── arm_timer.c             # BCM2835 System Timer (1 MHz, 1 kHz tick)
-│       ├── arm_uart.c              # PL011 UART (BCM2835)
-│       ├── arm_main.c              # ARM kernel_main, scheduler, user task integration
-│       ├── arm_syscall.c           # ⭐ ARM SVC syscall dispatcher (Days 43-45)
-│       ├── arm_user.c              # ⭐ User memory setup + user image copy
-│       ├── arm_user_asm.S          # ⭐ User trampoline + raw user test image
-│       └── linker_arm.ld           # LMA 0x10000, VMA 0xC0000000
+├── 📁 arch/                             # ⭐ Архитектурно-специфичный код (HAL)
+│   └── 📁 arm/                          # ARM порт (активная разработка)
+│       ├── arm_boot.S                   # Загрузка, стеки, MMU, VBAR, higher half
+│       ├── arm_vectors.S                # Вектора исключений (VBAR), SVC entry
+│       ├── arm_context.S                # Переключение контекста ARM
+│       ├── arm_user_asm.S               # User trampoline + тестовый образ
+│       ├── arm_irq.c                    # BCM2835 IRQ контроллер + dispatch
+│       ├── arm_timer.c                  # BCM2835 System Timer (1 MHz, 1 kHz tick)
+│       ├── arm_uart.c                   # PL011 UART (BCM2835)
+│       ├── arm_main.c                   # ARM kernel_main, планировщик
+│       ├── arm_syscall.c                # ⭐ ARM SVC dispatcher
+│       ├── arm_user.c                   # Настройка пользовательской памяти
+│       ├── arm_ppm.c                    # ⭐ ARM Physical Memory Manager
+│       ├── arm_vmm.c                    # ⭐ ARM Virtual Memory Manager
+│       └── linker_arm.ld                # LMA 0x10000, VMA 0xC0000000
 │
-├── boot.asm                        # Multiboot, VBE, Higher Half Trampoline (x86)
-├── linker.ld                       # LMA/VMA split (x86)
-├── kernel.c                        # kernel_main, Bootstrap (x86)
+├── boot.asm                             # Multiboot, VBE, Higher Half Trampoline (x86)
+├── linker.ld                            # LMA/VMA split (x86)
+├── kernel.c                             # kernel_main, Bootstrap (x86)
 │
-├── descriptors_flush.asm           # lgdt, lidt, ltr
-├── isr_asm.asm                     # ISR/IRQ stubs
-├── context_switch.asm              # CR3 switch, CR0.TS
-├── usermode.asm                    # IRET в Ring 3
+├── descriptors_flush.asm                # lgdt, lidt, ltr
+├── isr_asm.asm                          # ISR/IRQ stubs
+├── context_switch.asm                   # CR3 switch, CR0.TS
+├── usermode.asm                         # IRET в Ring 3
 │
-├── pmm.c, paging.c, heap.c         # Memory Management
-├── vma.c, elf.c                    # VMA + ELF Loader
-├── task.c                          # Scheduler, Supervisor Trees
-├── vfs.c, initrd.c, tmpfs.c        # VFS + RAM Disks
-├── devfs.c                         # ⭐ DevFS /dev/console
-├── gdt.c, idt.c, isr.c, pic.c      # Descriptors + Interrupts
-├── tss.c, syscall.c                # TSS + Syscalls
-├── vga.c, framebuffer.c            # Graphics
-├── keyboard.c, timer.c             # PS/2 + PIT
-├── serial.c                        # COM1 (headless debug)
-├── ata.c, fat32.c                  # ATA PIO + FAT32
-├── klib.c                          # Kernel utilities
+├── pmm.c, paging.c, heap.c              # Управление памятью (x86)
+├── vma.c, elf.c                         # VMA + ELF Loader
+├── task.c                               # Scheduler, Supervisor Trees
+├── user_task.c                          # User task integration (x86)
+├── vfs.c, initrd.c, tmpfs.c             # VFS + RAM Disks
+├── devfs.c                              # ⭐ DevFS /dev/console
+├── gdt.c, idt.c, isr.c, pic.c           # Дескрипторы + Прерывания
+├── tss.c, syscall.c                     # TSS + Системные вызовы
+├── vga.c, framebuffer.c                 # Графика
+├── keyboard.c, timer.c                  # PS/2 + PIT
+├── serial.c                             # COM1 (headless debug)
+├── ata.c, fat32.c                       # ATA PIO + FAT32
+├── klib.c                               # Внутренняя библиотека ядра
 │
-├── Makefile                        # x86 build
-├── Makefile.arm                    # ⭐ ARM build (не трогает x86)
+├── 📁 user_src/                         # ⭐ Пользовательское пространство (Ring 3)
+│   ├── user_syscalls.h                  # Обёртки системных вызовов (inline asm)
+│   ├── user_linker.ld                   # ELF linker script
+│   ├── user_libc.h                      # ⭐ Monolithic SSOT header
+│   ├── user_libc.c                      # ⭐ POSIX libc (Bump Allocator)
+│   ├── setjmp.asm                       # setjmp/longjmp (NASM)
+│   ├── crt0.asm                         # C Runtime Startup
+│   ├── init.c                           # ⭐ PID 1 (/sbin/init.elf)
+│   ├── shell_user.c                     # ⭐ Ring 3 Shell
+│   └── config.h                         # Конфигурация TinyCC
 │
-└── user_src/                       # ⭐ User Space (Ring 3)
-    ├── user_syscalls.h             # Syscall wrappers (inline asm)
-    ├── user_linker.ld              # ELF linker script
-    ├── user_libc.h                 # ⭐ Monolithic SSOT header
-    ├── user_libc.c                 # POSIX libc (Bump Allocator)
-    ├── setjmp.asm                  # setjmp/longjmp (NASM)
-    ├── crt0.asm                    # C Runtime Startup
-    ├── init.c                      # ⭐ PID 1 (/sbin/init.elf)
-    ├── shell_user.c                # ⭐ Ring 3 Shell
-    └── config.h                    # Config TinyCC
+├── 📁 initrd_src/                       # Исходники для initrd (примеры, тесты)
+│   └── 📁 examples/
+│       └── stres.c                      # Стресс-тест для компиляции внутри ОС
+│
+├── 📁 external/                         # Внешние зависимости
+│   └── 📁 tcc_src/                      # TinyCC исходники (v0.9.27)
+│       ├── tcc.c                        # Монолитный исходник
+│       └── libtcc1.c                    # 64-bit math helpers
+│
+├── 📁 build/                            # Артефакты сборки (не в git)
+│
+├── Makefile                             # x86 сборка
+├── Makefile.arm                         # ⭐ ARM сборка (не трогает x86)
+└── readme.txt                           # Этот файл
 ```
 
----
+**Ключевые принципы организации:**
 
-## 3. АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
-
-### 3.1 Single Source of Truth (SSOT)
-
-Все глобальные константы памяти определены **строго один раз** в `include/config.h`.
-Любой файл, использующий эти константы, обязан делать `#include "config.h"`.
-
-> ⚠️ **Нахождение ревью [C1]:** макросы `VIRT_TO_PHYS`/`PHYS_TO_VIRT` были перенесены
-> в `config.h`, но SSOT-документация указывала на `paging.h`.
-> **Решение:** `config.h` является единственным источником, `paging.h` делает
-> `#include "config.h"`.
+1. **`include/hal/`** — контракты аппаратной абстракции, portable kernel code включает только эти заголовки
+2. **`arch/`** — архитектурно-специфичная реализация HAL контрактов
+3. **`kernel/`** (корневые `.c` файлы) — переносимый код, не знает о конкретной архитектуре
+4. **`user_src/`** — всё пользовательское пространство, включая libc и компилятор
+5. **`initrd_src/`** — исходники тестов и примеров, компилируются внутри ОС через TinyCC
+6. **Раздельные Makefile** — x86 и ARM собираются независимо, не мешают друг другу
 
 ---
 
-### 3.2 Zero Trust Sandbox
+## 5. Двухуровневая Библиотечная Система (Two-Tier Library System)
 
-**Каждый** syscall ОБЯЗАН:
+Enclave OS использует **строгое разделение** между внутренней библиотекой ядра и пользовательской библиотекой. Это критически важно для Zero Trust Sandbox.
 
-- Валидировать номера системных вызовов
-- Проверять указатели через `is_user_pointer()`
-- Копировать строки через `copy_string_from_user()`
-- Enforce W^X (Write XOR Execute) политику
-- Возвращать стандартные errno коды
+### 5.1 Внутренняя Библиотека Ядра (`klib.c`)
 
----
+**Назначение:** Вспомогательные функции для кода ядра (Ring 0 / SVC mode)
 
-### 3.3 Two-Tier Library System
+**Доступ:**
+- Прямой доступ к kernel heap (`kmalloc`, `kfree`)
+- Прямой доступ к PMM (`pmm_alloc_page`)
+- Прямой доступ к VGA/Framebuffer
+- Прямой доступ к портам ввода-вывода
 
-| Уровень | Библиотека | Доступ |
-|---|---|---|
-| Ring 0 | `klib.c` | Прямой доступ к kernel heap, PMM, VGA/FB |
-| Ring 3 | `user_libc.c` | **Только** через syscalls |
-
-Попытка дать Ring 3 доступ к `kmalloc()` **полностью ломает** Zero Trust Sandbox.
-
----
-
-### 3.4 Dependency Inversion (DIP)
-
-Высокоуровневые подсистемы (`heap.c`, `vfs.c`) не включают заголовки низкоуровневых
-драйверов (`vga.h`). Определения цветов перенесены в `klib.h`. Подсистемы памяти не
-знают, используется ли VGA или Framebuffer (**Strategy Pattern**).
-
----
-
-### 3.5 Header Self-Sufficiency
-
-Заголовочный файл, использующий `bool`/`true`/`false`, обязан включать
-`<stdbool.h>` напрямую. `user_libc.h` использует **Monolithic Bypass** — все типы
-определяются через примитивы C и `__builtin_va_list`, без `#include <stdint.h>`.
-
----
-
-### 3.6 Double Dump Pattern
-
-Фатальные исключения выводят дамп **одновременно** в VGA/FB (локальный пользователь)
-и Serial COM1 (headless-отладка).
-
----
-
-### 3.7 Визия: "Бессмертная Крепость"
-
-| Принцип | Реализация |
-|---|---|
-| **"Let it crash"** (Erlang/OTP) | PID 1 перезапускает упавшие сервисы < 100 мс |
-| **Crash-Only Software** | Сервисы не хранят состояние в RAM |
-| **Immutable Kernel** | Код ядра Read-Only после инициализации |
-| **Zero Trust I/O** | Устройства через VFS (`/dev/console`) |
-
----
-
-### 3.8 HAL — Hardware Abstraction Layer (Compile-Time)
-
-Enclave OS поддерживает несколько архитектур через compile-time HAL.
-Один бинарник = одна архитектура. Runtime polymorphism (vtable) НЕ используется.
-
-| HAL модуль | x86 реализация | ARM реализация |
-|---|---|---|
-| `hal_cpu` | GDT, TSS, `cli/sti/hlt` | CP15, `cpsid/cpsie/wfi` |
-| `hal_mmu` | 2-level PD (CR3) | ARMv6 Translation Table (TTBR0) |
-| `hal_irq` | IDT + PIC 8259 (16 линий) | VBAR vectors + BCM2835 IRQ (72 линии: 64 GPU + 8 Basic) |
-| `hal_timer` | PIT 8254 (1193182 Hz) | BCM2835 System Timer C1 (1 MHz, 1 kHz tick) |
-| `hal_uart` | COM1 (16550A, `0x3F8`) | PL011 (MMIO `0x20201000`) |
-| `hal_mem` | E820 | ATAGS (`r2` при boot) |
-
-**Принцип:** portable kernel code (`task.c`, `vfs.c`, `heap.c`) включает ТОЛЬКО
-`hal_*.h`. Arch-specific code (`arch/x86/`, `arch/arm/`) реализует контракты.
-
-> ⚠️ **x86 НЕ рефакторится** до стабильности ARM. ARM пишется параллельно.
-
-**Syscall ABI:** Enclave номера (Frozen, §1.3).
-
-На x86:
-
-```text
-int 0x80
-eax = syscall number
-ebx/ecx/edx/esi/edi = arguments
-eax = return value
-```
-
-На ARM:
-
-```text
-svc #0
-r7 = syscall number
-r0-r6 = arguments
-r0 = return value
-```
-
-Номера syscall НЕ меняются. `user_libc.c` меняет только inline asm обёртку.
-
----
-
-## 4. КАРТА ПАМЯТИ
-
-### 4.1 Виртуальное адресное пространство (x86)
-
-```text
-0x00000000 ┌─────────────────────────────────────┐
-           │  USER SPACE (3 GB)                  │
-           │  ┌─────────────────────────────┐    │
-0x00000000 │  │ NULL Guard (4 KB)           │    │
-0x00100000 │  │ ELF Segments (.text/.data)  │    │
-           │  │ ...                         │    │
-0x10000000 │  │ User Heap (64 MB max)       │    │ ← USER_HEAP_START
-0x14000000 │  │ ...                         │    │
-           │  │ Air Gap (704 MB)            │    │
-0x40000000 │  │ mmap Region (1 GB)          │    │ ← USER_MMAP_START
-0x80000000 │  │ ...                         │    │
-           │  │ Air Gap                     │    │
-0xBFFEF000 │  │ User Stack (64 KB)          │    │ ← USER_STACK_VIRT_TOP - SIZE
-0xBFFFF000 │  │ Stack Guard (4 KB)          │    │
-0xBFFFFFFF │  └─────────────────────────────┘    │
-           ├─────────────────────────────────────┤ ← KERNEL_SPACE_START
-0xC0000000 │  KERNEL SPACE (1 GB)                │
-           │  ┌─────────────────────────────┐    │
-0xC0000000 │  │ Direct Map (512 MB)         │    │ ← KERNEL_DIRECT_MAP
-0xC8000000 │  │ Kernel Stack Pool (16 MB)   │    │ ← KERNEL_STACK_POOL_START
-0xC9000000 │  │ ...                         │    │
-0xD0000000 │  │ Kernel Heap (128 MB Lazy)   │    │ ← KERNEL_HEAP_VIRT
-0xD8000000 │  │ ...                         │    │
-0xE0000000 │  │ PCI MMIO Hole (Reserved)    │    │ ← PCI_MMIO_HOLE_START
-0xFD000000 │  │ Framebuffer (16 MB, PCD)    │    │ ← FB_VIRT_BASE
-0xFE000000 │  │ ...                         │    │
-0xFFFFFFFF │  └─────────────────────────────┘    │
-           └─────────────────────────────────────┘
-```
-
----
-
-### 4.2 SSOT константы (`config.h`)
-
-| Константа | Значение | Назначение |
-|---|---|---|
-| `USER_SPACE_START` | `0x00000000` | Начало User Space |
-| `USER_SPACE_END` | `0xBFFFFFFF` | Конец User Space |
-| `KERNEL_SPACE_START` | `0xC0000000` | Начало Kernel Space |
-| `LOWER_MEM_START/END` | `0x00000000 / 0x00100000` | Нижняя 1 MB (reserved) |
-| `PCI_MMIO_HOLE_START/END` | `0xE0000000 / 0xFFFFFFFF` | PCI MMIO |
-| `USER_STACK_VIRT_TOP` | `0xBFFFF000` | Вершина User Stack |
-| `USER_STACK_SIZE` | `64 KB` | Размер User Stack |
-| `USER_STACK_GUARD_SIZE` | `4 KB` | Guard Page |
-| `USER_HEAP_START` | `0x10000000` | Начало User Heap |
-| `USER_HEAP_MAX_SIZE` | `64 MB` | Лимит User Heap |
-| `KERNEL_HEAP_VIRT` | `0xD0000000` | Начало Kernel Heap |
-| `KERNEL_HEAP_SIZE` | `128 MB` | Виртуальный пул (Lazy) |
-| `KERNEL_STACK_POOL_START` | `0xC8000000` | Пул Kernel Stacks |
-| `KERNEL_STACK_POOL_SIZE` | `16 MB` | ~819 задач |
-| `KERNEL_STACK_SLOT_PAGES` | `5` | 1 Guard + 4 Data |
-| `FB_VIRT_BASE` | `0xFD000000` | Framebuffer |
-| `FB_SIZE_MB` | `16` | Размер FB |
-| `USER_MMAP_START` | `0x40000000` | mmap зона |
-| `USER_MMAP_MAX_SIZE` | `1 GB` | Лимит mmap |
-
----
-
-### 4.3 Макросы трансляции адресов
-
+**Примеры функций:**
 ```c
-// config.h — SSOT
-#define VIRT_TO_PHYS(addr) \
-    (((uint32_t)(addr) >= KERNEL_SPACE_START) ? \
-     ((uint32_t)(addr) - KERNEL_SPACE_START) : (uint32_t)(addr))
-
-#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_SPACE_START)
+void* kmalloc(size_t size);              // Выделение памяти ядра
+void kfree(void* ptr);                   // Освобождение памяти ядра
+void k_printf(const char* fmt, ...);     // Вывод в VGA/FB + Serial
+uint32_t pmm_alloc_page(void);           // Выделение физической страницы
+void outb(uint16_t port, uint8_t val);   // Запись в порт (x86)
 ```
 
-> ⚠️ **VIRT_TO_PHYS Underflow:** секции `.boot` имеют адреса < `0xC0000000`.
-> Макрос **обязан** содержать проверку `addr >= 0xC0000000`, иначе unsigned
-> underflow → мусор в CR3.
+**Ограничения:**
+- **НЕ ДОСТУПНА** из Ring 3 / USR mode
+- Попытка вызвать `kmalloc()` из пользовательского кода = нарушение Zero Trust
+- Пользовательский код **никогда** не включает `klib.h`
+
+### 5.2 Пользовательская Библиотека (`user_libc.c`)
+
+**Назначение:** POSIX-совместимая стандартная библиотека для Ring 3 / USR mode
+
+**Доступ:**
+- **ТОЛЬКО** через системные вызовы (`INT 0x80` / `svc #0`)
+- Никакого прямого доступа к памяти ядра
+- Никакого прямого доступа к оборудованию
+
+**Примеры функций:**
+```c
+void* malloc(size_t size);               // Через sys_brk (Bump Allocator)
+int printf(const char* fmt, ...);        // Через sys_write
+int open(const char* path, int flags);   // Через sys_open
+pid_t fork(void);                        // Через sys_fork
+```
+
+**Архитектурный контракт:**
+```text
+Пользовательский код (Ring 3 / USR)
+    ↓ вызов
+user_libc.c (POSIX обёртки)
+    ↓ inline asm
+INT 0x80 (x86) / svc #0 (ARM)
+    ↓ trap
+syscall.c (ядро, Ring 0 / SVC)
+    ↓ validation + execution
+Возврат значения через eax / r0
+```
+
+**Ключевые особенности:**
+
+1. **Monolithic Bypass:** `user_libc.h` определяет все типы через примитивы C, без `#include <stdint.h>`
+2. **Bump Allocator:** `malloc` через `sys_brk`, `free = no-op` (by design для TinyCC)
+3. **Self-Hosting:** TinyCC компилируется с этой libc, работает в Zero Trust Sandbox
+
+### 5.3 Почему Это Важно
+
+| Сценарий | Правильно | Неправильно |
+|---|---|---|
+| Ядро выделяет память | `kmalloc()` | ❌ |
+| Пользователь выделяет память | `malloc()` → `sys_brk` | ❌ `kmalloc()` |
+| Ядро пишет в VGA | `k_printf()` | ❌ |
+| Пользователь пишет в консоль | `printf()` → `sys_write` | ❌ `k_printf()` |
+
+**Нарушение этого разделения полностью ломает Zero Trust Sandbox.**
+
+Если пользовательский код получит прямой доступ к `kmalloc()`, он сможет:
+- Выделить память ядра
+- Записать туда произвольные данные
+- Получить контроль над ядром
+- Обойти все механизмы безопасности
+
+**Это не теоретическая угроза. Это фундаментальный принцип архитектуры.**
 
 ---
 
-### 4.4 ARM Memory Map (BCM2835, Raspberry Pi 1)
+## 6. ARM Активная Разработка
 
-**Physical:**
+### 6.1 Целевое Железо и QEMU
 
+**Аппаратное обеспечение:**
+- Raspberry Pi 1 Model B (BCM2835, ARM1176JZF-S)
+- Архитектура ARMv6 (нет ARMv7 UAL инструкций)
+- 256 MB или 512 MB RAM
+- PL011 UART0 для последовательной консоли
+
+**Эмуляция QEMU:**
+```bash
+qemu-system-arm -M raspi1ap -m 512M -serial stdio -kernel build/arm/kernel.img
+```
+
+**Ключевые различия:**
+- QEMU загружает ядро по адресу `0x00010000`
+- Реальный RPi1 загружает ядро по адресу `0x00008000`
+- Оба используют BCM2835 peripheral base `0x20000000`
+
+### 6.2 Контракт Загрузки
+
+**Адреса загрузки:**
+- QEMU: `PHYS_BASE = 0x00010000`
+- Реальный RPi1: `PHYS_BASE = 0x00008000` (требует параметризации)
+- Виртуальный: `KERNEL_VMA = 0xC0000000`
+
+**Последовательность загрузки:**
+1. Сохранить `r1` (machine type), `r2` (ATAGS)
+2. Войти в SVC mode, отключить IRQ/FIQ
+3. Настроить стеки для каждого режима (SVC/IRQ/FIQ/ABT/UND/SYS)
+4. Очистить BSS (физические адреса: `phys = virt - 0xC0000000`)
+5. Построить единственную TTBR0 таблицу трансляции (identity + higher half)
+6. Включить MMU (SCTLR.M = 1)
+7. Прыгнуть в higher half (`0xC0000000+`)
+8. Установить VBAR = `_vector_table` (CP15 c12)
+9. Перезагрузить SP (виртуальный адрес)
+10. Вызвать `arm_kernel_main(atags, machine_type)`
+
+**Критические ограничения:**
+- Весь код `.boot.text` выполняется по физическим адресам
+- Никаких вызовов в `.text` (VMA `0xC0000000+`) до включения MMU
+- ARMv6: использовать CP15 barriers, не UAL `isb/dsb/dmb`
+
+**CP15 Barrier Инструкции (ARMv6):**
+```text
+ISB = mcr p15, 0, r0, c7, c5, 4
+DSB = mcr p15, 0, r0, c7, c10, 4
+DMB = mcr p15, 0, r0, c7, c10, 5
+```
+
+### 6.3 Карта Памяти ARM
+
+
+
+**Физическая память:**
 ```text
 0x00000000 ┌──────────────────────┐
-           │  RAM (512 MB QEMU)   │
-0x00010000 │  ← kernel.img load   │  (QEMU raspi1ap)
-0x00008000 │  ← kernel.img load   │  (реальный RPi1)
+           │  RAM (512 MB)        │
+0x00010000 │  ← kernel.img load   │  (QEMU)
+0x00008000 │  ← kernel.img load   │  (RPi1)
 0x20000000 ├──────────────────────┤
            │  Peripherals (16 MB) │
-           │  0x20003000: System Timer (1 MHz)
-           │  0x2000B000: ARM Timer
-           │  0x2000B200: Interrupt Controller
+           │  0x20003000: System Timer
+           │  0x2000B200: IRQ Controller
            │  0x20200000: GPIO
            │  0x20201000: UART0 (PL011)
 0x20FFFFFF └──────────────────────┘
 ```
 
-**Virtual (после MMU, один TTBR0):**
-
+**Виртуальная память (текущий spike - одна TTBR0):**
 ```text
-TTBR0 (4096 entries × 4B = 16 KB):
-  [0-255]     0x00000000 → 0x00000000  RAM (256 MB, identity)
-  [512-527]   0x20000000 → 0x20000000  Peripherals (16 MB, Device)
-  [3072-3327] 0xC0000000 → 0x00000000  Higher Half RAM (256 MB)
-  [3584-3599] 0xE0000000 → 0x20000000  Higher Half Peripherals
+TTBR0 (4096 записей × 4B = 16 KB, 16KB aligned):
+[0-255]     0x00000000 → 0x00000000  RAM (256 MB, identity)
+[512-527]   0x20000000 → 0x20000000  Peripherals (16 MB, Device)
+[3072-3327] 0xC0000000 → 0x00000000  Higher Half RAM (256 MB)
+[3584-3599] 0xE0000000 → 0x20000000  Higher Half Peripherals
 ```
 
-> ⚠️ **TTBR1:** планировался TTBR0/TTBR1 split (Linux/seL4 стандарт),
-> но QEMU raspi1ap даёт Prefetch Abort при TTBR1 N=2.
-> Spike использует один TTBR0. TTBR0/TTBR1 split — в `arm_mmu.c` (Фаза 2).
-
-> ⚠️ **VBAR:** exception vectors находятся в `.text` (kernel virtual address).
-> VBAR устанавливается в `arm_boot.S` (`_higher_half_entry`) ДО включения IRQ.
-> Не используется `0xFFFF0000` (high vectors) — нет необходимости маппить
-> дополнительную 1 MB section. VBAR = адрес `_vector_table` в `.text`.
-
-> ⚠️ **BCM2835 MMIO:** `config.h` определяет физические адреса (`0x20000000+`).
-> Макрос `BCM2835_VIRT(reg)` транслирует в kernel virtual (`0xE0000000+`).
-> Сейчас (spike): identity mapping активен, используются физические адреса.
-> Позже (HH-only): заменить на `BCM2835_VIRT()` во всех ARM-файлах.
-
-**ARM Section Descriptor (1 MB page):**
-
+**Дескрипторы секций (1 MB страницы):**
 ```text
 RAM:    PA | 0x140E  (TEX=001, C=1, B=1, AP=01, Section)
 Device: PA | 0x416   (XN=1, B=1, AP=01, Section)
+
+User Code: PA | 0x180E (AP=10: kernel RW, user RO, executable)
+User Data: PA | 0x1C1E (AP=11: kernel RW, user RW, XN)
 ```
 
-**User Mode Spike Mapping (Days 43-45):**
-
+**Spike маппинг пользовательского режима (временный):**
 ```text
-TTBR0 temporary user sections:
+User code:  VA 0x00100000 → PA 0x00200000  (1 MB, user RO, executable)
+User data:  VA 0x00200000 → PA 0x00300000  (1 MB, user RW, XN)
 
-[1]   0x00100000 → 0x00200000   User code   (1 MB, user RO, executable)
-[2]   0x00200000 → 0x00300000   User data   (1 MB, user RW, XN)
+Stack A: 0x00280000 (внутри user data section)
+Stack B: 0x002C0000 (внутри user data section)
 ```
 
-Section descriptors:
+**Будущее (4 KB страницы):**
+- L1 coarse tables + L2 small pages
+- Per-process TTBR0 switching
+- Полноценный VMM с demand paging
+- Page-level W^X принуждение
 
+### 6.4 Модель Исключений
+
+**Таблица векторов (VBAR-based):**
+- 8 ARM исключений (не 256 как x86 IDT)
+- VBAR = адрес `_vector_table` в `.text`
+- Нет high vectors (`0xFFFF0000`) - ненужная 1 MB секция
+
+**Типы исключений:**
+- **SVC** (Supervisor Call): вход в системный вызов из user mode
+- **IRQ**: аппаратное прерывание, preemptive планировщик
+- **DAbort**: data abort (page fault, нарушение прав)
+- **PAbort**: prefetch abort (ошибка загрузки инструкции)
+- **UNDEF**: неопределённая инструкция
+
+**Политика нулевого доверия:**
+- Ошибка пользователя → убить задачу, ядро продолжает работу
+- Ошибка ядра → фатальный дамп + halt (баг ядра)
+- SVC из kernel mode → фатально (нарушение Zero Trust)
+
+**User IRQ Frame (72 байта):**
 ```text
-User code:  PA | 0x180E
-            Section | TEX=001 | C=1 | B=1 | AP=10 | XN=0
-            AP=10: privileged RW, user RO
-
-User data:  PA | 0x1C1E
-            Section | TEX=001 | C=1 | B=1 | AP=11 | XN=1
-            AP=11: privileged RW, user RW
+IRQ из USR mode сохраняет:
+  r0-r12, SP_usr, LR_usr, padding, PC, CPSR
 ```
 
-W^X:
-
+**Kernel IRQ Frame (64 байта):**
 ```text
-user code = R/X, no W
-user data = R/W, no X
+IRQ из SVC mode сохраняет:
+  r0-r12, lr_svc, pc, cpsr
 ```
 
-User stacks:
+**Изоляция ошибок (реализовано):**
+- Определить прерванный режим через `SPSR & 0x1F`
+- Ошибка пользователя → построить 72-byte frame → `arm_task_fault_kill()` → `TASK_FREE`
+- Ошибка ядра → фатальный дамп + halt
+- Путь обработки ошибки никогда не возвращается к упавшей задаче
 
+### 6.5 ABI Системных Вызовов
+
+**Транспорт:**
 ```text
-user_a stack top = 0x00280000
-user_b stack top = 0x002C0000
+svc #0
+r7 = номер системного вызова
+r0-r6 = аргументы
+r0 = возвращаемое значение
 ```
 
-Обе стековые вершины находятся внутри user data section.
+**Номера системных вызовов:** Заморожены (те же, что и в Enclave x86 ABI)
 
----
+**Валидация нулевого доверия:**
+- Проверить диапазон номера системного вызова
+- Проверить указатели пользовательских буферов (`is_user_pointer()`)
+- Отклонить указатели ядра (`addr >= 0xC0000000`)
+- Принудительно соблюдать W^X права
 
-## 5. ПОДСИСТЕМЫ ЯДРА
+**Реализованные системные вызовы:**
+- `sys_exit` (1): завершить задачу
+- `sys_write` (4): записать в fd
+- `sys_getpid` (122): получить текущий PID
+- `sys_yield` (158): добровольная передача CPU
+- `sys_sleep` (230): блокирующий сон (миллисекунды)
 
-### 5.1 Загрузчик и инициализация
-
-#### `boot.asm` — Multiboot + Higher Half Trampoline (x86)
-
-- Multiboot Header: magic `0x1BADB002`, flags `0x3` (`PAGE_ALIGN | MEM_INFO`)
-- Bochs VBE инициализация (1024×768×32bpp) через порты `0x01CE/0x01CF`
-- **Раздельные Page Tables:** `boot_page_tables` (Identity Map) +
-  `boot_page_tables_hh` (Higher Half Map)
-- Framebuffer `0xFD000000` с флагом `PAGE_PCD` (Cache Disable)
-- Сохранение `eax`/`ebx` в `.boot.data` (защита от уязвимостей стека)
-- **Defensive Handover:** `call kernel_main` (не `jmp`) → `.halt_loop` при случайном return
-- **Virtual Stack Switch:** `mov esp, stack_top` после включения CR0.PG
-
-#### `linker.ld` — LMA/VMA Split (x86)
-
-- Физическая загрузка: `0x00100000` (1 MB)
-- `_boot_start`, `_kernel_start`, `_kernel_end` экспортированы для PMM
-- `AT(ADDR(...) - 0xC0000000)` для корректной LMA
-- `. += 0xC0000000` для перехода в Higher Half
-
-#### `kernel.c` — Bootstrap Sequence (x86)
-
-**Строгая последовательность (нарушение → Triple Fault):**
-
-| Шаг | Функция | Назначение |
-|---|---|---|
-| 1 | `serial_init()` | Headless debug |
-| 2 | Multiboot magic check | `0x2BADB002` |
-| 3 | `fb_init()` | Временный (физический LFB) |
-| 4 | `gdt_install()` | Flat Model + TSS |
-| 5 | `idt_install()` | 256 векторов |
-| 6 | `tss_install()` | Load TR |
-| 7 | `syscall_init()` | INT 0x80 |
-| 8 | `pmm_init()` | Two-Pass E820 + Reserve Modules |
-| 9 | `paging_init()` | Direct Map, Page Fault Handler |
-| 10 | `fb_init()` | Resurrect (виртуальный `0xFD000000`) |
-| 11 | `heap_init()` | Buddy System (Lazy) |
-| 12 | `ata_init()` + `fat32_init()` | Storage |
-| 13 | `vfs_init()` + `devfs_init()` + `initrd_init()` | VFS + DevFS + Initrd |
-| 14 | `tmpfs_init()` | Writable RAM Disk |
-| 15 | `tasking_init()` | Main Task (PID 0), FPU setup |
-| 16 | `keyboard_install()` + `timer_init(1000)` | IRQ |
-| 17 | **Launch PID 1** (`/sbin/init.elf`) | Ring 3 Init |
-| 18 | **Kernel Idle Loop** | `sti; hlt; cli` |
-
----
-
-#### ARM Boot Sequence (`arch/arm/arm_boot.S`)
-
-**Строгая последовательность (нарушение → Prefetch Abort loop):**
-
-| Шаг | Действие | Назначение |
-|---|---|---|
-| 1 | Сохранить `r1` (machine), `r2` (ATAGS) | Boot params |
-| 2 | `cpsid if, #0x13` | SVC mode, IRQ/FIQ off |
-| 3 | Invalidate caches + TLB | Clean state |
-| 4 | Disable MMU/caches (SCTLR) | Clean boot |
-| 5 | Setup stacks (SVC/IRQ/FIQ/ABT/UND/SYS) | Mode-specific SP |
-| 6 | Clear BSS (`phys = VMA - 0xC0000000`) | Zero `.bss` |
-| 7 | Build TTBR0 (identity + higher half) | Page tables |
-| 8 | Set TTBR0, DACR (Domain 0 = Manager) | MMU config |
-| 9 | Enable MMU (SCTLR.M = 1) | MMU ON |
-| 10 | `ldr pc, =_higher_half_entry` | Jump to `0xC0000000+` |
-| 11 | Set VBAR = `_vector_table` (CP15 c12) | Exception vectors in `.text` |
-| 12 | ISB (CP15 `c7,c5,4`) | Ensure VBAR write completes |
-| 13 | Reload SP (virtual address) | SVC stack in HH |
-| 14 | `bl arm_kernel_main(atags, machine)` | C kernel |
-
-> ⚠️ **ARMv6: НЕТ инструкций `isb/dsb/dmb` (UAL, ARMv7+).**
->
-> Используем CP15:
->
-> ```text
-> ISB = mcr p15, 0, r0, c7, c5, 4
-> DSB = mcr p15, 0, r0, c7, c10, 4
-> DMB = mcr p15, 0, r0, c7, c10, 5
-> ```
-
-> ⚠️ **QEMU raspi1ap:** kernel load address = `0x10000` (не `0x8000`).
-> `PHYS_BASE` в `linker_arm.ld = 0x00010000`.
-
-> ⚠️ **Linker script:** VMA = LMA + KERNEL_VMA для КАЖДОЙ секции.
-> Формула: `AT(ADDR(.section) - KERNEL_VMA)`.
-
----
-
-#### ARM IRQ + Timer Sequence (Days 38-40)
-
-Последовательность инициализации прерываний (`arm_main.c`):
-
-| Шаг | Действие | Назначение |
-|---|---|---|
-| 1 | `hal_uart_init(115200)` | PL011 UART (polling) |
-| 2 | `hal_irq_init()` | BCM2835: disable all lines, clear FIQ routing |
-| 3 | `hal_timer_init(1000)` | System Timer C1, 1 kHz, register handler, enable line 1 |
-| 4 | `hal_irq_enable()` | `cpsie i` — global IRQ enable |
-| 5 | Uptime loop (busy-wait) | `hal_timer_get_ticks()`, print every 1000 ticks |
-
-IRQ dispatch chain:
-
+**Последовательность входа в системный вызов:**
 ```text
-Timer match (CLO == C1)
-→ BCM2835 PEND1 bit 1
-→ CPU IRQ exception (VBAR + 0x18)
-→ b _irq_handler (arm_vectors.S)
-→ sub lr, lr, #4 / srsdb / cps #0x13 / push {r0-r12, lr}
-→ bl arm_irq_entry (arm_irq.c)
-→ read PEND1/PEND2/BASIC → ctz32() → hal_irq_dispatch()
-→ timer_irq_handler (arm_timer.c)
-→ clear CS bit 1, set next C1, tick_count++
-→ pop {r0-r12, lr} / rfeia sp!
-→ return to interrupted code
-```
-
-> ⚠️ **ARM1176 (ARMv6): ЗАПРЕЩЕНО использовать `__builtin_ctz` / `__builtin_clz`.**
-> GCC может сгенерировать `rbit` (ARMv7-only) → Undefined Instruction.
-> Использовать software `ctz32()` (`arm_irq.c`).
-
-> ⚠️ **AAPCS Stack Alignment:** перед любой `bl` из ассемблера SP mod 8 MUST == 0.
->
-> ```text
-> SRS (8 bytes) + push {r0-r12, lr} (56 bytes) = 64 → 64 mod 8 = 0 ✅
-> push {r0-r12} (52 bytes) → 52 mod 8 = 4 → НАРУШЕНИЕ ❌
-> ```
->
-> Всегда `push {r0-r12, lr}` (14 регистров), НЕ `push {r0-r12}` (13).
-
-> ⚠️ **WFI на ARM1176/QEMU:** не просыпается по System Timer IRQ.
-> `hal_cpu_idle()` использует NOP sled (`cpsie i / nop×4 / cpsid i`).
-> Для production (Cortex-A) — заменить на WFI.
-
----
-
-#### ARM SVC + User Mode Sequence (Days 43-45)
-
-Последовательность user-mode spike (`arm_main.c`):
-
-| Шаг | Действие | Назначение |
-|---|---|---|
-| 1 | `hal_uart_init(115200)` | PL011 UART |
-| 2 | `hal_irq_init()` | BCM2835 IRQ controller |
-| 3 | `hal_timer_init(1000)` | System Timer C1, 1 kHz |
-| 4 | `arm_user_setup()` | Map user sections, copy user image |
-| 5 | Create PID 0 idle | Boot SVC stack |
-| 6 | Create PID 1 `user_a` | Kernel stack + user PC/SP |
-| 7 | Create PID 2 `user_b` | Kernel stack + user PC/SP |
-
-User task first-time entry:
-
-```text
-arm_context_switch()
-→ pop forged kernel context
-→ bx arm_user_trampoline
-→ set SP_usr
-→ set SPSR = ARM_CPSR_USER (0x50: USR | FIQ disabled | IRQ enabled)
-→ clear r0-r12
-→ movs pc, lr
-→ user code at 0x00100000
-```
-
-Syscall path:
-
-```text
-user code: svc #0
-→ CPU enters SVC mode
+Пользователь: svc #0
+→ CPU входит в SVC mode
 → VBAR + 0x08 (_svc_handler)
-→ srsdb sp!, #0x13
+→ srsdb sp!, #0x13 (сохранить LR_svc, SPSR)
+→ cpsid i (отключить IRQ, атомарный путь syscall)
 → push {r0-r12, lr}
 → bl arm_syscall_entry
-→ validate syscall number
-→ validate user buffer
-→ execute handler
-→ frame->r0 = return value
+→ валидация + выполнение
+→ frame->r0 = возвращаемое значение
 → pop {r0-r12, lr}
-→ rfeia sp!
-→ return to USR mode
+→ rfeia sp! (восстановить user CPSR, включить IRQ)
+→ возврат в USR mode
 ```
 
-> ⚠️ **Current user mode is preemptive (Day 46).**
->
-> User CPSR:
->
-> ```text
-> 0x50 = USR mode | FIQ disabled | IRQ enabled
-> ```
->
-> Timer IRQ может прервать user code напрямую.
-> IRQ stub сохраняет полный user trap frame (72 bytes), вызывает scheduler,
-> затем восстанавливает user context через `rfeia`.
->
-> ⚠️ **User Fault Isolation implemented (Day 47).**
->
-> User Data Abort / Prefetch Abort / Undefined Instruction больше не роняют ядро.
-> Ассемблерные stub'ы определяют прерванный режим через `SPSR & 0x1F`.
-> Если исключение произошло из USR mode, строится 72-byte user fault frame,
-> вызывается `arm_task_fault_kill()`, задача помечается `TASK_FREE`,
-> scheduler переключается на другую задачу. Ядро остаётся живым.
->
-> Если исключение произошло из SVC/kernel mode, это трактуется как kernel bug
-> и приводит к fatal dump + halt.
+### 6.6 Планировщик и Модель Задач
 
----
+**Состояния задач:**
+```text
+TASK_FREE → TASK_READY → TASK_RUNNING → TASK_SLEEPING
+                                              ↓
+TASK_DEAD ← TASK_ZOMBIE ←─────────────────────┘
+```
 
-### 5.2 Управление памятью
+**Планирование:**
+- Round-robin, preemptive
+- Квант: 10 ms (10 timer ticks при 1 kHz)
+- Таймер: BCM2835 System Timer C1, 1 MHz base, 1 kHz tick
 
-#### `pmm.c` — Physical Memory Manager
+**Архитектура PID:**
+- **PID 0**: Kernel idle (бессмертный, SVC mode)
+- **PID 1+**: Пользовательские задачи (USR mode, preemptive)
 
-| Фича | Описание |
-|---|---|
-| **Safe by Default** | Вся память изначально занята (bitmap = `0xFF`) |
-| **Two-Pass E820** | Pass 1: `max_addr` → `pmm_max_page`. Pass 2: освобождение |
-| **Dynamic Sizing** | `pmm_max_page` ограничивает сканирование реальной RAM |
-| **Punching Holes** | Lower 1 MB, Kernel Image, Multiboot Info, Modules, PCI MMIO |
-| **O(1) Allocation** | `__builtin_ctz` (BSF/TZCNT) |
-| **IRQ Safety** | `cli/sti` вокруг всех операций с bitmap |
-| **Reference Counting** | `pmm_refcounts[]` для Copy-on-Write |
-| **Accounting** | `pmm_total_allocs/frees`, `pmm_check_balance()` |
-
-#### `paging.c` — Virtual Memory Manager
-
-| Фича | Описание |
-|---|---|
-| **Direct Map** | 512 MB → `0xC0000000+` |
-| **On-Demand Paging** | Page Fault (INT 14) выделяет страницы по запросу |
-| **CoW Page Fault** | `PAGE_COW` → личная копия при записи |
-| **Kernel Heap Isolation** | `0xD0000000` без `PAGE_USER` |
-| **Kernel Stack Pool** | Guard Pages (Day 16) |
-| **Deep Destroy** | `vmm_destroy_address_space()` освобождает PTE + PT + PD |
-| **Strict CoW Teardown** | `pmm_dec_ref()` → free только при refcount == 0 (Day 24) |
-| **PAGE_PS Check** | Защита от 4 MB регионов |
-| **CoW-safe mprotect** | `vmm_protect_page_in_pd` сохраняет `PAGE_COW + PWT/PCD/GLOBAL` (Day 31, S1 fix) |
-
-**Paranoid Page Fault Handler (Zero Trust):**
-
-1. NULL Pointer Guard (< `0x1000` → SIGSEGV)
-2. Kernel Space Protection (Ring 3 → Kernel → SIGSEGV)
-3. Kernel Stack Overflow Guard (Guard Page → SIGSEGV)
-4. Kernel Heap Demand Paging (`0xD0000000`, no `PAGE_USER`)
-5. Ring 0 → User Space Demand Paging (Stack Forging)
-6. CoW Interception (`PAGE_COW` → copy page)
-7. User Space Demand Paging (VMA check)
-8. W^X Enforcement (write to Read-Only → SIGSEGV)
-9. OOM Trap (`pmm_alloc_page == 0` → `task_kill_current`)
-
-#### `heap.c` — Kernel Heap (Buddy System)
-
-| Фича | Описание |
-|---|---|
-| **Buddy System** | Неявное бинарное дерево, O(1) Merge через XOR |
-| **Zero-Cost Lazy Heap** | Виртуальный пул 128 MB, физические страницы по Page Fault |
-| **BlockHeader** | magic `0xDEADBEEF` для детекта double-free |
-| **Bounds Checking** | `kfree()` проверяет диапазон |
-| **IRQ Safety** | `cli/sti` вокруг операций с деревом |
-| **Accounting** | `heap_total_allocs/frees`, `heap_check_balance()` |
-
-#### `vma.c` — Virtual Memory Areas
-
-- Сортированный связный список VMA для каждого процесса
-- `vma_add()` — добавление с автоматической сортировкой
-- `vma_find()` — линейный поиск по адресу
-- `vma_clone()` — глубокое клонирование (`sys_fork`)
-- `vma_intersects()` — Collision Detection
-- `vma_find_free_area()` — поиск "дырок" для mmap
-- `vma_unmap_range()` — Split VMA при munmap
-- `vma_destroy_all()` — очистка (Reaper)
-- `vma_protect_range()` — Split VMA при mprotect (Day 31, S1 fix), сохраняет `VMA_COW`
-
----
-
-### 5.3 Файловая система
-
-#### `vfs.c` — Virtual File System
-
-| Фича | Описание |
-|---|---|
-| **Полиморфизм** | `vfs_node_t` с function pointers (`read`, `write`, `readdir`, `create`, `unlink`, `open`) |
-| **LCRS Tree** | Left-Child Right-Sibling для каталогов |
-| **3-звенная модель FD** | `vfs_node_t` (Inode) → `open_file_t` (offset, ref_count) → `fd_table` |
-| **RBAC** | Флаг `FS_SYSTEM` — Ring 3 получает `EACCES` |
-| **True Mountpoints** | `FS_MOUNTPOINT` → "телепортация" к `mountpoint_node` |
-| **MAX_MOUNT_HOPS** | 16 (защита от Kernel Stack Overflow) |
-| **Orphan Nodes** | POSIX unlink semantics (`is_unlinked + ref_count`) |
-
-#### `initrd.c` — RAM Disk (TAR UStar)
-
-- Парсинг TAR UStar из GRUB Module
-- **Robust Magic Search:** сканирование первых 8 KB
-- **Binary Magic Comparison:** `k_memcmp` (не `strncmp`)
-- **TAR Padding Tolerance:** защита от padding GRUB
-- **Prefix + Name:** UStar 256-байтные пути
-- **FS_SYSTEM для /boot:** RBAC наследование
-
-#### `tmpfs.c` — Writable RAM Disk
-
-| Фича | Описание |
-|---|---|
-| **Dynamic Growth** | `capacity *= 2` (< 1 MB) или `+25%` (> 1 MB) |
-| **OOM Protection** | `TMPFS_MAX_FILE_SIZE = 25 MB` |
-| **O_TRUNC** | Обнуление size, сохранение capacity |
-| **Sparse Files** | Заполнение "дырок" нулями |
-| **Size Synchronization** | `node->size = new_size` после write |
-| **Atomic Commit** | `kmalloc private_data` до link в дерево |
-| **True Mountpoint** | `vfs_mount("/tmp", tmpfs_root)` |
-| **mkdir Support** | `tmpfs_create` с `S_IFDIR` → `FS_DIRECTORY` + callbacks (Day 31) |
-| **ENOTEMPTY Guard** | `tmpfs_unlink` отвергает удаление непустых директорий (Day 31) |
-
-#### `devfs.c` — Device File System
-
-| Фича | Описание |
-|---|---|
-| **`/dev/console`** | Полиморфная VFS-нода для клавиатуры + экрана |
-| **Exclusive Access** | `console_open_count` (только PID 1) |
-| **ANSI State Machine** | CSI parsing (SGR, CUP, ED) |
-| **RAW MODE** | Line Discipline в Ring 3 (Shell) |
-| **Private Mode** | `\033[?25h/l` безопасно игнорируются |
-| **Double Dump** | `serial_putc + k_putchar` |
-
-#### `ata.c` + `fat32.c` — Storage
-
-- **ATA PIO Driver:** порты `0x1F0-0x1F7`, LBA28, Polling Mode
-- **IDENTIFY Command:** модель, сериал, firmware, LBA capacity
-- **ATAPI Detection:** `LBA_MID/LBA_HI`
-- **MBR Parser:** 4 записи, сигнатура `0xAA55`
-- **FAT32 Read-Only:** BPB, Cluster Chain, FAT Caching
-- **VFAT (LFN):** UCS-2 → UTF-8, кириллица, checksum verification
-
----
-
-### 5.4 Графика и вывод
-
-#### `framebuffer.c`
-
-| Фича | Описание |
-|---|---|
-| **Double Buffering** | `back_buffer` в Kernel Heap (3 MB) |
-| **Dirty Rectangles** | `fb_flush()` копирует только изменённый бокс |
-| **PSF1 Unicode** | UCS-2 tables, UTF-8 State Machine |
-| **Fallback Font** | 8×16 ASCII (32-126) |
-| **rep movsl / rep stosl** | Аппаратное копирование/заполнение |
-
-#### `klib.c` — Strategy Pattern
-
+**API управления задачами:**
 ```c
-static void output_char(char c) {
-    if (fb_is_available())
-        fb_putc(c);
-    else
-        vga_putc(c);
-}
+arm_current_pid()      // получить текущий PID
+arm_task_yield()       // добровольное переключение контекста
+arm_task_exit()        // завершить (PID 0 immortal guard)
+arm_task_fault_kill()  // пометить TASK_FREE после ошибки
 ```
 
-- `k_set_color()` — VGA → RGB mapping (16 цветов)
-- `k_printf()` — C99 compliant formatter
-- `k_set_cursor()` — Strategy Pattern (FB/VGA)
-
----
-
-### 5.5 Прерывания и железо (x86)
-
-| Файл | Назначение |
-|---|---|
-| `gdt.c` | Flat Model (4 GB), Ring 0/3, TSS Descriptor |
-| `idt.c` | 256 векторов, **EOI Lock Bypass** |
-| `isr.c` + `isr_asm.asm` | ISR/IRQ stubs, `pusha`, segment swap |
-| `pic.c` | PIC Remap (ICW1-ICW4), `irq_set_mask` |
-| `tss.c` | ESP0 для Ring 3 → Ring 0 переходов |
-| `timer.c` | PIT 1000 Hz, квант = 10 тиков (50 Hz) |
-| `keyboard.c` | PS/2 IRQ1, Ring Buffer 256, ANSI escape для стрелок |
-| `serial.c` | COM1 (headless debug) |
-
-**IRQ Save/Restore Primitive:**
-
+**User CPSR:**
 ```text
-irq_save()    → сохраняет EFLAGS и выполняет cli
-irq_restore() → восстанавливает EFLAGS
+ARM_CPSR_USER = 0x50
+  USR mode | FIQ disabled | IRQ enabled
 ```
 
-Все критические секции должны использовать `irq_save()/irq_restore()` вместо
-безусловных `cli/sti`. Безусловные `cli/sti` допустимы только для явного управления
-прерываниями: idle wait, fatal loops, task trampoline.
+Timer IRQ может прерывать пользовательский код напрямую. IRQ stub сохраняет полный user trap frame, вызывает планировщик, восстанавливает контекст через `rfeia`.
 
-> ⚠️ **EOI Lock Bypass:** `outb(0x20, 0x20)` отправляется в PIC **ДО** вызова
-> C-обработчика. Иначе `schedule()` переключит задачу, и линия IRQ заблокируется
-> навсегда.
+**Блокирующие системные вызовы:**
+- Состояние `TASK_SLEEPING` с полем `wakeup_tick`
+- Timer tick проверяет `wakeup_tick`, переводит в `TASK_READY`
+- Планировщик пропускает спящие задачи
 
+### 6.7 Менеджер Физической Памяти (ARM PPM)
 
----
+**Статус:** Фундамент завершён (Day 51B)
 
-## 6. МНОГОЗАДАЧНОСТЬ И ПРОЦЕССНАЯ МОДЕЛЬ
+**Реализация:**
+- Bitmap-based page allocator
+- ATAGS parsing для обнаружения RAM (`ATAG_MEM`)
+- Safe-by-default: bitmap = `0xFF` (всё занято при init)
+- O(1) выделение через software `ctz32()` (ARMv6 safe)
+- IRQ-safe: `hal_irq_save/restore` вокруг bitmap операций
+- Учёт: `pmm_allocs`, `pmm_frees`, `pmm_check_balance()`
 
-### 6.1 PID Architecture
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│  PID 0: Kernel Idle (Ring 0)                                │
-│  • Бессмертный Ring 0 поток                                 │
-│  • Единственная задача: sti; hlt; cli                       │
-│  • Никогда не падает из-за багов в Ring 3                   │
-├─────────────────────────────────────────────────────────────┤
-│  PID 1: /sbin/init.elf (Ring 3)                             │
-│  • Launcher + Supervisor                                    │
-│  • Запускает Shell через fork + exec                        │
-│  • Respawn при падении Shell (< 100 мс)                     │
-│  • Orphan Adoption (усыновление сирот)                      │
-│  • Если PID 1 падает → Reaper перезапускает из VFS          │
-├─────────────────────────────────────────────────────────────┤
-│  PID 2+: /bin/shell.elf, /bin/tcc.elf, ... (Ring 3)         │
-│  • Zero Trust Sandbox                                       │
-│  • Только через syscalls                                    │
-│  • Crash-Only (Init перезапустит)                           │
-└─────────────────────────────────────────────────────────────┘
+**API резервирования:**
+```c
+arm_pmm_reserve_range(start, size)
 ```
 
-### Init Respawn Model
+**Текущие резервирования:**
+- Нижние 64 KB
+- Образ ядра
+- User spike регионы (временные)
 
-Init — это Ring 3 watchdog для Shell.
+**Интеграция:**
+- PMM init **ДО** `arm_user_setup()`
+- Гарантирует, что пользовательская память comes from managed pool
 
-Kernel отвечает только за respawn PID 1:
+### 6.8 Чеклист Запуска на Железе
 
-```text
-PID 1 dies → Reaper → load /sbin/init.elf → new PID 1
-```
+**Критично для первого запуска на реальном железе:**
 
-Init отвечает за respawn Shell:
+1. **Linker Script:**
+   - `PHYS_BASE = 0x8000` (реальный RPi1) или параметризовать
+   - Текущий: `0x10000` (только QEMU)
 
-```text
-Shell dies → init waitpid → fork/exec /bin/shell.elf
-```
+2. **Подготовка SD карты:**
+   ```text
+   config.txt:
+     core_freq=250
+     enable_uart=1
+   
+   Файлы:
+     kernel.img (не kernel7.img)
+     bootcode.bin
+     start.elf
+     fixup.dat
+   ```
 
-Если Init умирает, его прямой ребёнок Shell убивается через
-`monitor_children = 1`, чтобы новый Init мог чисто перезапустить
-Shell и заново открыть `/dev/console`.
+3. **Подключение UART:**
+   - 3.3V USB-UART адаптер
+   - TX ↔ RX cross-connect
+   - Общий GND
 
----
+4. **Терминал на хосте:**
+   ```bash
+   picocom -b 115200 /dev/ttyUSB0
+   ```
 
-### 6.2 `task.c` — Scheduler + Supervisor Trees
+**Что требует исправления:**
+- `linker_arm.ld`: параметризация `PHYS_BASE`
+- Скорость UART: зависит от `core_freq=250` в `config.txt`
 
-| Фича | Описание |
-|---|---|
-| **PCB (`task_t`)** | PID, State, ESP, CR3, FD Table, VMA List, FPU State (512 B), Process Tree |
-| **Round-Robin** | Кольцевой двусвязный список, квант 10 мс |
-| **Lazy FPU** | CR0.TS → `#NM` (INT 7) → `fxsave/fxrstor` |
-| **Reaper Queue** | `dead_tasks_head + reaper_next` |
-| **Zombie State Machine** | `TASK_ZOMBIE → waitpid → TASK_DEAD → Reaper` |
-| **Orphan Adoption** | Unix-style (`orphan_on_exit=1`) + Erlang-style (`monitor_children=1`) |
-| **Kernel Stack Pool** | 16 KB + Guard Page (Day 16) |
-| **Init Respawn** | Reaper перезапускает PID 1 из VFS (Day 24) |
+### 6.9 Критические Правила ARM
 
----
+**Ограничения ARMv6:**
+- **Нет UAL инструкций:** ARMv6 не имеет `isb/dsb/dmb`. Использовать CP15 barriers.
+- **Нет аппаратного деления:** ARM1176 генерирует `__aeabi_uidiv`. Использовать libgcc или захардкоженные константы.
+- **Нет `__builtin_ctz`:** GCC может выдать ARMv7 `rbit`. Использовать software `ctz32()`.
 
-### 6.3 Состояния задач
+**AAPCS Stack Alignment:**
+- SP mod 8 ДОЛЖЕН БЫТЬ == 0 перед любой `bl` инструкцией
+- Всегда push чётное количество регистров (например, `{r0-r12, lr}` = 14 regs = 56 bytes)
+- Никогда не push `{r0-r12}` отдельно (13 regs = 52 bytes, нарушает alignment)
 
-```text
-TASK_READY ──→ TASK_RUNNING ──→ TASK_SLEEPING
-    ↑               │               │
-    │               ▼               │
-    └────────── TASK_ZOMBIE ←───────┘
-                    │
-                    ▼ (waitpid)
-               TASK_DEAD ──→ Reaper Queue ──→ Freed
-```
+**MMU и память:**
+- **VMA/LMA relationship:** Каждая секция должна использовать `AT(ADDR(.section) - KERNEL_VMA)`
+- **VIRT_TO_PHYS underflow:** Проверять `addr >= 0xC0000000` перед вычитанием
+- **TTBR1 не используется:** QEMU raspi1ap даёт Prefetch Abort с TTBR1 N=2. Использовать одну TTBR0.
 
----
+**Кодирование Immediate:**
+- ARM `mov` поддерживает только 8-bit immediate с even rotate
+- Большие константы: использовать `ldr Rd, =value` (literal pool)
 
-### 6.4 Context Switch (`context_switch.asm`, x86)
+**Безопасность исключений:**
+- VBAR должен быть установлен ДО включения IRQ
+- `cpsid i` сразу после `srsdb` в обработчиках исключений (атомарный путь)
+- Idle loop явно `cpsie i` для обеспечения продолжения timer tick
 
-1. Сохранение callee-saved (EBX, ESI, EDI, EBP)
-2. `*old_esp = ESP`
-3. `mov ESP, new_esp` (телепортация)
-4. `mov CR3, new_cr3` (TLB Flush)
-5. `pop EBP/EDI/ESI/EBX`
-6. `or CR0, TS` (Lazy FPU trigger)
-7. `ret` (прыжок в EIP новой задачи)
+**Пользовательский режим:**
+- SVC из kernel mode фатален (нарушение Zero Trust)
+- Ошибка пользователя никогда не должна возвращаться к упавшей задаче
+- WFI может не проснуться на ARM1176/QEMU - использовать NOP sled idle
 
----
+### 6.10 Известные Ограничения ARM
 
-### 6.5 Copy-on-Write
-
-```text
-fork():
-  1. vmm_clone_address_space() → новый PD
-  2. Kernel Space (768-1023): клонируется из boot_page_directory
-  3. User Space (0-767): PTE помечаются READ-ONLY + PAGE_COW
-  4. pmm_inc_ref() для каждой физической страницы
-  5. vma_clone() → deep copy VMA list
-  6. FD inheritance: ref_count++ для open_file_t + vfs_node_t
-  7. Kernel Stack copy (16 KB)
-  8. child_r->eax = 0 (ребёнок видит fork() == 0)
-  9. Stack Forging: [child_r][ret_from_fork][EBX][ESI][EDI][EBP]
-
-Write to CoW page:
-  1. Page Fault (INT 14, rw=1, present=1)
-  2. if refcount == 1: снять PAGE_COW, восстановить WRITE
-  3. if refcount > 1: pmm_alloc_page(), k_memcpy(), pmm_dec_ref()
-  4. Обновить PTE, invlpg
-  5. return (процессор повторяет инструкцию)
-```
-
----
-
-## 7. СИСТЕМНЫЕ ВЫЗОВЫ
-
-### 7.1 Syscall Table
-
-Номера syscall frozen (Linux i386 ABI).
-
-Transport:
-
-```text
-x86: int 0x80
-ARM: svc #0
-```
-
-| # | Syscall | Описание |
+| ID | Ограничение | Почему допустимо |
 |---|---|---|
-| 1 | `sys_exit` | Завершение процесса → `task_exit()` |
-| 2 | `sys_fork` | CoW клонирование процесса |
-| 3 | `sys_read` | Чтение из FD (Zero Trust) |
-| 4 | `sys_write` | Запись в FD (ANSI State Machine для fd 1/2) |
-| 5 | `sys_open` | Открытие файла (`O_CREAT`, `O_TRUNC`, variadic mode) |
-| 6 | `sys_close` | Закрытие FD |
-| 7 | `sys_waitpid` | Ожидание ребёнка (`WNOHANG`) |
-| 10 | `sys_unlink` | Удаление файла (Orphan Semantics) |
-| 11 | `sys_exec` | Замена образа процесса (ELF load) |
-| 19 | `sys_lseek` | Позиционирование (`SEEK_SET/CUR/END`) |
-| 28 | `sys_fstat` | Метаданные файла (`struct stat`) |
-| 39 | `sys_mkdir` | Создание директории (Day 31, RBAC + ENOTEMPTY) |
-| 41 | `sys_dup` | Дублирование FD (Day 28) |
-| 45 | `sys_brk` | Управление кучей (VMA Collision Detection) |
-| 54 | `sys_ioctl` | `TIOCGWINSZ` (размер терминала) |
-| 63 | `sys_dup2` | Атомарное дублирование FD (Day 28) |
-| 78 | `sys_gettimeofday` | Время с момента загрузки |
-| 90 | `sys_mmap` | On-Demand Paging (`MAP_ANONYMOUS`) |
-| 91 | `sys_munmap` | Освобождение памяти |
-| 116 | `sys_sysinfo` | Статистика системы |
-| 122 | `sys_getpid` | PID текущего процесса |
-| 125 | `sys_mprotect` | Изменение прав (W^X enforcement) |
-| 141 | `sys_readdir` | Чтение директории |
-| 158 | `sys_yield` | Добровольная передача CPU |
-| 164 | `sys_uname` | Информация об ОС |
-| 230 | `sys_nanosleep` / `sys_sleep` | Сон (миллисекунды) |
+
+| ARM-002 | Пользовательский образ - сырой бинарник, не ELF | Proof-of-concept. ELF загрузчик запланирован. |
+| ARM-005 | Linker может предупреждать о RWX LOAD segment | ELF segment warning, не runtime проблема. Очистить `linker_arm.ld`. |
+| ARM-006 | PHYS_BASE захардкожен на 0x10000 | Работает для QEMU. Реальный RPi1 требует 0x8000 или параметризацию. |
+| ARM-007 | Скорость UART захардкожена (IBRD=1, FBRD=40) | Предполагает `core_freq=250` в `config.txt`. Задокументировать требование. |
 
 ---
 
-### 7.2 Zero Trust Validation
+### 6.11 Тестирование Изоляции Ошибок (Day 47 Fault Isolation Verified)
+**Статус:** Успешно верифицировано на эталонном краш-тесте.
+**Механизм:**
+Пользовательский тестовый образ (`arm_user_asm.S`) содержит намеренно вставленную невалидную инструкцию (`.word 0xE7F001F0` — гарантированный `UNDEF` на ARMv6) после выполнения штатных системных вызовов (`sys_getpid`, `sys_write`, `sys_sleep`).
+**Результат верификации:**
+- CPU генерирует исключение `UNDEF` в USR mode.
+- Вектор `_undef_handler` перехватывает управление.
+- Ядро определяет, что прерванный режим — USR (`SPSR & 0x1F == 0x10`).
+- Формируется 72-байтный user trap frame.
+- Вызывается `arm_task_fault_kill()`: задача помечается как `TASK_FREE`, ресурсы освобождаются, планировщик переключается на следующую готовую задачу (или idle).
+- **Ядро продолжает работу (Immortal Kernel).**
+**Доктрина:** Этот тест намеренно оставлен в базовом образе как перманентное доказательство того, что Enclave OS строго соблюдает принцип *Crash-Only Userspace* и *Zero Trust*. Падение Ring 3 кода никогда не компрометирует ядро.
 
-```c
-// Каждый syscall ОБЯЗАН:
-static inline bool is_user_pointer(const void* ptr, size_t size) {
-    uint32_t addr = (uint32_t)ptr;
+---
 
-    if (!ptr)
-        return false;
+## 7. x86 Замороженный Релиз
 
-    if (addr >= KERNEL_SPACE_START)
-        return false;
+### 7.1 Политика Заморозки
 
-    if (size == 0)
-        return true;
+**Версия:** Alpha 0.5-rc1  
+**Статус:** Полностью функциональная, self-hosting работает
 
-    if (addr > USER_SPACE_END - size + 1)
-        return false;
+**Правила заморозки:**
+- Никаких новых возможностей
+- Никакого рефакторинга, кроме критических исправлений безопасности/корректности
+- ABI заморожен (16 гарантий, 12 задокументированных отклонений)
+- Документация остаётся как эталонная реализация
 
-    return true;
-}
+**Назначение:**
+- Базовая линия для архитектурных решений ARM порта
+- Доказанная реализация Zero Trust
+- Работающий self-hosting toolchain (TinyCC)
 
-static int copy_string_from_user(char* dest, const char* user_src, size_t max_len) {
-    // Побайтовое копирование с проверкой Kernel Space boundary
-}
+### 7.2 Сборка и Запуск
+
+**Toolchain:**
+```bash
+i686-linux-gnu-gcc -m32 -std=gnu99 -ffreestanding -O2
+nasm -f elf32
 ```
 
----
+**Сборка:**
+```bash
+make iso
+make run
+# qemu-system-i386 -cdrom build/enclave_os.iso -m 1024M -serial stdio
+```
 
-### 7.3 `sys_exec` — Stack Forging + IRET Stack Switch
+**Результат:** Загрузочный ISO с GRUB, ядром, initrd (TAR UStar)
 
+### 7.3 Карта Памяти x86
+
+**Виртуальное адресное пространство:**
 ```text
-1. copy_string_from_user(filename)
-2. vfs_findnode(filename) → ELF node
-3. vmm_create_address_space() → новый PD
-4. elf_load(node, &temp_task) → entry_point + VMA
-5. Сохранить FD table (POSIX exec сохраняет FD)
-6. vmm_destroy_address_space(old PD)
-7. vmm_switch_pdir(new CR3)
-8. Stack Forging: argc, argv[], NULL на User Stack
-9. r->useresp = stack_ptr  ← КРИТИЧНО (IRET Stack Switch Trap)
-10. r->eip = entry_point
-11. return 0 (IRET восстановит новый контекст)
+0x00000000 ┌─────────────────────────────────────┐
+           │  USER SPACE (3 GB)                  │
+0x00100000 │    ELF Segments                     │
+0x10000000 │    User Heap (64 MB max)            │
+0x40000000 │    mmap Region (1 GB)               │
+0xBFFEF000 │    User Stack (64 KB)               │
+0xBFFFF000 │    Stack Guard (4 KB)               │
+0xBFFFFFFF ├─────────────────────────────────────┤
+0xC0000000 │  KERNEL SPACE (1 GB)                │
+0xC0000000 │    Direct Map (512 MB)              │
+0xC8000000 │    Kernel Stack Pool (16 MB)        │
+0xD0000000 │    Kernel Heap (128 MB Lazy)        │
+0xFD000000 │    Framebuffer (16 MB)              │
+0xFFFFFFFF └─────────────────────────────────────┘
 ```
 
-> ⚠️ **IRET Stack Switch Trap (Day 25):** `popa` **игнорирует** поле ESP.
-> `iret` читает User ESP из аппаратного стека. Обновление `r->esp` не имеет
-> эффекта — необходимо обновлять `r->useresp`.
+**Ключевые константы:**
+- `KERNEL_SPACE_START = 0xC0000000`
+- `USER_STACK_VIRT_TOP = 0xBFFFF000`
+- `KERNEL_HEAP_VIRT = 0xD0000000`
+
+### 7.4 Подсистемы Ядра x86
+
+**Управление памятью:**
+- PMM: Two-pass E820, bitmap allocator, O(1) allocation
+- Paging: Direct map, on-demand paging, CoW, W^X enforcement
+- Heap: Buddy system, lazy allocation, guard pages
+- VMA: Sorted linked list, collision detection, splitting
+
+**Процессная модель:**
+- Scheduler: Round-robin, preemptive, 10 ms quantum
+- Task states: READY/RUNNING/SLEEPING/ZOMBIE/DEAD
+- Lazy FPU: CR0.TS → #NM → fxsave/fxrstor
+- Init respawn: PID 1 restarts from VFS on crash
+
+**Файловая система:**
+- VFS: Polymorphic nodes, LCRS tree, 3-tier FD model
+- Initrd: TAR UStar parsing from GRUB module
+- Tmpfs: Writable RAM disk, dynamic growth
+- DevFS: `/dev/console` polymorphic device
+- FAT32: Read-only, VFAT LFN support
+
+**Графика и I/O:**
+- Framebuffer: Double buffering, dirty rectangles, PSF1 Unicode
+- VGA: 80×25 text mode fallback
+- Serial: COM1 headless debug
+- Keyboard: PS/2 IRQ1, ANSI escape sequences
+
+**Безопасность:**
+- Zero Trust: All syscalls validate pointers, enforce W^X
+- RBAC: `FS_SYSTEM` flag protects `/boot` from Ring 3
+- Orphan semantics: POSIX unlink behavior
+- Crash-only: Init respawns Shell < 100 ms
+
+### 7.5 Известные Ограничения x86 (Заморожены)
+
+| ID | Ограничение | Почему допустимо |
+|---|---|---|
+| LIMIT-001 | Bump allocator (`free = no-op`) | Acceptable для короткоживущих TCC/shell процессов. Для долгоживущих сервисов — mmap-based allocator (post-stabilization). |
+| LIMIT-002 | Нет сигналов (`signal = stub`) | Не входит в Enclave POSIX Lite P2. Crash-only model заменяет сигналы. |
+| LIMIT-003 | Нет потоков (threads) | Не требуется на данной фазе. Один процесс = один поток. |
+| LIMIT-004 | Нет динамической линковки | Static-only by design. `CONFIG_TCC_STATIC`. |
+| LIMIT-005 | `waitpid` не Linux-compatible | `status == exit_code` (0..255), не `<< 8`. Enclave ABI (§9). |
+| LIMIT-006 | `/boot` не в VFS | ISO-level файлы (GRUB module). RBAC `FS_SYSTEM` проверяется code review. |
+| LIMIT-007 | `getcwd()` всегда `"/"` | Нет cwd tracking. Acceptable для текущей фазы. |
+| LIMIT-008 | `chdir() = ENOSYS` | Нет cwd tracking. |
+| LIMIT-009 | `localtime() = stub` | Нет RTC driver. |
+| LIMIT-010 | `getenv() = NULL` | Нет environment. |
+| LIMIT-011 | `isatty() = 1` для fd 0/1/2 | Упрощение. Нет `ioctl TIOCGWINSZ` check. |
+| LIMIT-012 | `sys_brk` shrink разрешён ядром, но libc не использует | Bump-only policy. Reserved capability. |
 
 ---
 
-## 8. USER SPACE И SELF-HOSTING
+## 8. Self-Hosting: TinyCC
 
-### 8.1 `user_libc.h` — Monolithic SSOT Header
+### 8.1 Архитектурный Обзор
 
-**Monolithic Bypass:** полный отказ от `#include <stdint.h>`, `<stddef.h>`,
-`<stdarg.h>`. Все типы определяются через примитивы C и `__builtin_va_list`.
-
-```c
-typedef __builtin_va_list va_list;
-typedef signed char        int8_t;
-typedef unsigned int       uint32_t;
-typedef unsigned int       size_t;
-typedef int                ssize_t;
-typedef int                pid_t;
-// ... 50+ типов и 200+ прототипов
-```
-
----
-
-### 8.2 `user_libc.c` — Ring 3 Standard Library
-
-Единый файл реализации Ring 3 libc.
-
-| Компонент | Описание |
-|---|---|
-| **Bump Allocator** | `malloc` через `sys_brk`, `free = no-op` (by design для TinyCC) |
-| **malloc_header_t** | magic `0xA110CA7E`, size |
-| **FILE* API** | 4 KB read + 4 KB write buffers |
-| **printf family** | `vsnprintf` (C99 compliant) |
-| **POSIX variadic open** | `open(path, flags, ...)` с mode через `va_arg` |
-| **Process Control** | `fork`, `exec`, `waitpid`, `exit` (с `fflush`) |
-| **system()** | `fork + exec(/bin/cmd) + waitpid` |
-| **mmap/munmap** | Обёртки над `sys_mmap/sys_munmap` |
-| **Sort/Search** | `qsort` (Heapsort, O(1) stack), `bsearch` |
-| **Float parsing** | `strtod`, `strtof`, `strtold`, `ldexp` |
-| **Time** | `gettimeofday`, `clock`, `localtime`, `sleep`, `usleep` |
-| **glibc compat** | `__errno_location`, `__isoc23_strtol/strtoul/strtoll/strtoull` |
-| **Day 29** | `getline`, `strdup`, `strerror`, `perror`, `time`, `ioctl` |
-| **Day 31** | `mkdir`, `fstat` — POSIX обёртки над `sys_mkdir / sys_fstat` |
-| **Day 32** | Консолидация `tcc_lib_os.c` → `user_libc.c` (единый файл) |
-
----
-
-### 8.3 `crt0.asm` — C Runtime Startup
-
-```asm
-_start:
-    mov eax, [esp]              ; argc
-    lea ebx, [esp + 4]          ; argv
-    lea ecx, [esp + eax*4 + 8]  ; envp
-    push ecx
-    push ebx
-    push eax
-    call main
-    add esp, 12
-    push eax                    ; exit_code
-    call exit                   ; sys_exit (never returns)
-
-.halt_loop:
-    cli
-    hlt
-    jmp .halt_loop
-```
-
----
-
-### 8.4 Self-Hosting Pipeline
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│  1. Shell: compile /examples/hello.c /tmp/hello.elf         │
-│  2. fork() → child                                          │
-│  3. exec("/bin/tcc.elf", ["tcc", "hello.c", "-o", ...])     │
-│  4. TinyCC (Ring 3) → sys_open, sys_read, sys_mmap          │
-│  5. TinyCC generates ELF → sys_write("/tmp/hello.elf")      │
-│  6. waitpid() → status = 0                                  │
-│  7. Shell: run /tmp/hello.elf                               │
-│  8. fork() → child                                          │
-│  9. exec("/tmp/hello.elf", ["hello"])                       │
-│  10. hello.elf (Ring 3) → printf("Hello, World!\n")         │
-│  11. exit(0) → waitpid() → status = 0                       │
-│  12. SELF-HOSTING SUCCESS ✅                                │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-### 8.5 Shell (Ring 3)
-
-| Команда | Описание |
-|---|---|
-| `help` | Справка |
-| `clear` | Очистка экрана (`\033[2J\033[H`) |
-| `ls [path]` | Список файлов (ANSI colors: dir=blue, ELF=green, `.c`=yellow) |
-| `cat <file>` | Вывод содержимого файла |
-| `mkdir <path>` | Создание директории (`sys_mkdir`, Day 31) |
-| `rm <path>` | Удаление файла |
-| `run <elf> [args]` | Запуск ELF (`fork + exec + waitpid`) |
-| `compile <c> [out]` | Компиляция через TinyCC |
-| `uptime` | Время работы системы |
-| `sysinfo` | Статистика (RAM, процессы) |
-| `exit` | Выход (Init respawn) |
-
-**Readline:**
-
-- Arrow Keys (CSI A/B/C/D) — навигация по истории и строке
-- Home/End (CSI H/F) — начало/конец строки
-- Delete (CSI 3~) — удаление символа
-- Ctrl+A/E — Home/End
-- Ctrl+K/U — kill line (вправо/влево)
-- Ctrl+L — clear screen
-- Ctrl+C — cancel
-- Ctrl+D — EOF
-- History (32 записи)
-
----
-
-### 8.6 Интеграция TinyCC — Self-Hosting Toolchain
-
-#### 8.6.1 Архитектурный обзор
-
-TinyCC (TCC) интегрирован как **полноценный Ring 3 ELF-бинарник** (`/bin/tcc.elf`),
-скомпилированный из исходников Fabrice Bellard (v0.9.27) кросс-компилятором
-`i686-linux-gnu-gcc` с флагами `-nostdlib -static -ffreestanding`.
+TinyCC (TCC) интегрирован как **полноценный Ring 3 ELF-бинарник** (`/bin/tcc.elf`), скомпилированный из исходников Fabrice Bellard (v0.9.27) кросс-компилятором `i686-linux-gnu-gcc` с флагами `-nostdlib -static -ffreestanding`.
 
 TCC работает внутри Zero Trust Sandbox на общих основаниях:
-
 - Не имеет прямого доступа к памяти ядра
-- Все операции через INT 0x80 (`sys_open`, `sys_read`, `sys_write`, `sys_mmap`, `sys_brk`)
+- Все операции через `INT 0x80` (`sys_open`, `sys_read`, `sys_write`, `sys_mmap`, `sys_brk`)
 - Crash TCC не влияет на ядро (Init перезапустит Shell, Shell перезапустит компиляцию)
 - W^X enforcement применяется к генерируемому коду
+
+### 8.2 Self-Hosting Pipeline
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -1803,21 +851,7 @@ TCC работает внутри Zero Trust Sandbox на общих основ�
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 8.6.2 Компоненты интеграции
-
-| Компонент | Файл | Назначение |
-|---|---|---|
-| **TCC Source** | `external/tcc_src/tcc.c` | Монолитный исходник (`ONE_SOURCE=1`) |
-| **TCC Config** | `user_src/config.h` | Fake `config.h` (заменяет `./configure`) |
-| **Consolidated libc** | `user_src/user_libc.c` | POSIX libc + все функции адаптации для TCC |
-| **setjmp/longjmp** | `user_src/setjmp.asm` | NASM i386 реализация (error recovery TCC) |
-| **Syscall Wrappers** | `user_src/user_syscalls.h` | Inline asm обёртки INT 0x80 |
-| **Monolithic libc** | `user_src/user_libc.h` | SSOT header (Monolithic Bypass) |
-| **libc Implementation** | `user_src/user_libc.c` | `printf`, `malloc` (bump), FILE* API |
-| **Shell Integration** | `user_src/shell_user.c` | Команда `compile <file.c> [out]` |
-| **Makefile** | `Makefile` | Сборка TCC + Toolchain Injection |
-
-#### 8.6.3 Конфигурация TCC (`user_src/config.h`)
+### 8.3 Конфигурация TCC (`user_src/config.h`)
 
 ```c
 #define TCC_TARGET_I386            1       // 32-bit x86
@@ -1836,58 +870,9 @@ TCC работает внутри Zero Trust Sandbox на общих основ�
 #define CONFIG_TCC_MMAP            0       // malloc вместо mmap
 ```
 
-#### 8.6.4 Консолидация libc (Day 32)
+### 8.4 Toolchain Injection (Makefile → initrd.tar)
 
-Все функции адаптации для TCC перенесены из `tcc_lib_os.c` в `user_libc.c`.
-Файл `tcc_lib_os.c` удалён из проекта. `user_libc.c` является единственным
-источником Ring 3 libc-функций.
-
-**Порядок секций в `user_libc.c`:**
-
-1. Includes
-2. Globals (`errno`, `stdin/stdout/stderr`)
-3. Memory ops (`memset`, `memcpy`, `memcmp`, `memmove`)
-4. Heap (`malloc`, `calloc`, `realloc`, `free` — Bump Allocator)
-5. String ops
-6. Number conversion (`atoi`, `strtol`, `strtoul`, `strtoll`, `strtoull`, `itoa`)
-7. Float parsing (`strtod`, `strtof`, `strtold`, `ldexp`)
-8. FILE* I/O (`fopen..remove`)
-9. Low-level I/O (`open..unlink`, `isatty`, `getcwd`, `chdir`, `realpath`)
-10. Printf family
-11. Process control (`fork`, `exec`, `exit`, `system`, `atexit`, `abort`)
-12. Sort/Search (heapsort `qsort`, `bsearch`)
-13. Time & System (`gettimeofday`, `uname`, `sysinfo`, `sleep`, `clock`, `time`)
-14. Signals & Dynamic Linking stubs
-15. POSIX extensions (`getline`, `strdup`, `strerror`, `perror`, `ioctl`, `mmap`)
-16. glibc compat (`__errno_location`, `__isoc23_*`, `__assert_fail`, `_setjmp`)
-17. Environment (`getenv`, `environ`)
-
-> ⚠️ **Heapsort вместо Quicksort:** выбран для гарантии O(1) стековой памяти.
-> В Ring 3 User Stack = 64 KB, рекурсивный Quicksort может вызвать
-> Stack Overflow Guard (SIGSEGV) на больших массивах.
-
-#### 8.6.5 setjmp/longjmp (NASM, i386)
-
-Критично для **error recovery** TinyCC: при синтаксической ошибке
-TCC вызывает `longjmp()` для возврата к точке `setjmp()` без
-раскрутки стека.
-
-```text
-jmp_buf layout (24 bytes):
-  [0]  EBX    (callee-saved)
-  [4]  ESI    (callee-saved)
-  [8]  EDI    (callee-saved)
-  [12] EBP    (frame pointer)
-  [16] ESP    (stack pointer, скорректирован на return address)
-  [20] EIP    (return address из стека)
-```
-
-POSIX compliance: `longjmp(env, 0)` возвращает 1.
-
-#### 8.6.6 Toolchain Injection (Makefile → initrd.tar)
-
-При сборке ISO Makefile автоматически формирует **полный toolchain**
-внутри initrd для работы TCC в Ring 3:
+При сборке ISO Makefile автоматически формирует **полный toolchain** внутри initrd для работы TCC в Ring 3:
 
 ```text
 initrd_root/
@@ -1922,260 +907,372 @@ initrd_root/
 ```
 
 **Ключевые решения:**
-
-- `libc.a` собирается через `i686-linux-gnu-ar rcs` из двух объектов:
-  `user_libc.o + setjmp.o`
+- `libc.a` собирается через `i686-linux-gnu-ar rcs` из двух объектов: `user_libc.o + setjmp.o`
 - Fake POSIX headers — однострочные `#include "user_libc.h"` (Monolithic Bypass)
 - CRT файлы копируются из объектных файлов сборки (не из исходников)
 - `libtcc1.a` содержит хелперы для 64-битной арифметики (`__divdi3`, `__moddi3`, etc.)
+- Тесты из `initrd_src/examples/` компилируются внутри ОС через TCC, не на хосте
 
-#### 8.6.7 Флаги компиляции TCC
-
-```makefile
-TCC_CFLAGS = -m32 -nostdlib -static -ffreestanding -O2 -Wall -Wextra \
-             -fno-optimize-sibling-calls \
-             -DCONFIG_TCC_STATIC \
-             -DONE_SOURCE=1 \
-             -Iuser_src \
-             -I$(INITRD_ROOT)/include
-```
-
-| Флаг | Назначение |
-|---|---|
-| `-DONE_SOURCE=1` | Монолитная компиляция (все `.c` в одном `tcc.c`) |
-| `-DCONFIG_TCC_STATIC` | Отключает `dlopen/dlsym` |
-| `-fno-optimize-sibling-calls` | Запрет tail-call optimization (`setjmp` safety) |
-| `-I$(INITRD_ROOT)/include` | Доступ к fake POSIX headers при компиляции |
-
-#### 8.6.8 Команда Shell: `compile`
+### 8.5 Команда Shell: `compile`
 
 ```c
 // shell_user.c — handle_compile()
 // Usage: compile <file.c> [output.elf]
 // Default output: /tmp/a.out
-
 pid_t pid = fork();
-
 if (pid == 0) {
     const char* tcc_argv[] = { "tcc", input_file, "-o", output_file, NULL };
     exec("/bin/tcc.elf", tcc_argv);
     exit(127);  // exec failed
 }
-
 waitpid(pid, &status, 0);
 ```
 
 ---
 
-## 9. ГАРАНТИИ СИСТЕМЫ (SLA)
+## 9. POSIX ABI Гарантии
 
-| # | Гарантия | Механизм |
+### 9.1 Public User ABI (Ring 3 → Kernel)
+
+**Гарантии (FROZEN — не менять без major version bump):**
+
+| # | Гарантия | Детали |
 |---|---|---|
-| 1 | **Бессмертное Ядро** | PID 0 физически не может упасть из-за Ring 3 |
-| 2 | **Бессмертный Init** | Reaper перезапускает PID 1 из `/sbin/init.elf` |
-| 3 | **Crash-Only Shell** | Init перезапускает Shell < 100 мс |
-| 4 | **Изоляция CoW** | Strict CoW Teardown (`pmm_dec_ref`) |
-| 5 | **Zero Trust I/O** | Устройства через `open("/dev/console")` |
-| 6 | **W^X Enforcement** | VMM + `sys_mmap/sys_mprotect` reject `WRITE+EXEC` |
-| 7 | **OOM Governance** | OOM Trap убивает процесс, не ядро |
-| 8 | **Kernel Stack Protection** | Guard Pages (Day 16) |
-| 9 | **POSIX Compliance** | Orphan Nodes, FD inheritance, variadic open |
-| 10 | **Self-Hosting** | TinyCC компилирует программы внутри ОС |
-| 11 | **68/68 Stress Test** | Omni Stress: VMM(10), FPU(5), Process(6), VFS(11), C(6), Syscall(8), Exec(2), Memory(3), Libc(6), System(2), Hardening(5), Security(4) |
+| 1 | Syscall convention | x86: `INT 0x80`, `eax` = номер, `ebx/ecx/edx/esi/edi` = аргументы. ARM: `svc #0`, `r7` = номер, `r0-r6` = аргументы. Return: `eax`/`r0` (`>= 0` success, `< 0` = `-errno`) |
+| 2 | POSIX return convention | Все libc-обёртки: при ошибке `return -1` (или `NULL`/`MAP_FAILED`), `errno = -ret` |
+| 3 | `fork()` | CoW clone. Child: `fork() == 0`. Parent: `fork() == child_pid`. Error: `-1 + errno` |
+| 4 | `exec()` | Заменяет образ. FD table сохраняется. `argv` на user stack. Error: `-1 + errno` (процесс жив) |
+| 5 | `waitpid()` status | `status == exit_code` (0..255) при normal exit. `status == -1` при kernel kill. **НЕ Linux-compatible** (нет `<< 8`) |
+| 6 | `mmap()` | `MAP_ANONYMOUS`: on-demand paging. `MAP_FAILED` при ошибке. W^X enforced |
+| 7 | `mprotect()` | W^X: `PROT_WRITE|PROT_EXEC` → `-EPERM`. Частичное покрытие: VMA splitting |
+| 8 | `open()` variadic | `open(path, flags, ...)` — mode через `va_arg` при `O_CREAT` |
+| 9 | `close()` / `dup()` / `dup2()` | POSIX semantics. `dup2` атомарно закрывает `newfd` |
+| 10 | `unlink()` | Orphan semantics: файл жив пока открыт. `ENOTEMPTY` для непустых директорий |
+| 11 | `mkdir()` | RBAC: `FS_SYSTEM` → `EACCES`. `S_IFDIR` → `FS_DIRECTORY` |
+| 12 | `fstat()` | `st_size`, `st_mode` (`S_IFREG`/`S_IFDIR`), `st_ino` |
+| 13 | `sys_brk` | Bump-only из libc. `brk(0)` = текущий end. `brk(new)` = expand |
+| 14 | User Stack | 64 KB, guard page 4 KB. Переполнение → `SIGSEGV` (task kill) |
+| 15 | User Heap | 64 MB max. `sys_brk` collision detection с VMA |
+| 16 | `fork()` FD inheritance | `ref_count++` для `open_file_t` + `vfs_node_t` |
 
-### Математически доказанные гарантии (x86)
+### 9.2 Осознанные Отклонения от Linux (Зафиксированы, Не Баги)
 
-| Тест | Что доказано |
-|---|---|
-| `vmm_mprotect_sigsegv` | W^X Enforcement работает |
-| `vmm_mprotect_partial` | S1 fix: VMA splitting при частичном mprotect |
-| `vmm_mprotect_partial_sigsegv` | S1 fix: SIGSEGV при записи в частично защищённую страницу |
-| `proc_fork_bomb` (25 fork'ов) | Scheduler production-ready |
-| `proc_zombie_cascade` (15 зомби) | Supervisor Trees работают |
-| `vfs_1000_files` | tmpfs stable под нагрузкой |
-| `fpu_context_switch` | Lazy FPU Switching корректен |
-| `heap_exhaustion` | `sys_brk` защитил от OOM |
-| `stack_overflow_guard` | Guard Page убил процесс |
-| `fd_exhaustion` (256 FD) | `fd_table` лимит работает |
-| `unlink_open_file` | POSIX Orphan Semantics |
-| `directory_ops` | `sys_mkdir + S_IFDIR + readdir + ENOTEMPTY` (Day 31) |
-| `syscall_enosys` | Invalid syscall number → `-ENOSYS`, не crash |
-| `syscall_eacces_rbac` | `FS_SYSTEM` RBAC защищает `/boot` от Ring 3 |
-| `syscall_efault_null` | NULL pointer → `-EFAULT` |
-| `syscall_efault_kernel` | Kernel pointer (`0xC0000000`) → `-EFAULT` |
-| `vmm_wx_mprotect_reject` | `mprotect(W|X)` → `-EPERM` (SLA #6) |
-| `vfs_dup_dup2` | FD duplication + irq_safe refcount |
-| `vfs_fstat_size` | Inode metadata: size, `S_IFREG / S_IFDIR` |
-| `vfs_readdir_list` | Index-based directory iteration |
-| `proc_exec_argv` | exec + Stack Forging argv + self-hosting compile |
-| `proc_exec_enoent` | exec nonexistent → `-ENOENT`, процесс жив |
-| `proc_waitpid_wnohang` | Non-blocking reap (`WNOHANG`) |
-| `libc_printf_edge` | `INT_MIN`, NULL string, hex — без UB |
-| `libc_snprintf_overflow` | Buffer truncation safety |
-| `sys_uname_sysinfo` | System identity + resource accounting |
-| `syscall_ebadf` | `close(-1)/read(-1)/write(-1)/lseek(-1)` → `EBADF` (Day 31) |
-| `proc_rapid_fork_exit` | 20× fork+exit без Triple Fault (T5 regression) |
+| # | Область | Enclave OS | Linux | Обоснование |
+|---|---|---|---|---|
+| D1 | waitpid status | `exit_code` (0..255) | `exit_code << 8` | Упрощение, нет `W*` макросов |
+| D2 | waitpid killed | `status == -1` | `WIFSIGNALED` | Нет сигналов |
+| D3 | `free()` | no-op | Возврат в heap | Bump allocator (TCC by design) |
+| D4 | `mprotect(W|X)` | `-EPERM` | Разрешено | W^X = закон |
+| D5 | `getcwd()` | Всегда `"/"` | Реальный cwd | Нет cwd tracking |
+| D6 | `chdir()` | `ENOSYS` | Работает | Нет cwd tracking |
+| D7 | `signal()` | Stub → `SIG_DFL` | Реальная доставка | Нет подсистемы сигналов |
+| D8 | `dlopen/dlsym` | `ENOSYS` | Реальный dl | Static-only OS |
+| D9 | `localtime()` | Stub (1 Jan 1970) | Реальное время | Нет RTC driver |
+| D10 | `getenv()` | Всегда `NULL` | Реальный env | Нет environment |
+| D11 | `isatty()` | `1` для fd 0/1/2 | `ioctl TIOCGWINSZ` | Упрощение |
+| D12 | `sys_brk` shrink | Ядро позволяет, libc не вызывает | Уменьшает heap | Reserved capability |
 
----
+### 9.3 Internal Kernel ABI (НЕ Гарантирован)
 
-## 10. ИЗВЕСТНЫЕ ПРОБЛЕМЫ И ROADMAP
-
-### 10.1 Known Limitations (x86, Alpha 0.5-rc1)
-
-| ID | Ограничение | Почему допустимо |
+| # | Элемент | Статус |
 |---|---|---|
-| LIMIT-001 | Bump allocator (`free = no-op`) | Acceptable для короткоживущих TCC/shell процессов. Для долгоживущих сервисов — mmap-based allocator (post-stabilization). |
-| LIMIT-002 | Нет сигналов (`signal = stub`) | Не входит в Enclave POSIX Lite P2. Crash-only model заменяет сигналы. |
-| LIMIT-003 | Нет потоков (threads) | Не требуется на данной фазе. Один процесс = один поток. |
-| LIMIT-004 | Нет динамической линковки | Static-only by design. `CONFIG_TCC_STATIC`. |
-| LIMIT-005 | `waitpid` не Linux-compatible | `status == exit_code` (0..255), не `<< 8`. Enclave ABI (§1.3). |
-| LIMIT-006 | `/boot` не в VFS | ISO-level файлы (GRUB module). RBAC `FS_SYSTEM` проверяется code review. |
-| LIMIT-007 | `getcwd()` всегда `"/"` | Нет cwd tracking. Acceptable для текущей фазы. |
-| LIMIT-008 | `chdir() = ENOSYS` | Нет cwd tracking. |
-| LIMIT-009 | `localtime() = stub` | Нет RTC driver. |
-| LIMIT-010 | `getenv() = NULL` | Нет environment. |
-| LIMIT-011 | `isatty() = 1` для fd 0/1/2 | Упрощение. Нет `ioctl TIOCGWINSZ` check. |
-| LIMIT-012 | `sys_brk` shrink разрешён ядром, но libc не использует | Bump-only policy. Reserved capability. |
+| 1 | Номера syscall | Frozen (Linux i386 ABI). Transport: x86 `INT 0x80`, ARM `svc #0` |
+| 2 | `vfs_close_fd()` | Internal. Ring 0 НЕ вызывает `sys_close()` |
+| 3 | `task_t` layout | Internal. Может меняться |
+| 4 | VMA flags (`VMA_COW` и т.д.) | Internal |
+| 5 | Page table format | Internal (x86 2-level, ARMv6 short descriptor) |
+| 6 | Kernel heap API (`kmalloc`) | Internal. Ring 3 НИКОГДА |
 
----
+### 9.4 TCC Compatibility Rules
 
-### 10.2 ARM Known Limitations (Alpha 0.6-arm-user)
-
-| ID | Ограничение | Почему допустимо |
+| # | Правило | Обоснование |
 |---|---|---|
-| ARM-LIMIT-001 | CLOSED: User tasks run with IRQ enabled (`CPSR = 0x50`) | IRQ stub сохраняет полный user trap frame (72 bytes). Day 46 validation pass. |
-| ARM-LIMIT-002 | User memory mapped as 1 MB sections | Spike mapping. 4 KB pages и real ARM VMM — позже. |
-| ARM-LIMIT-003 | CLOSED: User DAbort/PAbort/UNDEF kill task, kernel alive | User fault isolation implemented (Day 47). Kernel-mode faults remain fatal. |
-| ARM-LIMIT-004 | User image is raw binary, not ELF | ELF loader на ARM будет позже. Сейчас proof-of-concept user mode. |
-| ARM-LIMIT-005 | `sys_write` validates only explicit user regions | Полная VMA-based validation появится вместе с ARM VMM. |
-| ARM-LIMIT-006 | Нет per-process address space на ARM | Один временный user mapping для spike. |
-| ARM-LIMIT-007 | Linker может предупреждать о RWX LOAD segment | Это warning уровня ELF segments, не runtime W^X user memory. Требует cleanup `linker_arm.ld`. |
-| ARM-LIMIT-008 | Нет PMM на ARM | Физические user region зарезервированы вручную. PMM — позже. |
-| ARM-LIMIT-009 | CLOSED: SVC full user frame + blocking syscalls | Day 48: 72-byte frame. Day 49: `sys_sleep` работает через scheduler. |
+| T1 | Tagged structs | TCC пишет `struct timeval tv;` → нужен тег. Паттерн: `struct X {...}; typedef struct X X_t;` |
+| T2 | `#ifndef CONFIG_TCC_STATIC` guard | TCC определяет static stubs `dl*` с другими сигнатурами |
+| T3 | `-fno-optimize-sibling-calls` | `setjmp/longjmp` safety |
+| T4 | Heapsort (не Quicksort) | O(1) stack для 64 KB Ring 3 stack |
 
----
+### 9.5 ABI Change Policy
 
-### 10.3 Roadmap
-
-| Days | Milestone | Status |
-|---|---|---|
-| **36-37** | 🍓 ARM Boot Spike | ✅ Complete |
-| **38-40** | 🍓 ARM IRQ + Timer + Vectors | ✅ Complete |
-| **41-42** | 🍓 ARM Context Switch + Scheduler | ✅ Complete |
-| **43-45** | 🍓 ARM SVC + User Mode + Integration | ✅ Complete |
-| **45+** | ARM IRQ Preemption from User Mode + Fault Isolation | ✅ IRQ Preemption (Day 46); ✅ User Fault Isolation (Day 47) |
-| **48** | ARM SVC Full User Frame | ✅ Complete (Day 48) |
-| **49** | ARM Blocking Syscalls (`sys_sleep`) | ✅ Complete (Day 49) |
-| **51A** | ARM Hardware Safety Pass (PHYS_BASE parameterization) | ✅ Complete |
-| **51B** | ARM PMM Foundation (ATAGS parsing + bitmap allocator) | 📋 In Progress |
-| **52** | ARM 4 KB Page Tables (L1 coarse + L2 small pages) | 📋 Planned |
-| **53** | ARM VMM (per-process address space) | 📋 Planned |
-| **54** | User Task Migration (sections → 4 KB pages) | 📋 Planned |
-| **50+** | ARM 4 KB Pages + Real ARM VMM | 📋 Planned |
-| **57+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
-| **58+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
-| **60+** | RISC-V порт, ARM Cortex-A (64-bit) | 📋 Planned |
-
----
-
-### 10.4 Источники вдохновения
-
-| Проект | Что заимствовано |
+| Тип изменения | Процедура |
 |---|---|
-| **TinyCC** (Fabrice Bellard) | Минимализм + скорость + self-hosting |
-| **Linux** | POSIX syscalls + VFS + ELF loader |
-| **Minix 3** (Tanenbaum) | User-mode drivers + message passing IPC |
-| **seL4** (NICTA) | Capability-Based Security + Formal Verification |
-| **Erlang/OTP** (Ericsson) | "Let it crash" + Supervisor Trees |
-| **QNX** | Microkernel + Message Passing IPC |
-| **FreeBSD Jails / Linux cgroups** | Resource Containers |
+| Добавление syscall | Только в minor version bump |
+| Изменение поведения существующего syscall | Только в major version bump |
+| Изменение internal kernel ABI | Свободно (не гарантирован) |
+| Изменение отклонений D1-D12 | Только в major version bump + миграция |
 
 ---
 
-## 📎 ПРИЛОЖЕНИЕ A: КРИТИЧЕСКИЕ АРХИТЕКТУРНЫЕ НЮАНСЫ
+## 10. Кросс-Архитектурные Правила
 
-### x86 Nuances
+**Универсальные принципы (применяются к ARM и x86):**
 
-| Нюанс | Описание |
-|---|---|
-| **Framebuffer PCD** | LFB мапится с `PAGE_PCD` (`0x10`), иначе кэш-артефакты |
-| **Virtual Stack Switch** | `mov esp, stack_top` после CR0.PG |
-| **Reaper Queue Pattern** | Мертвые задачи очищаются следующей задачей |
-| **Scheduler IRQ Safety** | `cli/sti` с сохранением EFLAGS |
-| **IRQ Save/Restore Primitive** | `irq_save()` сохраняет EFLAGS и выполняет `cli`; `irq_restore()` восстанавливает EFLAGS.<br>Все критические секции должны использовать `irq_save()/irq_restore()` вместо безусловных `cli/sti`.<br>Безусловные `cli/sti` допустимы только для idle wait, fatal loops, task trampoline. |
-| **Heap-VMM Synergy** | `kmalloc` → Page Fault → физическая страница |
-| **VMM Deep Free Trap** | Освобождать PTE + PT + PD |
-| **Kernel Heap Isolation** | `0xD0000000` без `PAGE_USER` |
-| **VIRT_TO_PHYS Underflow** | Проверка `addr >= 0xC0000000` |
-| **TSS ESP0 Virtual Address** | `PHYS_TO_VIRT` для стека ядра |
-| **EOI Lock Bypass** | EOI ДО вызова C-обработчика |
-| **FXSAVE Trap** | `clts` ДО `fxsave` |
-| **All-Zero FXRSTOR** | `fninit + fxsave` сразу |
-| **16-Byte Alignment** | `fpu_state[512]` первым в `task_t` |
-| **Stack Forging (ABI)** | callee-saved + trampoline на стеке |
-| **Signed Char Trap** | `uint8_t` для UTF-8 байтов |
-| **PSF1 UCS-2** | `uint16_t*` для Unicode tables |
-| **IRET Stack Switch Trap** | Обновлять `r->useresp`, не `r->esp` |
-| **Tail Call Optimization** | `-fno-optimize-sibling-calls` для User Space |
-| **W^X Enforcement** | `user_linker.ld` + VMM |
-| **Mountpoint Teleportation** | `FS_MOUNTPOINT → mountpoint_node` |
-| **SSOT Syscall Constants** | Linux i386 ABI (`O_CREAT=0x0040`) |
-| **Ring 0 CoW Write** | Ring 0 может писать в user CoW только через `vmm_handle_user_write_fault()`.<br>Проверки: VMA exists, `VMA_WRITE`, no W^X, refcount-safe, `invlpg`.<br>Blanket Ring 0 write access запрещён. |
-| **vfs_close_fd()** | Internal kernel API для закрытия FD любой задачи.<br>Ring 0 НЕ вызывает `sys_close()`.<br>`sys_close()` — тонкая обёртка над `vfs_close_fd(current_task, fd)`. |
-| **sys_mkdir RBAC** | `sys_mkdir_handler` проверяет `FS_SYSTEM` на родителе → `EACCES` для `/boot`.<br>Ring 3 не может создавать файлы в защищённых директориях. |
-| **tmpfs S_IFDIR** | `tmpfs_create` с `mode & S_IFDIR` → `FS_DIRECTORY` + `readdir/finddir/create/unlink/open/close` callbacks.<br>`private_data = NULL` для директорий. |
-| **ENOTEMPTY Guard** | `tmpfs_unlink` проверяет `FS_DIRECTORY && first_child != NULL` → `-ENOTEMPTY`.<br>POSIX compliance для rmdir semantics. |
-| **waitpid Status Encoding** | `status == exit_code` (normal exit, 0..255); `status == -1` (killed by kernel: SIGSEGV, OOM, guard page).<br>НЕ Linux-compatible (нет `<< 8`). |
-| **VMA Splitting (mprotect)** | `vma_protect_range()` разделяет VMA при частичном покрытии (5 случаев).<br>`VMA_COW` сохраняется.<br>Паттерн идентичен `vma_unmap_range()`. |
-| **CoW-safe mprotect** | `vmm_protect_page_in_pd()` сохраняет `PAGE_COW + PWT/PCD/GLOBAL`.<br>Если `PAGE_COW` активен — `PAGE_WRITE` принудительно снимается (аппаратная защита CoW). |
-| **POSIX Return Convention** | Все POSIX-обёртки в `user_libc.c` при ошибке возвращают `-1` (или `MAP_FAILED` для mmap) и устанавливают `errno = -ret`.<br>Raw errno НЕ возвращается пользователю. |
-| **TCC Tagged Struct Rule** | Все структуры в `user_libc.h`, используемые TCC, обязаны быть tagged (`struct timeval`, не `typedef struct {...} timeval_t`).<br>TCC пишет `struct timeval tv;` — anonymous struct → incomplete type → compilation error.<br>Паттерн: `struct X {...}; typedef struct X X_t;`. |
-| **TCC dl* Guard** | Объявления `dlopen/dlsym/dlclose/dlerror` + `RTLD_*` обёрнуты в `#ifndef CONFIG_TCC_STATIC`.<br>TCC определяет собственные static stubs с несовместимыми сигнатурами.<br>Без guard → conflicting types error. |
-| **CoW ref==0 Safety** | `vmm_handle_user_write_fault`: если `pmm_get_refcount() == 0` (теоретически corruption), трактуется как last-owner: COW снимается, WRITE восстанавливается.<br>Безопаснее чем crash. |
-| **RBAC FS_SYSTEM** | `sys_open`: `(FS_SYSTEM && !FS_DIRECTORY) → EACCES`.<br>`sys_mkdir`: `parent->flags & FS_SYSTEM → EACCES`.<br>`/boot` не существует в VFS (ISO-level, не initrd) — RBAC проверяется code review, не Ring 3 тестом. |
-| **vfs_close_fd Orphan Semantics** | `of->ref_count--` → 0 → `node->ref_count--` → 0 && `is_unlinked` → `close()` + `kfree(private_data)` + `kfree(node)` + `kfree(of)`.<br>IRQ-safe.<br>Ring 0 НЕ вызывает `sys_close()`. |
-| **tmpfs ENOTEMPTY** | `tmpfs_unlink`: `FS_DIRECTORY && first_child → -ENOTEMPTY`.<br>POSIX rmdir semantics. |
+1. **Ядро Никогда Не Доверяет Пользовательским Указателям**
+   - Валидировать все аргументы системных вызовов
+   - `is_user_pointer()` проверяет границы
+   - Отклонять адреса ядра (`>= 0xC0000000`)
 
-### ARM Nuances
+2. **W^X Это Закон**
+   - Память не может быть одновременно writable и executable
+   - Принудительно соблюдается на page/section level
+   - `mmap(PROT_WRITE|PROT_EXEC)` → `-EPERM`
 
-| Нюанс | Описание |
-|---|---|
-| **ARM ISB/DSB/DMB** | ARMv6 не имеет UAL `isb/dsb/dmb`.<br>Используем CP15:<br>`ISB = mcr p15,0,r0,c7,c5,4`<br>`DSB = c7,c10,4`<br>`DMB = c7,c10,5` |
-| **ARM PHYS_BASE** | QEMU raspi1ap загружает kernel по `0x10000` (не `0x8000`).<br>Реальный RPi1: `0x8000`.<br>`PHYS_BASE` в `linker_arm.ld`. |
-| **ARM VMA/LMA** | VMA = LMA + KERNEL_VMA для каждой секции.<br>`AT(ADDR(.section) - KERNEL_VMA)`.<br>Иначе MMU транслирует в мусор. |
-| **ARM TTBR1 QEMU** | QEMU raspi1ap: Prefetch Abort при TTBR1 N=2.<br>Spike: один TTBR0 (identity + HH).<br>TTBR0/TTBR1 split — позже. |
-| **ARM Section Map** | Начальный маппинг: Section 1 MB (не 4 KB pages).<br>RAM = `PA|0x140E`, Device = `PA|0x416`.<br>Fine-grained — в `arm_mmu.c`. |
-| **ARM No Hardware Divide** | ARM1176 не имеет div.<br>GCC генерирует `__aeabi_uidiv` (libgcc).<br>Решение: hardcoded константы + libgcc в LDFLAGS. |
-| **ARM SVC vs INT 0x80** | ARM syscall: `svc #0` (не `int 0x80`).<br>Номера syscall — Enclave (Frozen).<br>`user_syscalls.h` меняет только asm обёртку. |
-| **ARM Exception Vectors** | 8 векторов (не 256 как x86 IDT).<br>VBAR = адрес `_vector_table` в `.text` (не `0xFFFF0000`).<br>`b handler` (не `ldr pc` — нет literal pool).<br>SVC = syscall, DAbort = page fault, IRQ = hardware. |
-| **ARM PL011 UART** | BCM2835 UART0 (PL011) по `0x20201000`.<br>GPIO 14/15 ALT0.<br>Baud: IBRD=1, FBRD=40 (3 MHz UARTCLK). |
-| **ARM hal_timer_delay** | `hal_timer_delay_us/ms` реализованы в `arm_timer.c` (BCM2835 CLO polling, 1 MHz).<br>Hardware counter тикает с power-on, работает ДО `hal_timer_init()`.<br>Calibrated loop (Day 37 stub) удалён из `arm_uart.c` — hardware timer точнее. |
-| **ARM Syscall ABI** | `svc #0`; `r7` = syscall number; `r0-r6` = args; `r0` = return.<br>Номера syscall совпадают с x86 Enclave ABI. |
-| **ARM Preemptive User CPSR** | `0x50 = USR | FIQ disabled | IRQ enabled`.<br>Используется для user tasks начиная с Day 46. |
-| **ARM User IRQ Trap Frame** | IRQ from USR mode сохраняет 72-byte frame: `r0-r12`, `SP_usr`, `LR_usr`, padding, `PC`, `CPSR`.<br>IRQ from SVC mode сохраняет 64-byte kernel frame.<br>Mode detection: `SPSR_irq & 0x1F == ARM_MODE_USR`. |
-| **ARM User IRQ Return** | `SP_usr` восстанавливается через SYS mode.<br>`r0-r12` и `LR_usr` восстанавливаются через `ldmia sp, {r0-r12, lr}^`.<br>`PC/CPSR` восстанавливаются через `rfeia sp!`. |
-| **ARM W^X Section Flags** | User code: `0x180E` (user RO, executable).<br>User data: `0x1C1E` (user RW, XN). |
-| **ARM Scheduler TASK_FREE** | `schedule()` не должен возвращать мёртвую задачу в `TASK_READY`.<br>`TASK_FREE` — терминальное состояние до очистки. |
-| **ARM PID 0 Immortal Guard** | `arm_task_exit()` игнорирует `current_task == 0`.<br>Idle не может быть убит через `sys_exit`. |
-| **ARM Task Control API** | `arm_syscall.c` не имеет прямого доступа к `tasks[]` или `current_task`.<br>Используются `arm_current_pid()`, `arm_task_yield()`, `arm_task_exit()`. |
-| **ARM Immediate Encoding** | `mov Rd, #imm` поддерживает только 8-bit immediate с even rotate.<br>Большие константы через `ldr Rd, =value`. |
-| **ARM User Entry** | `arm_enter_user_first`: set `SP_usr`, set `SPSR = ARM_CPSR_USER (0x50)`, clear `r0-r12`, `movs pc, lr`. |
-| **ARM User Fault Isolation** | UNDEF/PABT/DABT из USR mode строят 72-byte user fault frame.<br>`arm_vectors.S` явно определяет прерванный режим через `SPSR & 0x1F`.<br>User fault → `arm_user_fault_entry()` → `arm_task_fault_kill()` → `TASK_FREE` → `schedule()`.<br>Kernel fault → `arm_kernel_fault_entry()` → fatal dump + halt.<br>Fault path никогда не возвращается в упавшую задачу (нет `rfeia`). |
-| **ARM SVC Full User Frame** | SVC из USR mode строит полный 72-byte user frame (`r0-r12`, `SP_usr`, `LR_usr`, `PC`, `CPSR`).<br>Trap path унифицирован с user IRQ и user Fault.<br>SVC из SVC/kernel mode трактуется как kernel bug и вызывает fatal halt (Zero Trust). |
-| **ARM Blocking Syscalls** | `sys_sleep(ms)` реализован через `TASK_SLEEPING` состояние.<br>Wakeup check в `hal_timer_tick()` переводит задачи в `TASK_READY` при достижении `wakeup_tick`.<br>Scheduler пропускает sleeping задачи.<br>Overflow protection: `ms > 0x7FFFFFFF` rejected. |
+3. **Пользовательский Crash Это Норма**
+   - Ошибка пользователя убивает задачу, ядро продолжает работу
+   - Планировщик переключается на следующую готовую задачу
+   - Init перезапускает упавшие сервисы
+
+4. **Ошибка Ядра Это Фатально**
+   - Баг ядра → фатальный дамп + halt
+   - Нет восстановления из kernel exceptions
+   - Triple fault / panic это допустимая смерть ядра
+
+5. **PID 0 Бессмертен**
+   - Kernel idle task не может быть убита
+   - `sys_exit` из PID 0 игнорируется
+   - Система всегда имеет хотя бы одну работающую задачу
+
+6. **Доступ к Ресурсам Через VFS/Syscalls**
+   - Нет прямого доступа к оборудованию из Ring 3 / USR mode
+   - Все устройства доступны через `/dev/*` VFS nodes
+   - Системные вызовы — единственные точки входа в ядро
+
+7. **Явные Права Доступа к Памяти**
+   - Каждый маппинг имеет явные R/W/X права
+   - Нет неявных прав
+   - Guard pages защищают от переполнения стека
+
+8. **IRQ Safety в Критических Секциях**
+   - Использовать паттерн `irq_save()/irq_restore()`
+   - Избегать безусловных `cli/sti` кроме idle/fatal loops
+   - Все операции аллокаторов IRQ-safe
+
 ---
 
-## 📎 ПРИЛОЖЕНИЕ B: ВЕРДИКТ МЕНТОРА
+## 11. Критические Архитектурные Нюансы
 
-> *"Любая новая фича, позволяющая Ring 0 взаимодействовать с Ring 3 памятью, обязана иметь:*
->
-> - *Bounds checking (верхняя и нижняя границы)*
-> - *Permission checking (`VMA_WRITE` для writes)*
-> - *Resource limiting (максимум аргументов/размеров)*
-> - *Kernel stack safety (никаких больших static arrays)*
-> - *Atomicity (`cli/sti` для критических секций)"*
+### 11.1 ARM Критические Нюансы
+
+**CP15 Barriers (ARMv6):**
+```text
+ARMv6 не имеет UAL isb/dsb/dmb инструкций.
+Использовать CP15 coprocessor:
+  ISB = mcr p15, 0, r0, c7, c5, 4
+  DSB = mcr p15, 0, r0, c7, c10, 4
+  DMB = mcr p15, 0, r0, c7, c10, 5
+```
+
+**PHYS_BASE Различие:**
+```text
+QEMU raspi1ap: ядро загружается по адресу 0x00010000
+Реальный RPi1: ядро загружается по адресу 0x00008000
+PHYS_BASE в linker_arm.ld должен совпадать или быть параметризован
+```
+
+**VMA/LMA Формула:**
+```text
+Каждая секция в linker script ДОЛЖНА использовать:
+  AT(ADDR(.section) - KERNEL_VMA)
+Иначе MMU транслирует в мусорные адреса
+```
+
+**VBAR Setup:**
+```text
+VBAR должен быть установлен ДО включения IRQ
+VBAR = адрес _vector_table в .text (kernel virtual)
+Не использовать high vectors (0xFFFF0000) - ненужная 1 MB секция
+```
+
+**UART Clock Dependency:**
+```text
+PL011 baud rate зависит от core_freq в config.txt
+IBRD=1, FBRD=40 предполагает UARTCLK=3MHz (core_freq=250)
+Документировать: config.txt должен содержать core_freq=250
+```
+
+**Stack Alignment (AAPCS):**
+```text
+Перед любой bl инструкцией: SP mod 8 ДОЛЖЕН БЫТЬ == 0
+Всегда push чётное количество регистров
+Пример: push {r0-r12, lr} = 14 regs = 56 bytes ✅
+        push {r0-r12} = 13 regs = 52 bytes ❌
+```
+
+**Immediate Encoding:**
+```text
+ARM mov поддерживает только 8-bit immediate с even rotate
+Большие константы: использовать ldr Rd, =value (literal pool)
+Пример: mov r7, #999 не работает, использовать mov r7, #99 или ldr r7, =999
+```
+
+**SVC Kernel-Mode Fatal:**
+```text
+SVC из kernel mode это нарушение Zero Trust
+svc_handler проверяет SPSR mode
+Если SVC из SVC/kernel mode → фатальный дамп + halt
+Только SVC из USR mode это валидный syscall
+```
+
+**User Fault Never Returns:**
+```text
+User UNDEF/DABT/PABT → arm_task_fault_kill()
+Задача помечается TASK_FREE
+Путь обработки ошибки никогда не выполняет rfeia
+Планировщик переключается на другую задачу
+Упавшая задача никогда не возобновляется
+```
+
+**WFI May Not Wake:**
+```text
+ARM1176 + QEMU: WFI может не проснуться по System Timer IRQ
+hal_cpu_idle() использует NOP sled:
+  cpsie i
+  nop × 4
+  cpsid i
+Для production Cortex-A: заменить на WFI
+```
+
+### 11.2 x86 Критические Нюансы (Замороженная Ссылка)
+
+**IRET Stack Switch Trap:**
+```text
+popa игнорирует поле ESP
+iret читает user ESP из аппаратного стека
+Нужно обновлять r->useresp, не r->esp
+Иначе возврат на неправильный стек → crash
+```
+
+**EOI Lock Bypass:**
+```text
+Отправить EOI в PIC ДО вызова C обработчика
+outb(0x20, 0x20) перед dispatch обработчика
+Иначе schedule() переключит задачу, IRQ линия заблокируется навсегда
+```
+
+**VIRT_TO_PHYS Underflow:**
+```text
+.boot секции имеют адреса < 0xC0000000
+VIRT_TO_PHYS макрос ДОЛЖЕН проверять:
+  if (addr >= KERNEL_SPACE_START)
+    return addr - KERNEL_SPACE_START
+  else
+    return addr
+Иначе unsigned underflow → мусор в CR3
+```
+
+**CoW Teardown:**
+```text
+pmm_dec_ref() освобождает страницу только когда refcount == 0
+Strict teardown предотвращает use-after-free
+CoW-safe mprotect сохраняет PAGE_COW флаг
+Если PAGE_COW активен, PAGE_WRITE принудительно снимается
+```
+
+**Kernel Heap Isolation:**
+```text
+Kernel heap по адресу 0xD0000000 маппится без PAGE_USER
+Ring 3 доступ → page fault → SIGSEGV
+Zero Trust: пользователь не может получить доступ к kernel heap даже с указателем
+```
+
+**Stack Guard Pages:**
+```text
+Kernel stack pool: 1 guard page + 4 data pages
+Переполнение стека попадает в guard page → SIGSEGV → task kill
+Предотвращает повреждение kernel stack из-за багов пользователя
+```
+
+**Framebuffer PCD:**
+```text
+LFB маппится с PAGE_PCD (Cache Disable)
+Без PCD: кэш-артефакты, tearing, corruption
+Frame buffer это device memory, не normal RAM
+```
+
+**W^X mprotect Enforcement:**
+```text
+mprotect(PROT_WRITE|PROT_EXEC) → -EPERM
+VMA splitting для частичного mprotect
+CoW-safe: сохраняет PAGE_COW + PWT/PCD/GLOBAL флаги
+Page fault handler принудительно соблюдает права
+```
+
+---
+
+## 12. Дорожная Карта ARM
+
+### Фаза 1: Стабилизация Загрузки на Железе ✅ ЗАВЕРШЕНО
+- [x] ARM boot spike (Days 36-37)
+- [x] IRQ + Timer + Vectors (Days 38-40)
+- [x] Переключение контекста + Планировщик (Days 41-42)
+- [x] SVC + User mode (Days 43-45)
+- [x] IRQ preemption из user mode (Day 46)
+- [x] Изоляция ошибок пользователя (Day 47)
+- [x] SVC full user frame (Day 48)
+- [x] Блокирующие системные вызовы `sys_sleep` (Day 49)
+- [x] SVC IRQ hardening (Day 50)
+- [x] PMM фундамент (Day 51B)
+
+### Фаза 2: 4 KB Страницы и Реальный VMM 🔄 В ПРОЦЕССЕ
+- [x] **Задача 2.1: ARM 4 KB Page Tables**
+  - Реализовать L1 coarse tables (1024 записей, 4KB каждая)
+  - Реализовать L2 small pages (256 записей, 1KB каждая)
+  - Заменить 1 MB section mappings на 4 KB страницы
+  - Обновить `build_page_tables` в `arm_boot.S`
+  - **Критерий приёмки:** Ядро загружается с 4 KB page granularity
+
+- [x] **Задача 2.2: ARM VMM Per-Process Address Space**
+  - Реализовать `arm_vmm_create_address_space()`
+  - Реализовать `arm_vmm_destroy_address_space()`
+  - Реализовать `arm_vmm_clone_address_space()` для fork
+  - Per-process TTBR0 switching
+  - **Критерий приёмки:** Несколько пользовательских задач с изолированными address spaces
+
+- [x] **Задача 2.3: Миграция Пользовательских Задач на 4 KB Страницы**
+  - Заменить section mappings на 4 KB страницы для user code/data
+  - Реализовать demand paging для пользовательского пространства
+  - Обновить обработчик ошибок пользователя для page-level granularity
+  - **Критерий приёмки:** Пользовательские задачи работают с 4 KB страницами, demand paging работает
+
+- [ ] **Задача 2.4: ELF Загрузчик для ARM**
+  - Парсить ELF заголовки (ARM little-endian)
+  - Загружать сегменты с правильными правами (R/X для .text, R/W для .data)
+  - Настроить entry point и начальный stack
+  - Заменить сырой бинарный user image на ELF загрузку
+  - **Критерий приёмки:** Может загружать и выполнять ARM ELF бинарники
+
+- [ ] **Задача 2.5: Полное W^X Page-Level Принуждение**
+  - Принудительно соблюдать W^X на page level (не section level)
+  - Реализовать `sys_mmap` с on-demand paging
+  - Реализовать `sys_mprotect` с VMA splitting
+  - Обработчик page fault принудительно соблюдает права
+  - **Критерий приёмки:** `mmap(PROT_WRITE|PROT_EXEC)` возвращает `-EPERM`
+
+### Фаза 3: Production Возможности 📋 ЗАПЛАНИРОВАНО
+- [ ] **Задача 3.1: Параметризация PHYS_BASE**
+  - Обнаруживать QEMU vs реальный RPi1 при загрузке
+  - Параметризовать `PHYS_BASE` (0x10000 для QEMU, 0x8000 для RPi1)
+  - Обновить linker script или runtime relocation
+  - **Критерий приёмки:** Один и тот же kernel.img загружается на QEMU и реальном железе
+
+- [ ] **Задача 3.2: ARM Cortex-A Порт (ARMv7/ARMv8)**
+  - Портировать на Raspberry Pi 2/3 (Cortex-A7/A53)
+  - Использовать UAL `isb/dsb/dmb` инструкции
+  - Включить аппаратное деление
+  - **Критерий приёмки:** Enclave OS работает на современном ARM железе
+
+- [ ] **Задача 3.3: User-Mode Драйверы (Minix 3 Модель)**
+  - Реализовать message passing IPC
+  - Переместить UART/timer драйверы в user space
+  - Ядро предоставляет минимальные IPC примитивы
+  - **Критерий приёмки:** Аппаратные драйверы работают в Ring 3, ядро остаётся минимальным
+
+- [ ] **Задача 3.4: Security Hardening**
+  - Реализовать seccomp (syscall filter)
+  - Реализовать VFS namespaces (chroot-like изоляция)
+  - Capability-based security model
+  - **Критерий приёмки:** Fine-grained контроль доступа для пользовательских анклавов
 
 ---
 
 **Конец документа.**
-````

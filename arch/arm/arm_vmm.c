@@ -12,6 +12,10 @@
 //
 // ⚠️ Day 52 spike: L1 tables из статического пула (8 max).
 //    Позже: dynamic L1 allocation через PMM contiguous allocator.
+//
+// ⚠️ Zero Trust: Все физические адреса, возвращаемые PMM или прочитанные
+//    из TTBR0, ДОЛЖНЫ быть обернуты в PHYS_TO_VIRT() перед разыменованием
+//    в C-коде ядра (Higher Half).
 // ============================================================================
 
 #include <stdint.h>
@@ -135,23 +139,40 @@ void arm_vmm_init(void)
         vmm_l1_used[i] = 0;
 
     hal_uart_puts("[VMM] ARM VMM initialized, boot TTBR0=0x");
+    
+    // FIX: Use temporary variable to avoid destructive shift of cached phys addr
     char buf[9];
+    uint32_t tmp = vmm_boot_ttbr0_phys;
     for (int j = 7; j >= 0; j--) {
-        buf[j] = "0123456789ABCDEF"[vmm_boot_ttbr0_phys & 0xF];
-        vmm_boot_ttbr0_phys >>= 4;
+        buf[j] = "0123456789ABCDEF"[tmp & 0xF];
+        tmp >>= 4;
     }
     buf[8] = '\0';
     hal_uart_puts(buf);
     hal_uart_puts("\r\n");
-
-    // Restore cached value (shifted above)
-    __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
-    vmm_boot_ttbr0_phys = ttbr0 & 0xFFFFC000u;
 }
 
 uint32_t arm_vmm_get_boot_ttbr0(void)
 {
     return vmm_boot_ttbr0_phys;
+}
+
+// ============================================================================
+// ZERO TRUST: IDENTITY TEARDOWN
+// ============================================================================
+
+void arm_vmm_teardown_identity(void)
+{
+    // Обнуляем записи 0-511 в boot TTBR0 (покрывают 0x00000000 - 0x1FFFFFFF).
+    // Это удаляет identity mapping, оставшийся от boot-процесса.
+    // ВАЖНО: используем PHYS_TO_VIRT, так как находимся в higher-half kernel space.
+    volatile uint32_t *boot_l1 = (volatile uint32_t *)PHYS_TO_VIRT(vmm_boot_ttbr0_phys);
+    for (int i = 0; i < 512; i++) {
+        boot_l1[i] = ARM_L1_TYPE_FAULT;
+    }
+
+    hal_mmu_flush_tlb_all();
+    hal_uart_puts("[VMM] Identity mapping torn down (Zero Trust enforced)\r\n");
 }
 
 // ============================================================================
@@ -183,7 +204,8 @@ uint32_t *hal_mmu_create_space(void)
         l1[i] = ARM_L1_TYPE_FAULT;
 
     // Copy kernel entries (3072-4095) from boot TTBR0
-    volatile uint32_t *boot_l1 = (volatile uint32_t *)vmm_boot_ttbr0_phys;
+    // ВАЖНО: используем PHYS_TO_VIRT для доступа к физической памяти из higher-half
+    volatile uint32_t *boot_l1 = (volatile uint32_t *)PHYS_TO_VIRT(vmm_boot_ttbr0_phys);
     for (int i = 3072; i < 4096; i++)
         l1[i] = boot_l1[i];
 
@@ -281,8 +303,8 @@ int hal_mmu_map_page_in_space(uint32_t *space, uint32_t virt,
         uint32_t l2_pa = arm_pmm_alloc_page();
         if (l2_pa == 0) return -1;
 
-        // Zero L2 table
-        volatile uint32_t *l2 = (volatile uint32_t *)l2_pa;
+        // Zero L2 table (MUST use PHYS_TO_VIRT)
+        volatile uint32_t *l2 = (volatile uint32_t *)PHYS_TO_VIRT(l2_pa);
         for (int i = 0; i < 256; i++)
             l2[i] = ARM_L2_TYPE_FAULT;
 
@@ -299,9 +321,9 @@ int hal_mmu_map_page_in_space(uint32_t *space, uint32_t virt,
         return -1;
     }
 
-    // Write L2 small page entry
+    // Write L2 small page entry (MUST use PHYS_TO_VIRT)
     uint32_t l2_pa = l2_phys_from_l1(space[l1_idx]);
-    volatile uint32_t *l2 = (volatile uint32_t *)l2_pa;
+    volatile uint32_t *l2 = (volatile uint32_t *)PHYS_TO_VIRT(l2_pa);
     uint32_t l2_idx = l2_index(virt);
 
     l2[l2_idx] = (phys & 0xFFFFF000u) | hal_flags_to_l2(flags);
@@ -317,7 +339,9 @@ void hal_mmu_map_page(uint32_t virt, uint32_t phys, uint32_t flags)
 {
     uint32_t ttbr0;
     __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
-    uint32_t *space = (uint32_t *)(ttbr0 & 0xFFFFC000u);
+    
+    // ВАЖНО: преобразуем физический адрес TTBR0 в виртуальный адрес в direct map
+    uint32_t *space = (uint32_t *)PHYS_TO_VIRT(ttbr0 & 0xFFFFC000u);
 
     hal_mmu_map_page_in_space(space, virt, phys, flags);
     hal_mmu_flush_tlb_entry(virt);
@@ -336,8 +360,9 @@ void hal_mmu_unmap_page_in_space(uint32_t *space, uint32_t virt)
 
     if (l1_type(space[l1_idx]) != ARM_L1_TYPE_COARSE) return;
 
+    // MUST use PHYS_TO_VIRT
     uint32_t l2_pa = l2_phys_from_l1(space[l1_idx]);
-    volatile uint32_t *l2 = (volatile uint32_t *)l2_pa;
+    volatile uint32_t *l2 = (volatile uint32_t *)PHYS_TO_VIRT(l2_pa);
     uint32_t l2_idx = l2_index(virt);
 
     l2[l2_idx] = ARM_L2_TYPE_FAULT;
@@ -351,7 +376,9 @@ void hal_mmu_unmap_page(uint32_t virt)
 {
     uint32_t ttbr0;
     __asm__ volatile ("mrc p15, 0, %0, c2, c0, 0" : "=r"(ttbr0));
-    uint32_t *space = (uint32_t *)(ttbr0 & 0xFFFFC000u);
+    
+    // ВАЖНО: преобразуем физический адрес TTBR0 в виртуальный адрес в direct map
+    uint32_t *space = (uint32_t *)PHYS_TO_VIRT(ttbr0 & 0xFFFFC000u);
 
     hal_mmu_unmap_page_in_space(space, virt);
     hal_mmu_flush_tlb_entry(virt);

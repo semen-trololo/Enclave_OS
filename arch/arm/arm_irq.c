@@ -45,18 +45,24 @@ static inline uint32_t ctz32(uint32_t x)
 }
 
 // ============================================================================
-// MMIO ACCESS (volatile, no reorder)
+// MMIO ACCESS (volatile, Higher-Half virtual addresses)
+// ============================================================================
+// Day 52 Zero Trust fix:
+// Identity mapping для периферии (entries 512-527) НЕ копируется в user L1
+// tables. Все MMIO-доступы из C-кода ядра ДОЛЖНЫ идти через BCM2835_VIRT,
+// который транслирует физические адреса периферии в Higher-Half виртуальные
+// адреса (0xE0000000+), замапленные в kernel space (entries 3584-3599).
 // ============================================================================
 
-static inline void mmio_write(uint32_t addr, uint32_t val)
+static inline void mmio_write(uint32_t phys_addr, uint32_t val)
 {
-    *(volatile uint32_t*)addr = val;
+    *(volatile uint32_t *)BCM2835_VIRT(phys_addr) = val;
     hal_dsb();
 }
 
-static inline uint32_t mmio_read(uint32_t addr)
+static inline uint32_t mmio_read(uint32_t phys_addr)
 {
-    uint32_t val = *(volatile uint32_t*)addr;
+    uint32_t val = *(volatile uint32_t *)BCM2835_VIRT(phys_addr);
     hal_dsb();
     return val;
 }

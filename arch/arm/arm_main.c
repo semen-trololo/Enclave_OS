@@ -1,16 +1,18 @@
 // ============================================================================
 // arm_main.c — Enclave OS ARM Kernel (Days 43-45: SVC + User Mode)
+//               Day 52: Per-Process 4KB Isolation
 // ============================================================================
 // Tasks:
-//   PID 0: idle       (kernel, boot stack)
-//   PID 1: user_a     (user mode, cooperative)
-//   PID 2: user_b     (user mode, cooperative)
+//   PID 0: idle       (kernel, boot stack, boot TTBR0)
+//   PID 1: user_a     (user mode, isolated 4KB address space)
+//   PID 2: user_b     (user mode, isolated 4KB address space)
 //
 // This spike:
 //   - enters user mode through svc-return trampoline
 //   - uses svc #0 as syscall transport
 //   - integrates user tasks with existing ARM scheduler
 //   - keeps user IRQ disabled (CPSR.I = 1)
+//   - each user task has isolated address space (Day 52)
 //
 // True IRQ preemption from user mode comes later, when IRQ stub saves
 // a full user trap frame.
@@ -22,17 +24,17 @@
 #include "hal/hal_cpu.h"
 #include "hal/hal_irq.h"
 #include "hal/hal_timer.h"
+#include "hal/hal_mmu.h"
 #include "arm_pmm.h"
 #include "arm_vmm.h"
-#include "hal/hal_mmu.h"
 
 
 // ============================================================================
 // EXTERNAL MODULES
 // ============================================================================
 
-extern void arm_context_switch(uint32_t *old_sp, uint32_t new_sp);
-extern void arm_user_setup(void);
+extern void arm_context_switch(uint32_t *old_sp, uint32_t new_sp, uint32_t new_ttbr0);
+extern uint32_t arm_user_create_space_and_load_image(void);
 extern void arm_user_trampoline(void);
 
 // ============================================================================
@@ -49,6 +51,8 @@ extern void arm_user_trampoline(void);
 
 typedef struct {
     uint32_t    sp;             // Saved kernel stack pointer
+    uint32_t    ttbr0_phys;     // Physical address of L1 table (for TTBR0)
+    uint32_t    *space_virt;    // Virtual address of L1 table (for VMM API)
     int         pid;            // Task PID
     const char *name;           // Debug name
     int         state;          // TASK_FREE / TASK_READY / TASK_RUNNING / TASK_SLEEPING
@@ -188,7 +192,7 @@ void schedule(void)
     int prev = current_task;
     current_task = next;
 
-    arm_context_switch(&tasks[prev].sp, tasks[next].sp);
+    arm_context_switch(&tasks[prev].sp, tasks[next].sp, tasks[next].ttbr0_phys);
 }
 
 // ============================================================================
@@ -398,12 +402,16 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
 
     hal_uart_puts("\r\n");
     hal_uart_puts("========================================\r\n");
-
+    hal_uart_puts("  Enclave OS — ARM Port\r\n");
+    hal_uart_puts("  BCM2835 / ARM1176JZF-S / ARMv6\r\n");
+    hal_uart_puts("  Alpha 0.6-arm-vmm\r\n");
+    hal_uart_puts("========================================\r\n");
+    hal_uart_puts("\r\n");
     // ------------------------------------------------------------------
     // 1.5 PMM (Day 51B: ARM Physical Memory Manager)
     // ------------------------------------------------------------------
-    // ВАЖНО: PMM должен быть инициализирован ДО arm_user_setup(),
-    // потому что user memory теперь аллоцируется динамически.
+    // ВАЖНО: PMM должен быть инициализирован ДО создания user spaces,
+    // потому что user memory теперь аллоцируется динамически через PMM.
     // ------------------------------------------------------------------
 
     arm_pmm_init(atags_addr, BCM2835_RAM_SIZE_DEFAULT);
@@ -419,10 +427,6 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     uint32_t kernel_size = (uint32_t)&_kernel_end - (uint32_t)&_kernel_start;
     arm_pmm_reserve_range(kernel_phys_start, kernel_size);
 
-    // 3. User spike regions (temporary 1 MB sections)
-    arm_pmm_reserve_range(ARM_USER_CODE_PADDR, ARM_USER_CODE_SIZE);
-    arm_pmm_reserve_range(ARM_USER_DATA_PADDR, ARM_USER_DATA_SIZE);
-
     arm_pmm_check_balance();
 
     // ------------------------------------------------------------------
@@ -430,11 +434,8 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     // ------------------------------------------------------------------
     hal_mmu_init();
     
-    hal_uart_puts("  Enclave OS — ARM Port\r\n");
-    hal_uart_puts("  BCM2835 / ARM1176JZF-S / ARMv6\r\n");
-    hal_uart_puts("  Alpha 0.6-arm-user\r\n");
-    hal_uart_puts("========================================\r\n");
-    hal_uart_puts("\r\n");
+    // Zero Trust: Tear down identity mapping now that we are in Higher Half.
+    arm_vmm_teardown_identity();
 
     // ------------------------------------------------------------------
     // 2. IRQ + Timer init
@@ -450,48 +451,51 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     hal_timer_init(1000);
 
     // ------------------------------------------------------------------
-    // 3. User memory + user image
+    // 3. Create tasks (Per-Process Isolation)
     // ------------------------------------------------------------------
 
-    hal_uart_puts("[INIT] ARM user memory setup...\r\n");
-    arm_user_setup();
+    hal_uart_puts("[INIT] Creating isolated tasks...\r\n");
 
-    // ------------------------------------------------------------------
-    // 4. Create tasks
-    // ------------------------------------------------------------------
-
-    hal_uart_puts("[INIT] Creating tasks...\r\n");
-
-    // PID 0: idle, uses current boot SVC stack.
-    tasks[0].sp    = 0;
-    tasks[0].pid   = 0;
-    tasks[0].name  = "idle";
-    tasks[0].state = TASK_RUNNING;
+    // PID 0: idle, uses current boot SVC stack and boot TTBR0.
+    tasks[0].sp         = 0;
+    tasks[0].ttbr0_phys = arm_vmm_get_boot_ttbr0();
+    tasks[0].space_virt = (uint32_t *)0;
+    tasks[0].pid        = 0;
+    tasks[0].name       = "idle";
+    tasks[0].state      = TASK_RUNNING;
 
     current_task = 0;
     num_tasks = 3;
 
-    // PID 1: user_a
+    // PID 1: user_a (Isolated Enclave)
+    uint32_t space_a = arm_user_create_space_and_load_image();
+    tasks[1].ttbr0_phys = space_a;
+    tasks[1].space_virt = (uint32_t *)PHYS_TO_VIRT(space_a);
+    
     arm_task_create_user(1,
                          1,
                          "user_a",
-                         ARM_USER_CODE_VADDR,
-                         ARM_USER_STACK_A_TOP,
+                         ARM_USER_CODE_VA_4K,
+                         ARM_USER_STACK_VA_4K,
                          user_a_kstack,
                          TASK_STACK_SIZE);
 
-    // PID 2: user_b
+    // PID 2: user_b (Isolated Enclave)
+    uint32_t space_b = arm_user_create_space_and_load_image();
+    tasks[2].ttbr0_phys = space_b;
+    tasks[2].space_virt = (uint32_t *)PHYS_TO_VIRT(space_b);
+
     arm_task_create_user(2,
                          2,
                          "user_b",
-                         ARM_USER_CODE_VADDR,
-                         ARM_USER_STACK_B_TOP,
+                         ARM_USER_CODE_VA_4K,
+                         ARM_USER_STACK_VA_4K,
                          user_b_kstack,
                          TASK_STACK_SIZE);
 
-    hal_uart_puts("[OK]   PID 0: idle\r\n");
-    hal_uart_puts("[OK]   PID 1: user_a\r\n");
-    hal_uart_puts("[OK]   PID 2: user_b\r\n");
+    hal_uart_puts("[OK]   PID 0: idle (boot TTBR0)\r\n");
+    hal_uart_puts("[OK]   PID 1: user_a (isolated 4KB space)\r\n");
+    hal_uart_puts("[OK]   PID 2: user_b (isolated 4KB space)\r\n");
     hal_uart_puts("\r\n");
 
     // ------------------------------------------------------------------
@@ -505,7 +509,7 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     //   - UART
     //   - IRQ controller
     //   - timer
-    //   - user memory
+    //   - user memory (per-process isolated)
     //   - scheduler tasks
     //
     // Therefore it is safe to enable global IRQ before entering idle.
@@ -525,7 +529,7 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     //   schedule()
     //
     // The first timer quantum will switch from idle to user_a.
-    // User tasks exit through sys_exit.
+    // User tasks exit through sys_exit or UNDEF (crash test).
     // ------------------------------------------------------------------
 
     hal_uart_puts("[TEST] Running user tasks preemptively...\r\n");

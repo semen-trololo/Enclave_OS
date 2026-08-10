@@ -28,12 +28,37 @@
 .arm
 .align 2
 
+@ ==========================================================================
+@ ARM Context Switch (v3: VMM-Aware TTBR0 Switch)
+@ ==========================================================================
+@ v3 FIX: Добавлено переключение TTBR0 для per-process address spaces.
+@
+@ void arm_context_switch(uint32_t *old_sp, uint32_t new_sp, uint32_t new_ttbr0);
+@
+@ r0 = &old_sp
+@ r1 = new_sp
+@ r2 = new_ttbr0_phys
+@ ==========================================================================
+
 .global arm_context_switch
 arm_context_switch:
     mrs  r12, cpsr            @ r12 = current CPSR
     push {r4-r12, lr}         @ Save callee-saved + CPSR + LR (40 bytes)
     str  sp, [r0]             @ *old_sp = current SP
     mov  sp, r1               @ Switch to new task's stack
+    
+    @ --- TTBR0 Switch ---
+    mrc p15, 0, r3, c2, c0, 0 @ r3 = current TTBR0
+    cmp r3, r2
+    beq 1f                    @ same space, skip switch
+    
+    mcr p15, 0, r2, c2, c0, 0 @ write new TTBR0
+    mov r3, #0
+    mcr p15, 0, r3, c7, c10, 4 @ DSB
+    mcr p15, 0, r3, c8, c7, 0  @ TLBIALL (flush TLB)
+    mcr p15, 0, r3, c7, c10, 4 @ DSB
+    mcr p15, 0, r3, c7, c5, 4  @ ISB
+1:
     pop  {r4-r12, lr}         @ Restore new task's context
     msr  cpsr_c, r12          @ Restore CPSR (mode, I, F)
     bx   lr                   @ Jump to new task (or resume)
