@@ -22,6 +22,7 @@
 #include "hal/hal_cpu.h"
 #include "hal/hal_irq.h"
 #include "hal/hal_timer.h"
+#include "arm_pmm.h"
 
 // ============================================================================
 // EXTERNAL MODULES
@@ -384,7 +385,6 @@ static void arm_task_create_user(int id,
 
 void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
 {
-    (void)atags_addr;
     (void)machine_type;
 
     // ------------------------------------------------------------------
@@ -395,6 +395,32 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
 
     hal_uart_puts("\r\n");
     hal_uart_puts("========================================\r\n");
+
+    // ------------------------------------------------------------------
+    // 1.5 PMM (Day 51B: ARM Physical Memory Manager)
+    // ------------------------------------------------------------------
+    // ВАЖНО: PMM должен быть инициализирован ДО arm_user_setup(),
+    // потому что user memory теперь аллоцируется динамически.
+    // ------------------------------------------------------------------
+
+    arm_pmm_init(atags_addr, BCM2835_RAM_SIZE_DEFAULT);
+
+    // Резервирование статических regions:
+    // 1. Lower 64 KB (ARM exception vectors area)
+    arm_pmm_reserve_range(0x00000000, 0x00010000);
+
+    // 2. Kernel image (.text, .rodata, .data, .bss)
+    extern uint32_t _kernel_start;
+    extern uint32_t _kernel_end;
+    uint32_t kernel_phys_start = 0x00010000;
+    uint32_t kernel_size = (uint32_t)&_kernel_end - (uint32_t)&_kernel_start;
+    arm_pmm_reserve_range(kernel_phys_start, kernel_size);
+
+    // 3. User spike regions (temporary 1 MB sections)
+    arm_pmm_reserve_range(ARM_USER_CODE_PADDR, ARM_USER_CODE_SIZE);
+    arm_pmm_reserve_range(ARM_USER_DATA_PADDR, ARM_USER_DATA_SIZE);
+
+    arm_pmm_check_balance();
     hal_uart_puts("  Enclave OS — ARM Port\r\n");
     hal_uart_puts("  BCM2835 / ARM1176JZF-S / ARMv6\r\n");
     hal_uart_puts("  Alpha 0.6-arm-user\r\n");
