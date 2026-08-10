@@ -1,9 +1,9 @@
 ````markdown
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
-**Версия:** Alpha 0.6-arm-svc
+**Версия:** Alpha 0.6-arm-vmm
 **Дата актуализации:** 10 августа 2026
-**Статус:** ARM Hardware Safety Pass Complete (Day 51A) — Next: ARM PMM Foundation
+**Статус:** ARM VMM Foundation Complete (Day 52) — Next: User Task Migration to 4 KB Pages
 
 **Enclave Doctrine:** Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -651,6 +651,35 @@ User SVC/Fault entry
 → schedule() may switch tasks
 → rfeia restores user CPSR from SPSR (IRQ re-enabled)
 → Idle loop explicitly enables IRQ to ensure timer tick continues
+
+
+### 1.15 Changelog: ARM PMM Foundation (Day 51B, August 2026)
+
+#### Day 51B: ARM Physical Memory Manager
+
+- `include/arm_pmm.h`: новый HAL-контракт для ARM PMM
+- `arch/arm/arm_pmm.c`: bitmap-based page allocator
+- ATAGS parsing: `ATAG_MEM` для RAM discovery
+- Safe-by-default: bitmap = `0xFF` (всё занято при init)
+- O(1) allocation через software `ctz32()` (ARMv6 safe)
+- IRQ-safe: `hal_irq_save/restore` вокруг bitmap ops
+- Accounting: `pmm_allocs`, `pmm_frees`, `pmm_check_balance()`
+- Reservation API: `arm_pmm_reserve_range(start, size)`
+- Интеграция в `arm_main.c`: PMM init **ДО** `arm_user_setup()`
+- Резервирование: lower 64 KB, kernel image, user spike regions
+
+#### Результат
+
+```text
+[PMM] Initializing ARM Physical Memory Manager...
+[PMM] ATAG_MEM: size=512 MB, start=0x00000000
+[PMM] Total pages: 131072, free pages: 130816
+[PMM] Reserved 0x00000000 - 0x00010000
+[PMM] Reserved 0x00010000 - 0x00020000
+[PMM] Reserved 0x00200000 - 0x00400000
+[PMM] Accounting: allocs=0, frees=0, free_pages=130560
+[PMM] Balance OK
+
 
 ## 2. СТРУКТУРА ПРОЕКТА
 
