@@ -2,8 +2,8 @@
 # 📘 Enclave Operating System — Полная Архитектурная Документация
 
 **Версия:** Alpha 0.6-arm-svc
-**Дата актуализации:** 09 августа 2026
-**Статус:** ARM Blocking Syscalls Complete (Day 49)
+**Дата актуализации:** 10 августа 2026
+**Статус:** ARM Hardware Safety Pass Complete (Day 51A) — Next: ARM PMM Foundation
 
 **Enclave Doctrine:** Zero Trust, Immortal Kernel, Crash-Only Userspace.
 
@@ -2037,6 +2037,11 @@ waitpid(pid, &status, 0);
 | **45+** | ARM IRQ Preemption from User Mode + Fault Isolation | ✅ IRQ Preemption (Day 46); ✅ User Fault Isolation (Day 47) |
 | **48** | ARM SVC Full User Frame | ✅ Complete (Day 48) |
 | **49** | ARM Blocking Syscalls (`sys_sleep`) | ✅ Complete (Day 49) |
+| **51A** | ARM Hardware Safety Pass (PHYS_BASE parameterization) | ✅ Complete |
+| **51B** | ARM PMM Foundation (ATAGS parsing + bitmap allocator) | 📋 In Progress |
+| **52** | ARM 4 KB Page Tables (L1 coarse + L2 small pages) | 📋 Planned |
+| **53** | ARM VMM (per-process address space) | 📋 Planned |
+| **54** | User Task Migration (sections → 4 KB pages) | 📋 Planned |
 | **50+** | ARM 4 KB Pages + Real ARM VMM | 📋 Planned |
 | **57+** | User-Mode Drivers (Minix 3), IPC (Message Passing) | 📋 Planned |
 | **58+** | Seccomp (Syscall Filter), VFS Namespaces (chroot) | 📋 Planned |
