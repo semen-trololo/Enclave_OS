@@ -76,6 +76,7 @@ ASM_SOURCES := \
 C_SOURCES := \
 	$(ARCH_DIR)/arm_uart.c \
 	$(ARCH_DIR)/arm_main.c \
+	$(ARCH_DIR)/arm_pmm.c \
 	$(ARCH_DIR)/arm_irq.c \
 	$(ARCH_DIR)/arm_timer.c \
 	$(ARCH_DIR)/arm_syscall.c \
