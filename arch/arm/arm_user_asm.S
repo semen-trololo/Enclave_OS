@@ -1,6 +1,7 @@
 @ ==========================================================================
-@ arm_user_asm.S — ARM User Mode Trampoline + Test Image
+@ arm_user_asm.S — ARM User Mode Trampoline + Embedded ELF Image
 @ ==========================================================================
+@ Day 54: ELF Loader Integration
 @
 @ This file contains:
 @   1. arm_user_trampoline()
@@ -9,15 +10,16 @@
 @   2. arm_enter_user_first()
 @      Sets user SP, user CPSR, clears registers, returns to user mode.
 @
-@   3. _user_test_start / _user_test_end
-@      Raw ARM user test image copied to ARM_USER_CODE_VADDR.
+@   3. _user_elf_start / _user_elf_end
+@      Embedded ARM ELF binary loaded by arm_elf_load().
 @
 @ User CPSR:
-@   0x50 = USR mode | FIQ disabled | IRQ enabled
+@   ARM_CPSR_USER = 0x50 = USR mode | FIQ disabled | IRQ enabled
 @
 @ Day 46: Timer IRQ can preempt user code directly.
 @ Day 47: User fault isolation (UNDEF/PABT/DABT kill task, kernel alive).
 @ Day 49: Blocking syscall test (sys_sleep).
+@ Day 54: ELF loader integration (replaces raw binary).
 @ ==========================================================================
 
 #include "config.h"
@@ -55,6 +57,13 @@ arm_user_trampoline:
 @ r0 = user_pc
 @ r1 = user_sp
 @ r2 = kernel_stack_top
+@
+@ This function:
+@   1. Sets SP_usr to user_sp
+@   2. Sets SP_svc to kernel_stack_top (for future SVC/IRQ entry)
+@   3. Prepares SPSR with ARM_CPSR_USER (IRQ enabled)
+@   4. Clears all general-purpose registers (Zero Trust)
+@   5. Returns to user mode via movs pc, lr
 @ ==========================================================================
 
 .global arm_enter_user_first
@@ -63,28 +72,44 @@ arm_enter_user_first:
     mov r4, r1                  @ r4 = user_sp
     mov r5, r2                  @ r5 = kernel_stack_top
 
+    @ ------------------------------------------------------------------
     @ Set user stack pointer.
-    cps #0x1F                   @ SYS mode
+    @
+    @ We must switch to SYS mode to access SP_usr.
+    @ SYS mode (0x1F) shares register bank with USR mode.
+    @ ------------------------------------------------------------------
+    cps #0x1F                   @ Switch to SYS mode
     mov sp, r4                  @ SP_usr = user_sp
-    cps #0x13                   @ back to SVC mode
+    cps #0x13                   @ Back to SVC mode
 
+    @ ------------------------------------------------------------------
     @ Set kernel stack pointer for future SVC/IRQ entry.
+    @ This is the stack used by syscall handlers and IRQ handlers.
+    @ ------------------------------------------------------------------
     mov sp, r5
 
+    @ ------------------------------------------------------------------
     @ Prepare user CPSR.
     @
-    @ Day 46:
-    @   ARM_CPSR_USER = USR mode | FIQ disabled | IRQ enabled
-    @   value = 0x50
+    @ ARM_CPSR_USER = USR mode | FIQ disabled | IRQ enabled
+    @ Value = 0x50
     @
-    @ This allows timer IRQ to preempt user code.
+    @ Day 46: IRQ enabled allows timer IRQ to preempt user code.
+    @ ------------------------------------------------------------------
     ldr r0, =ARM_CPSR_USER
     msr spsr_cxsf, r0
 
-    @ Return address.
+    @ ------------------------------------------------------------------
+    @ Set return address to user entry point.
+    @ ------------------------------------------------------------------
     mov lr, r3                  @ LR = user_pc
 
-    @ Clear registers to avoid leaking kernel state.
+    @ ------------------------------------------------------------------
+    @ Zero Trust: Clear all general-purpose registers.
+    @
+    @ This prevents leaking kernel state into user mode.
+    @ User code should not see any remnants of kernel pointers/values.
+    @ ------------------------------------------------------------------
     mov r0, #0
     mov r1, #0
     mov r2, #0
@@ -99,120 +124,35 @@ arm_enter_user_first:
     mov r11, #0
     mov r12, #0
 
+    @ ------------------------------------------------------------------
     @ Enter user mode.
+    @
+    @ movs pc, lr:
+    @   - Copies LR to PC (jumps to user_pc)
+    @   - Copies SPSR to CPSR (switches to USR mode, enables IRQ)
+    @ ------------------------------------------------------------------
     movs pc, lr
 
 @ ==========================================================================
-@ USER TEST IMAGE
+@ EMBEDDED ELF IMAGE
 @ ==========================================================================
-@ This code is copied to ARM_USER_CODE_VADDR (0x00100000) and executed
-@ in USR mode.
+@ This is the ARM ELF binary that will be loaded by arm_elf_load().
 @
-@ Syscall ABI:
-@   r7    = syscall number
-@   r0-r6 = arguments
-@   r0    = return value
+@ The ELF file is compiled from user_src/user_test.c and embedded here
+@ via .incbin directive. The linker places it in .rodata section.
 @
-@ Test sequence:
-@   1. invalid syscall -> -ENOSYS
-@   2. sys_getpid() + sys_write() (print PID)
-@   3. sys_sleep(500) (Day 49: blocking syscall test)
-@   4. Busy loop (preemption window)
-@   5. UNDEF instruction (Day 47 fault isolation test)
-@   6. sys_exit(0) (dead code after UNDEF)
+@ arm_user_create_space_and_load_image() passes _user_elf_start and
+@ _user_elf_end to arm_elf_load() which parses and loads it into
+@ isolated address space.
 @ ==========================================================================
 
-.align 2
-.global _user_test_start
-.global _user_test_end
+.section .rodata
+.align 4
+.global _user_elf_start
+.global _user_elf_end
 
-_user_test_start:
+_user_elf_start:
+    .incbin "build/arm/user_test.elf"
+_user_elf_end:
 
-    @ ---------------------------------------------------------------
-    @ r4 = iterations
-    @ r6 = busy-loop count
-    @ ---------------------------------------------------------------
-
-    mov r4, #3
-    ldr r6, =1000000
-
-1:
-
-    @ ---------------------------------------------------------------
-    @ Print PID as a single character + newline.
-    @
-    @ getpid() returns:
-    @   1 for user_a
-    @   2 for user_b
-    @
-    @ We build a 2-byte buffer on the user stack:
-    @   [0] = '0' + pid
-    @   [1] = '\n'
-    @
-    @ User stack is inside ARM_USER_DATA_VADDR region,
-    @ so sys_write validation accepts it.
-    @ ---------------------------------------------------------------
-
-    mov r7, #122                @ SYS_getpid
-    svc #0
-
-    add r0, r0, #48             @ '0' + pid
-    mov r1, #10                 @ '\n'
-
-    sub sp, sp, #8              @ allocate 8 bytes (keeps 8-byte alignment)
-    strb r0, [sp]               @ byte 0: pid char
-    strb r1, [sp, #1]           @ byte 1: '\n'
-
-    mov r0, #1                  @ fd = stdout
-    mov r1, sp                  @ buf
-    mov r2, #2                  @ len
-    mov r7, #4                  @ SYS_write
-    svc #0
-
-    add sp, sp, #8              @ restore stack
-
-    @ ---------------------------------------------------------------
-    @ Day 49: Test sys_sleep(500ms)
-    @
-    @ This task will sleep, scheduler switches to other task.
-    @ After 500ms, timer tick wakes this task, scheduler resumes it.
-    @ ---------------------------------------------------------------
-
-    mov r0, #500                @ ms = 500
-    mov r7, #230                @ SYS_sleep
-    svc #0
-
-    @ ---------------------------------------------------------------
-    @ Busy loop.
-    @ This is the preemption window.
-    @ ---------------------------------------------------------------
-
-    mov r5, r6
-
-2:
-    subs r5, r5, #1
-    bne 2b
-
-    subs r4, r4, #1
-    bne 1b
-
-    @ =================================================================
-    @ FAULT TEST (Day 47: User Fault Isolation)
-    @ =================================================================
-    @ Trigger UNDEF immediately after the loop.
-    @ The kernel MUST intercept this, print [FAULT], and kill the task.
-    .word 0xE7F001F0            @ Guaranteed UNDEF on ARMv6
-
-    @ =================================================================
-    @ DEAD CODE (Execution must NEVER reach here if fault isolation works)
-    @ =================================================================
-    mov r0, #0
-    mov r7, #1                  @ SYS_exit
-    svc #0
-
-3:
-    b 3b
-
-    .ltorg
-
-_user_test_end:
+.ltorg
