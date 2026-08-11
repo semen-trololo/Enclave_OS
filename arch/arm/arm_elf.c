@@ -165,87 +165,76 @@ static uint32_t segment_flags_to_hal(uint32_t p_flags)
 static int load_segment(uint32_t *space, const uint8_t *elf_image,
                         const Elf32_Phdr *phdr)
 {
-    uint32_t vaddr = phdr->p_vaddr;
-    uint32_t filesz = phdr->p_filesz;
-    uint32_t memsz = phdr->p_memsz;
-    uint32_t offset = phdr->p_offset;
-    uint32_t flags = segment_flags_to_hal(phdr->p_flags);
+    uint32_t seg_va   = phdr->p_vaddr;
+    uint32_t filesz   = phdr->p_filesz;
+    uint32_t memsz    = phdr->p_memsz;
+    uint32_t fileoff  = phdr->p_offset;
+    uint32_t flags    = segment_flags_to_hal(phdr->p_flags);
 
-    // Calculate page range
-    uint32_t vaddr_start = vaddr & ~0xFFF;
-    uint32_t vaddr_end = (vaddr + memsz + 0xFFF) & ~0xFFF;
-    uint32_t num_pages = (vaddr_end - vaddr_start) / 0x1000;
+    // Segment memory range.
+    uint32_t seg_end = seg_va + memsz;
 
-    hal_uart_puts("[ELF] Loading segment: vaddr=0x");
-    // Print vaddr (simple hex print)
-    char buf[9];
-    for (int i = 7; i >= 0; i--) {
-        buf[i] = "0123456789ABCDEF"[vaddr & 0xF];
-        vaddr >>= 4;
-    }
-    buf[8] = '\0';
-    hal_uart_puts(buf);
-    hal_uart_puts(" size=");
-    
-    // Print memsz as decimal
-    char dec_buf[12];
-    int dec_idx = 11;
-    dec_buf[dec_idx] = '\0';
-    uint32_t tmp = memsz;
-    if (tmp == 0) {
-        hal_uart_puts("0");
-    } else {
-        while (tmp > 0 && dec_idx > 0) {
-            dec_buf[--dec_idx] = '0' + (tmp % 10);
-            tmp /= 10;
-        }
-        hal_uart_puts(&dec_buf[dec_idx]);
-    }
-    hal_uart_puts("\r\n");
+    // Page-aligned mapping range.
+    uint32_t map_start = seg_va & ~0xFFFu;
+    uint32_t map_end   = (seg_end + 0xFFFu) & ~0xFFFu;
 
-    // Allocate and map pages
+    if (map_end <= map_start)
+        return 0;
+
+    uint32_t num_pages = (map_end - map_start) / 0x1000;
+
+    hal_uart_puts("[ELF] Loading PT_LOAD segment\r\n");
+
     for (uint32_t page = 0; page < num_pages; page++) {
-        uint32_t page_vaddr = vaddr_start + (page * 0x1000);
-        
-        // Allocate physical page
-        uint32_t page_paddr = arm_pmm_alloc_page();
-        if (page_paddr == 0) {
-            hal_uart_puts("[ELF] OOM: cannot allocate page\r\n");
+        uint32_t page_va = map_start + (page * 0x1000);
+
+        // Allocate physical page.
+        uint32_t page_pa = arm_pmm_alloc_page();
+        if (page_pa == 0) {
+            hal_uart_puts("[ELF] OOM: cannot allocate segment page\r\n");
             return -1;
         }
 
-        // Map page
-        if (hal_mmu_map_page_in_space(space, page_vaddr, page_paddr, flags) < 0) {
-            hal_uart_puts("[ELF] Failed to map page\r\n");
-            arm_pmm_free_page(page_paddr);
+        // Map page into target address space.
+        if (hal_mmu_map_page_in_space(space, page_va, page_pa, flags) < 0) {
+            hal_uart_puts("[ELF] Failed to map segment page\r\n");
+            arm_pmm_free_page(page_pa);
             return -1;
         }
 
-        // Zero the page first (for BSS)
-        volatile uint8_t *page_virt = (volatile uint8_t *)PHYS_TO_VIRT(page_paddr);
-        for (uint32_t i = 0; i < 4096; i++) {
+        // Access page through kernel direct map.
+        volatile uint8_t *page_virt = (volatile uint8_t *)PHYS_TO_VIRT(page_pa);
+
+        // Zero whole page first. This handles BSS and padding.
+        for (uint32_t i = 0; i < 0x1000; i++) {
             page_virt[i] = 0;
         }
 
-        // Copy segment data if this page overlaps with file data
-        uint32_t page_start_offset = page * 0x1000;
-        uint32_t page_end_offset = page_start_offset + 0x1000;
-        
-        uint32_t copy_start = (vaddr - vaddr_start);
-        uint32_t copy_end = copy_start + filesz;
-        
-        if (page_start_offset < copy_end && page_end_offset > copy_start) {
-            uint32_t seg_offset_start = (page_start_offset > copy_start) ? 
-                                        (page_start_offset - copy_start) : 0;
-            uint32_t seg_offset_end = (page_end_offset < copy_end) ? 
-                                      (page_end_offset - copy_start) : filesz;
-            
-            uint32_t page_offset = seg_offset_start - (page_start_offset - copy_start);
-            uint32_t copy_size = seg_offset_end - seg_offset_start;
-            
-            const uint8_t *src = elf_image + offset + seg_offset_start;
-            volatile uint8_t *dst = page_virt + page_offset;
-            
+        // Copy file-backed part of segment.
+        //
+        // Segment file data covers virtual addresses:
+        //   [seg_va, seg_va + filesz)
+        //
+        // Current page covers:
+        //   [page_va, page_va + 0x1000)
+        //
+        // We copy intersection of these two ranges.
+
+        uint32_t file_data_end = seg_va + filesz;
+
+        uint32_t copy_start = (page_va > seg_va) ? page_va : seg_va;
+
+        uint32_t page_end = page_va + 0x1000;
+        uint32_t copy_end = (page_end < file_data_end) ? page_end : file_data_end;
+
+        if (copy_start < copy_end) {
+            uint32_t src_offset = fileoff + (copy_start - seg_va);
+            uint32_t dst_offset = copy_start - page_va;
+            uint32_t copy_size  = copy_end - copy_start;
+
+            const uint8_t *src = elf_image + src_offset;
+            volatile uint8_t *dst = page_virt + dst_offset;
+
             for (uint32_t i = 0; i < copy_size; i++) {
                 dst[i] = src[i];
             }
