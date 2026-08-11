@@ -406,6 +406,40 @@
 // ============================================================================
 #define BCM2835_RAM_SIZE_DEFAULT (512 * 1024 * 1024)  // 512 MB (QEMU raspi1ap)
 
+// ============================================================================
+// ARM Mailbox / Framebuffer (Day 55 video spike)
+// ============================================================================
+// BCM2835 mailbox используется для запроса framebuffer у GPU firmware.
+// ARM не управляет HDMI напрямую. GPU выделяет framebuffer и scanout.
+// ============================================================================
+
+#define BCM2835_MBOX_BASE             (BCM2835_PERIPH_BASE + 0xB880)
+
+#define BCM2835_MBOX0_READ            (BCM2835_MBOX_BASE + 0x00)
+#define BCM2835_MBOX0_STATUS          (BCM2835_MBOX_BASE + 0x18)
+#define BCM2835_MBOX1_WRITE           (BCM2835_MBOX_BASE + 0x20)
+#define BCM2835_MBOX1_STATUS          (BCM2835_MBOX_BASE + 0x38)
+
+#define BCM2835_MBOX_STATUS_EMPTY     0x40000000u
+#define BCM2835_MBOX_STATUS_FULL      0x80000000u
+
+// Property channel: framebuffer / property tags.
+#define BCM2835_MBOX_CHANNEL_PROP     8u
+
+// GPU bus address offset.
+// Часто firmware ожидает bus address = physical | 0x40000000.
+#define BCM2835_MBOX_BUS_OFFSET       0x40000000u
+
+// ============================================================================
+// ARM Framebuffer Kernel Virtual Window
+// ============================================================================
+// 16 MB kernel virtual window для framebuffer.
+// Маппится 1MB sections как kernel-only, XN, non-cacheable/device.
+// ============================================================================
+
+#define ARM_FB_VIRT_BASE              0xFD000000u
+#define ARM_FB_MAX_MAP_SIZE           (16 * 1024 * 1024)
+
 
 
 #endif // CONFIG_ARCH_ARM
