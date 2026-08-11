@@ -180,6 +180,7 @@ Metal/
 │   ├── arm_trap.h                       # ⭐ ARM trap frame layout (SVC/IRQ/Fault)
 │   ├── arm_ppm.h                        # ⭐ ARM Physical Memory Manager HAL контракт
 │   ├── arm_vmm.h                        # ⭐ ARM Virtual Memory Manager HAL контракт
+│   ├── arm_fb.h                         # ⭐ ARM BCM2835 framebuffer driver (video spike)
 │   ├── gdt.h, idt.h, isr.h, pic.h, tss.h # x86 дескрипторы и прерывания
 │   ├── pmm.h, paging.h, heap.h, vma.h   # Управление памятью
 │   ├── task.h, vfs.h, initrd.h, tmpfs.h, devfs.h
@@ -208,6 +209,7 @@ Metal/
 │       ├── arm_main.c                   # ARM kernel_main, планировщик
 │       ├── arm_syscall.c                # ⭐ ARM SVC dispatcher
 │       ├── arm_user.c                   # Настройка пользовательской памяти
+│       ├── arm_fb.c                     # ⭐ BCM2835 framebuffer video spike
 │       ├── arm_elf.c                    # ⭐ ARM ELF loader (Task 2.4)
 │       ├── arm_user_test.S              # Минимальный user ELF test image
 │       ├── user_test.ld                 # Linker script для user_test.elf
@@ -381,6 +383,27 @@ qemu-system-arm -M raspi1ap -m 512M -serial stdio -kernel build/arm/kernel.img
 - Реальный RPi1 загружает ядро по адресу `0x00008000`
 - Оба используют BCM2835 peripheral base `0x20000000`
 
+### 6.12 BCM2835 Framebuffer Video Spike (Day 55)
+
+**Статус:** Активный hardware bring-up spike.
+
+**Назначение:**
+- Получить ранний видеовывод на QEMU и реальном Raspberry Pi 1.
+- Проверить mailbox property interface BCM2835.
+- Подготовить фундамент для early console и будущего `/dev/fb0`.
+
+**Архитектура:**
+- ARM не управляет HDMI напрямую.
+- Framebuffer запрашивается у GPU firmware через mailbox property channel.
+- После получения физического адреса framebuffer резервируется в PMM.
+- Framebuffer маппится 1 MB sections в kernel virtual window `0xFD000000`.
+- Маппинг kernel-only, XN, user space не имеет доступа.
+
+**Текущие ограничения:**
+- 640x480x32, фиксированный режим.
+- Kernel-space early console, не user-mode driver.
+- QEMU
+
 ### 6.2 Контракт Загрузки
 
 **Адреса загрузки:**
@@ -438,6 +461,7 @@ TTBR0 (4096 записей × 4B = 16 KB, 16KB aligned):
 [512-527]   0x20000000 → 0x20000000  Peripherals (16 MB, Device)
 [3072-3327] 0xC0000000 → 0x00000000  Higher Half RAM (256 MB)
 [3584-3599] 0xE0000000 → 0x20000000  Higher Half Peripherals
+[4048-4063] 0xFD000000 → GPU framebuffer  (16 MB window, kernel-only, XN)
 ```
 
 **Дескрипторы секций (1 MB страницы):**
