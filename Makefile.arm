@@ -7,11 +7,16 @@
 #   make -f Makefile.arm          # Собрать kernel.img
 #   make -f Makefile.arm run      # Запустить в QEMU (raspi1ap)
 #   make -f Makefile.arm debug    # QEMU + GDB server
+#   make -f Makefile.arm user     # Собрать только user_test.elf
 #   make -f Makefile.arm clean    # Очистить
 #
 # Требования:
 #   arm-none-eabi-gcc (>= 10.0)
 #   qemu-system-arm (>= 7.0, машина raspi1ap)
+#
+# Day 54: Task 2.4 — ARM ELF loader integration.
+# Сначала собирается user_test.elf, затем arm_user_asm.o включает его
+# через .incbin в секцию .rodata ядра.
 # ============================================================================
 
 # --- Toolchain ---
@@ -48,11 +53,24 @@ ASFLAGS     += -I$(INCLUDE_DIR)
 ASFLAGS     += -DCONFIG_ARCH_ARM=1
 ASFLAGS     += -g
 
+# --- User test assembler flags ---
+# user_test.S — это пользовательский код, не ядро.
+# Поэтому CONFIG_ARCH_ARM здесь не обязателен.
+USER_ASFLAGS := $(CPU_FLAGS)
+USER_ASFLAGS += -ffreestanding -nostdlib
+USER_ASFLAGS += -I$(INCLUDE_DIR)
+USER_ASFLAGS += -g
+
 # --- Linker ---
 LIBGCC      := $(shell $(CC) $(CPU_FLAGS) -print-libgcc-file-name)
+
 LDFLAGS     := -T $(ARCH_DIR)/linker_arm.ld
 LDFLAGS     += -nostdlib -no-pie
 LDFLAGS     += --gc-sections
+
+USER_LDFLAGS := -T $(ARCH_DIR)/user_test.ld
+USER_LDFLAGS += -nostdlib -no-pie
+USER_LDFLAGS += --gc-sections
 
 # --- QEMU ---
 QEMU        := qemu-system-arm
@@ -81,7 +99,8 @@ C_SOURCES := \
 	$(ARCH_DIR)/arm_irq.c \
 	$(ARCH_DIR)/arm_timer.c \
 	$(ARCH_DIR)/arm_syscall.c \
-	$(ARCH_DIR)/arm_user.c
+	$(ARCH_DIR)/arm_user.c \
+	$(ARCH_DIR)/arm_elf.c
 
 # --- Будущие файлы (раскомментировать по мере написания) ---
 # C_SOURCES += $(ARCH_DIR)/arm_cpu.c
@@ -89,8 +108,21 @@ C_SOURCES := \
 # C_SOURCES += $(ARCH_DIR)/arm_mem.c
 
 # ============================================================================
+# USER TEST ELF IMAGE
+# ============================================================================
+# Этот ELF собирается отдельно и затем встраивается в ядро через .incbin
+# в arch/arm/arm_user_asm.S.
+# ============================================================================
+
+USER_TEST_SRC := $(ARCH_DIR)/arm_user_test.S
+USER_TEST_OBJ := $(BUILD_DIR)/arm_user_test.o
+USER_TEST_LD  := $(ARCH_DIR)/user_test.ld
+USER_TEST_ELF := $(BUILD_DIR)/user_test.elf
+
+# ============================================================================
 # OBJECT FILES
 # ============================================================================
+
 ASM_OBJECTS := $(patsubst $(ARCH_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
 C_OBJECTS   := $(patsubst $(ARCH_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 OBJECTS     := $(ASM_OBJECTS) $(C_OBJECTS)
@@ -104,7 +136,7 @@ KERNEL_MAP  := $(BUILD_DIR)/kernel.map
 # TARGETS
 # ============================================================================
 
-.PHONY: all run debug clean objdump size
+.PHONY: all run debug clean objdump size user
 
 all: $(KERNEL_IMG)
 	@echo ""
@@ -113,7 +145,15 @@ all: $(KERNEL_IMG)
 	@$(SIZE) $(KERNEL_ELF)
 	@echo ""
 
-# --- Link ELF ---
+# --- Собрать только пользовательский ELF ---
+user: $(USER_TEST_ELF)
+	@echo ""
+	@echo "  ✅ User ELF build complete"
+	@echo "  📦 $(USER_TEST_ELF)"
+	@$(SIZE) $(USER_TEST_ELF)
+	@echo ""
+
+# --- Link kernel ELF ---
 $(KERNEL_ELF): $(OBJECTS) $(ARCH_DIR)/linker_arm.ld
 	@mkdir -p $(BUILD_DIR)
 	$(LD) $(LDFLAGS) -Map=$(KERNEL_MAP) -o $@ $(OBJECTS) $(LIBGCC)
@@ -121,6 +161,17 @@ $(KERNEL_ELF): $(OBJECTS) $(ARCH_DIR)/linker_arm.ld
 # --- ELF → Raw Binary (kernel.img для RPi GPU / QEMU) ---
 $(KERNEL_IMG): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
+
+# ============================================================================
+# ВАЖНО:
+# arm_user_asm.o зависит от user_test.elf, потому что внутри arm_user_asm.S
+# есть .incbin "build/arm/user_test.elf".
+# Поэтому сначала собираем user_test.elf, потом arm_user_asm.o.
+# ============================================================================
+
+$(BUILD_DIR)/arm_user_asm.o: $(ARCH_DIR)/arm_user_asm.S $(USER_TEST_ELF)
+	@mkdir -p $(BUILD_DIR)
+	$(AS) $(ASFLAGS) -c $< -o $@
 
 # --- Compile .S (assembly through gcc preprocessor) ---
 $(BUILD_DIR)/%.o: $(ARCH_DIR)/%.S
@@ -131,6 +182,16 @@ $(BUILD_DIR)/%.o: $(ARCH_DIR)/%.S
 $(BUILD_DIR)/%.o: $(ARCH_DIR)/%.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# --- User test object ---
+$(USER_TEST_OBJ): $(USER_TEST_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(AS) $(USER_ASFLAGS) -c $< -o $@
+
+# --- User test ELF ---
+$(USER_TEST_ELF): $(USER_TEST_OBJ) $(USER_TEST_LD)
+	@mkdir -p $(BUILD_DIR)
+	$(LD) $(USER_LDFLAGS) -Map=$(BUILD_DIR)/user_test.map -o $@ $(USER_TEST_OBJ)
 
 # --- Run in QEMU ---
 run: $(KERNEL_IMG)
