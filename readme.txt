@@ -208,6 +208,9 @@ Metal/
 │       ├── arm_main.c                   # ARM kernel_main, планировщик
 │       ├── arm_syscall.c                # ⭐ ARM SVC dispatcher
 │       ├── arm_user.c                   # Настройка пользовательской памяти
+│       ├── arm_elf.c                    # ⭐ ARM ELF loader (Task 2.4)
+│       ├── arm_user_test.S              # Минимальный user ELF test image
+│       ├── user_test.ld                 # Linker script для user_test.elf
 │       ├── arm_ppm.c                    # ⭐ ARM Physical Memory Manager
 │       ├── arm_vmm.c                    # ⭐ ARM Virtual Memory Manager
 │       └── linker_arm.ld                # LMA 0x10000, VMA 0xC0000000
