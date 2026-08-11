@@ -80,6 +80,80 @@ static int num_tasks = 0;
 static uint32_t user_a_kstack[TASK_STACK_SIZE / 4] __attribute__((aligned(8)));
 static uint32_t user_b_kstack[TASK_STACK_SIZE / 4] __attribute__((aligned(8)));
 
+// Global variables to pass entry point and stack from ELF loader
+uint32_t g_user_entry_point = 0;
+uint32_t g_user_stack_top = 0;
+
+// Модификация функции arm_task_create_user() — теперь принимает entry_point и user_sp как параметры:
+
+static void arm_task_create_user(int id,
+                                 int pid,
+                                 const char *name,
+                                 uint32_t user_pc,
+                                 uint32_t user_sp,
+                                 uint32_t *kstack_base,
+                                 uint32_t kstack_bytes)
+{
+    uint32_t stack_top = (uint32_t)kstack_base + kstack_bytes;
+    stack_top &= ~7u;
+
+    uint32_t *sp = (uint32_t *)stack_top;
+
+    *(--sp) = (uint32_t)arm_user_trampoline;        // lr
+    *(--sp) = ARM_CPSR_SVC_IRQ_DISABLED;            // r12 = CPSR
+    *(--sp) = 0;                                    // r11
+    *(--sp) = 0;                                    // r10
+    *(--sp) = 0;                                    // r9
+    *(--sp) = 0;                                    // r8
+    *(--sp) = 0;                                    // r7
+    *(--sp) = stack_top;                            // r6 = kernel_stack_top
+    *(--sp) = user_sp;                              // r5 = user_stack_top
+    *(--sp) = user_pc;                              // r4 = user_pc
+
+    tasks[id].sp    = (uint32_t)sp;
+    tasks[id].pid   = pid;
+    tasks[id].name  = name;
+    tasks[id].state = TASK_READY;
+}
+
+// В arm_kernel_main(), заменить секцию создания задач:
+
+    // PID 1: user_a (Isolated Enclave)
+    uint32_t space_a = arm_user_create_space_and_load_image();
+    if (space_a == 0) {
+        hal_uart_puts("[FATAL] Failed to load ELF for user_a\r\n");
+        for (;;) hal_halt();
+    }
+    tasks[1].ttbr0_phys = space_a;
+    tasks[1].space_virt = (uint32_t *)PHYS_TO_VIRT(space_a);
+    
+    arm_task_create_user(1,
+                         1,
+                         "user_a",
+                         g_user_entry_point,
+                         g_user_stack_top,
+                         user_a_kstack,
+                         TASK_STACK_SIZE);
+
+    // PID 2: user_b (Isolated Enclave)
+    g_user_entry_point = 0;
+    g_user_stack_top = 0;
+    
+    uint32_t space_b = arm_user_create_space_and_load_image();
+    if (space_b == 0) {
+        hal_uart_puts("[FATAL] Failed to load ELF for user_b\r\n");
+        for (;;) hal_halt();
+    }
+    tasks[2].ttbr0_phys = space_b;
+    tasks[2].space_virt = (uint32_t *)PHYS_TO_VIRT(space_b);
+
+    arm_task_create_user(2,
+                         2,
+                         "user_b",
+                         g_user_entry_point,
+                         g_user_stack_top,
+                         user_b_kstack,
+                         TASK_STACK_SIZE);
 // ============================================================================
 // HELPERS
 // ============================================================================
