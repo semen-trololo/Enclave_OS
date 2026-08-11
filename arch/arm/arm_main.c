@@ -27,6 +27,7 @@
 #include "hal/hal_mmu.h"
 #include "arm_pmm.h"
 #include "arm_vmm.h"
+#include "arm_fb.h"
 
 
 // ============================================================================
@@ -510,6 +511,29 @@ void arm_kernel_main(uint32_t atags_addr, uint32_t machine_type)
     
     // Zero Trust: Tear down identity mapping now that we are in Higher Half.
     arm_vmm_teardown_identity();
+
+        hal_mmu_init();
+    
+    // Zero Trust: Tear down identity mapping now that we are in Higher Half.
+    arm_vmm_teardown_identity();
+
+    // ------------------------------------------------------------------
+    // 1.7 Framebuffer (Day 55 video spike)
+    // ------------------------------------------------------------------
+    // ВАЖНО:
+    //   arm_fb_init() вызывается ДО создания user address spaces,
+    //   чтобы framebuffer mapping в boot TTBR0 был скопирован
+    //   во все будущие user L1 tables через hal_mmu_create_space().
+    // ------------------------------------------------------------------
+
+    if (arm_fb_init() == 0) {
+        arm_fb_test_pattern();
+    } else {
+        hal_uart_puts("[FB] framebuffer unavailable, continuing UART-only\r\n");
+    }
+
+    // ------------------------------------------------------------------
+    // 2. IRQ + Timer init
 
     // ------------------------------------------------------------------
     // 2. IRQ + Timer init
