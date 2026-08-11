@@ -1,22 +1,27 @@
 # ============================================================================
-# Makefile.arm — Enclave OS ARM Build (Raspberry Pi 1, BCM2835, ARM1176JZF-S)
+# Makefile.arm — Enclave OS ARM Build (Raspberry Pi 1 / QEMU raspi1ap)
 # ============================================================================
 # Отдельный Makefile. НЕ трогает x86 сборку (Makefile).
 #
-# Usage:
-#   make -f Makefile.arm          # Собрать kernel.img
-#   make -f Makefile.arm run      # Запустить в QEMU (raspi1ap)
-#   make -f Makefile.arm debug    # QEMU + GDB server
-#   make -f Makefile.arm user     # Собрать только user_test.elf
-#   make -f Makefile.arm clean    # Очистить
+# Основные цели:
+#   make -f Makefile.arm              # Собрать kernel.img
+#   make -f Makefile.arm run          # QEMU headless, UART only
+#   make -f Makefile.arm run-video    # QEMU with GTK framebuffer window
+#   make -f Makefile.arm run-vnc      # QEMU with VNC framebuffer
+#   make -f Makefile.arm debug        # QEMU + GDB server
+#   make -f Makefile.arm user         # Собрать user_test.elf, если включён
+#   make -f Makefile.arm clean        # Очистить
 #
 # Требования:
 #   arm-none-eabi-gcc (>= 10.0)
 #   qemu-system-arm (>= 7.0, машина raspi1ap)
 #
-# Day 54: Task 2.4 — ARM ELF loader integration.
-# Сначала собирается user_test.elf, затем arm_user_asm.o включает его
-# через .incbin в секцию .rodata ядра.
+# Поддержка:
+#   - BCM2835 framebuffer video spike (arm_fb.c)
+#   - Опциональный ELF user_test.elf, если есть:
+#       arch/arm/arm_user_test.S
+#       arch/arm/user_test.ld
+#   - Опциональный arm_elf.c, если он существует.
 # ============================================================================
 
 # --- Toolchain ---
@@ -46,7 +51,7 @@ CFLAGS      += -I$(INCLUDE_DIR)
 CFLAGS      += -DCONFIG_ARCH_ARM=1
 CFLAGS      += -g
 
-# --- Assembler flags (.S files через gcc, не as) ---
+# --- Assembler flags (.S files через gcc preprocessor) ---
 ASFLAGS     := $(CPU_FLAGS)
 ASFLAGS     += -ffreestanding -nostdlib
 ASFLAGS     += -I$(INCLUDE_DIR)
@@ -54,8 +59,7 @@ ASFLAGS     += -DCONFIG_ARCH_ARM=1
 ASFLAGS     += -g
 
 # --- User test assembler flags ---
-# user_test.S — это пользовательский код, не ядро.
-# Поэтому CONFIG_ARCH_ARM здесь не обязателен.
+# Используется только если собирается user_test.elf.
 USER_ASFLAGS := $(CPU_FLAGS)
 USER_ASFLAGS += -ffreestanding -nostdlib
 USER_ASFLAGS += -I$(INCLUDE_DIR)
@@ -75,11 +79,13 @@ USER_LDFLAGS += --gc-sections
 # --- QEMU ---
 QEMU        := qemu-system-arm
 QEMU_MACHINE := raspi1ap
-QEMU_FLAGS  := -M $(QEMU_MACHINE)
-QEMU_FLAGS  += -m 512M
-QEMU_FLAGS  += -serial stdio
-QEMU_FLAGS  += -no-reboot
-QEMU_FLAGS  += -display none
+
+QEMU_FLAGS_BASE := -M $(QEMU_MACHINE)
+QEMU_FLAGS_BASE += -m 512M
+QEMU_FLAGS_BASE += -serial stdio
+QEMU_FLAGS_BASE += -no-reboot
+
+QEMU_FLAGS := $(QEMU_FLAGS_BASE) -display none
 
 # ============================================================================
 # SOURCE FILES
@@ -100,24 +106,26 @@ C_SOURCES := \
 	$(ARCH_DIR)/arm_timer.c \
 	$(ARCH_DIR)/arm_syscall.c \
 	$(ARCH_DIR)/arm_user.c \
-	$(ARCH_DIR)/arm_elf.c
+	$(ARCH_DIR)/arm_fb.c
 
-# --- Будущие файлы (раскомментировать по мере написания) ---
-# C_SOURCES += $(ARCH_DIR)/arm_cpu.c
-# C_SOURCES += $(ARCH_DIR)/arm_mmu.c
-# C_SOURCES += $(ARCH_DIR)/arm_mem.c
+# --- Опциональный ELF loader ---
+# Если файл arm_elf.c существует, он автоматически добавляется в сборку.
+ifneq ($(wildcard $(ARCH_DIR)/arm_elf.c),)
+C_SOURCES += $(ARCH_DIR)/arm_elf.c
+endif
 
-# ============================================================================
-# USER TEST ELF IMAGE
-# ============================================================================
-# Этот ELF собирается отдельно и затем встраивается в ядро через .incbin
-# в arch/arm/arm_user_asm.S.
-# ============================================================================
-
+# --- Опциональный пользовательский ELF test image ---
 USER_TEST_SRC := $(ARCH_DIR)/arm_user_test.S
-USER_TEST_OBJ := $(BUILD_DIR)/arm_user_test.o
 USER_TEST_LD  := $(ARCH_DIR)/user_test.ld
+USER_TEST_OBJ := $(BUILD_DIR)/arm_user_test.o
 USER_TEST_ELF := $(BUILD_DIR)/user_test.elf
+
+BUILD_USER_TEST :=
+ifneq ($(wildcard $(USER_TEST_SRC)),)
+ifneq ($(wildcard $(USER_TEST_LD)),)
+BUILD_USER_TEST := yes
+endif
+endif
 
 # ============================================================================
 # OBJECT FILES
@@ -136,7 +144,7 @@ KERNEL_MAP  := $(BUILD_DIR)/kernel.map
 # TARGETS
 # ============================================================================
 
-.PHONY: all run debug clean objdump size user
+.PHONY: all run run-video run-vnc debug clean objdump size user
 
 all: $(KERNEL_IMG)
 	@echo ""
@@ -145,13 +153,21 @@ all: $(KERNEL_IMG)
 	@$(SIZE) $(KERNEL_ELF)
 	@echo ""
 
-# --- Собрать только пользовательский ELF ---
+# --- User ELF target ---
+ifneq ($(BUILD_USER_TEST),)
 user: $(USER_TEST_ELF)
 	@echo ""
 	@echo "  ✅ User ELF build complete"
 	@echo "  📦 $(USER_TEST_ELF)"
 	@$(SIZE) $(USER_TEST_ELF)
 	@echo ""
+else
+user:
+	@echo ""
+	@echo "  ⚠️  user_test.S / user_test.ld not found"
+	@echo "  ⚠️  ELF user image build disabled"
+	@echo ""
+endif
 
 # --- Link kernel ELF ---
 $(KERNEL_ELF): $(OBJECTS) $(ARCH_DIR)/linker_arm.ld
@@ -163,15 +179,34 @@ $(KERNEL_IMG): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
 # ============================================================================
-# ВАЖНО:
-# arm_user_asm.o зависит от user_test.elf, потому что внутри arm_user_asm.S
-# есть .incbin "build/arm/user_test.elf".
-# Поэтому сначала собираем user_test.elf, потом arm_user_asm.o.
+# OPTIONAL USER TEST ELF BUILD
 # ============================================================================
+# Если существуют arm_user_test.S и user_test.ld, Makefile собирает
+# build/arm/user_test.elf и делает arm_user_asm.o зависимым от него.
+#
+# Это нужно, если arm_user_asm.S содержит:
+#   .incbin "build/arm/user_test.elf"
+# ============================================================================
+
+ifneq ($(BUILD_USER_TEST),)
 
 $(BUILD_DIR)/arm_user_asm.o: $(ARCH_DIR)/arm_user_asm.S $(USER_TEST_ELF)
 	@mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) -c $< -o $@
+
+$(USER_TEST_OBJ): $(USER_TEST_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(AS) $(USER_ASFLAGS) -c $< -o $@
+
+$(USER_TEST_ELF): $(USER_TEST_OBJ) $(USER_TEST_LD)
+	@mkdir -p $(BUILD_DIR)
+	$(LD) $(USER_LDFLAGS) -Map=$(BUILD_DIR)/user_test.map -o $@ $(USER_TEST_OBJ)
+
+endif
+
+# ============================================================================
+# GENERIC COMPILE RULES
+# ============================================================================
 
 # --- Compile .S (assembly through gcc preprocessor) ---
 $(BUILD_DIR)/%.o: $(ARCH_DIR)/%.S
@@ -183,22 +218,32 @@ $(BUILD_DIR)/%.o: $(ARCH_DIR)/%.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# --- User test object ---
-$(USER_TEST_OBJ): $(USER_TEST_SRC)
-	@mkdir -p $(BUILD_DIR)
-	$(AS) $(USER_ASFLAGS) -c $< -o $@
+# ============================================================================
+# RUN / DEBUG
+# ============================================================================
 
-# --- User test ELF ---
-$(USER_TEST_ELF): $(USER_TEST_OBJ) $(USER_TEST_LD)
-	@mkdir -p $(BUILD_DIR)
-	$(LD) $(USER_LDFLAGS) -Map=$(BUILD_DIR)/user_test.map -o $@ $(USER_TEST_OBJ)
-
-# --- Run in QEMU ---
+# --- Run in QEMU (headless, UART only) ---
 run: $(KERNEL_IMG)
-	@echo "  🚀 Starting QEMU ($(QEMU_MACHINE))..."
+	@echo "  🚀 Starting QEMU ($(QEMU_MACHINE), headless)..."
 	@echo "  📡 UART: stdio"
 	@echo ""
 	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_IMG)
+
+# --- Run in QEMU with GTK video window ---
+run-video: $(KERNEL_IMG)
+	@echo "  🚀 Starting QEMU ($(QEMU_MACHINE), GTK video)..."
+	@echo "  📡 UART: stdio"
+	@echo "  🖥️  Display: GTK"
+	@echo ""
+	$(QEMU) $(QEMU_FLAGS_BASE) -kernel $(KERNEL_IMG) -display gtk
+
+# --- Run in QEMU with VNC video ---
+run-vnc: $(KERNEL_IMG)
+	@echo "  🚀 Starting QEMU ($(QEMU_MACHINE), VNC video)..."
+	@echo "  📡 UART: stdio"
+	@echo "  🖥️  Display: VNC :0 (localhost:5900)"
+	@echo ""
+	$(QEMU) $(QEMU_FLAGS_BASE) -kernel $(KERNEL_IMG) -display vnc=:0
 
 # --- Debug: QEMU + GDB ---
 debug: $(KERNEL_IMG)
